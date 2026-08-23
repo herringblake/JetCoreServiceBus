@@ -485,3 +485,21 @@ Locked in as Decision #15. Design.md now has all 15 decisions resolved — the o
 
 The design is in a solid state to build from whenever you're ready to move into Phase 1 (NATS/JWT infra + the gsb-core library). Let me know if you want to review or adjust anything else, or start scoping Phase 1 in more detail.
 
+-------------------------------------------
+
+Lets start scoping out phase 1 and break it into manageable steps.
+Let's break Phase 1 into two tracks that can mostly run in parallel — infra/auth setup, and the gsb-core library — converging at the end for an integration proof. I'll add this as a new section in Design.md so it stays part of the living document.
+
+Edit Design.md
+Added 39 lines
+I've added §11 to Design.md with Phase 1 broken into two parallel tracks:
+
+Track A — NATS/JetStream Infrastructure (A1–A7): pin tooling → define an adapter identity manifest (the one source of truth for who's allowed to say what) → bootstrap script for Operator/Account/User JWTs → nats-server.conf → bootstrap the EVENTS stream + service-directory KV bucket → infra-only docker-compose → manual smoke test with the nats CLI.
+
+Track B — gsb-core library (B1–B7): package scaffold → envelope models → crypto (encryption + signing) → config loader → registry client → BusClient façade → an end-to-end proof test (two fake adapters exchanging a signed+encrypted event).
+
+B1–B4 are pure logic and can start immediately, in parallel with Track A. B5–B7 need a running, bootstrapped NATS (A6) to build against. A7 and B7 together are the exit criteria for Phase 1 — once both pass, Phase 2's vertical slice can begin.
+
+I also surfaced four implementation parameters this breakdown assumes (KV TTL = 60s, heartbeat = 20s, memory-based JWT resolver, and — importantly — that nsc key material is never committed, only regenerated via a bootstrap script) with rationale, in case any should change before you start on this.
+
+Want me to adjust the sequencing, split any of these steps further, or is this granular enough to start working from?
