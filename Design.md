@@ -391,7 +391,7 @@ Phase 1 (§10) splits into two tracks that can largely proceed in parallel, conv
 
 ### Track A — NATS / JetStream Infrastructure
 
-- [ ] **A1. Toolchain pin** — decide/pin `nats-server` and `nsc` versions for the project; document install steps.
+- [x] **A1. Toolchain pin** — `nats-server` 2.14.5 and `nats-box` 0.19.7-nonroot (bundles `nsc` + `nats` CLI), both Docker images only — nothing installed natively on the host; persistent `nsc` state is a volume-mapped local path. Documented in [infra/nats/README.md](infra/nats/README.md); pins also recorded in [Dependencies.md](Dependencies.md).
 - [ ] **A2. Adapter identity manifest** — a declarative list (one entry per adapter: `serviceId`, publish/subscribe subject allow-list) that later steps and the bootstrap script read from. This is the single source of truth for "who's allowed to say what."
 - [ ] **A3. Bootstrap script (auth)** — idempotent script that drives `nsc` to create the Operator, the `GSB` Account, and one User (nkey + JWT) per entry in A2's manifest, then emits the memory-resolver config block.
 - [ ] **A4. `nats-server.conf`** — JetStream enabled (storage dir/mode for dev), wired to the resolver config from A3.

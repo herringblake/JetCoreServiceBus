@@ -55,8 +55,8 @@ Companion to [Design.md](Design.md) — satisfies [DevelopmentGuidelines.md](Dev
 
 | Dependency | Source | Version | Purpose | Security Vetting Notes | Last Reviewed |
 |---|---|---|---|---|---|
-| NATS Server (JetStream) | [nats.io](https://nats.io) / [GitHub](https://github.com/nats-io/nats-server) | *pin at adoption* | The message bus itself. | Official, CNCF-hosted project; core to the whole design (§3–§6). | 2026-08-23 |
-| `nsc` CLI | [GitHub](https://github.com/nats-io/nsc) | *pin at adoption* | Issues Operator/Account/User JWTs for decentralized auth (§4.2, §11 Track A). | Official `nats-io` tooling. | 2026-08-23 |
+| NATS Server (JetStream) | [nats.io](https://nats.io) / [GitHub](https://github.com/nats-io/nats-server/releases) | **2.14.5** (released 2026-08-12), via Docker image `nats:2.14.5` — no native install | The message bus itself. | Official, CNCF-hosted project; core to the whole design (§3–§6). Pinned in [infra/nats/README.md](infra/nats/README.md) (Phase 1, Step A1). | 2026-08-23 |
+| `nats-box` (bundles `nsc` + `nats` CLI + `nkeys` + `nats-top`) | [GitHub](https://github.com/nats-io/nats-box) / [Docker Hub](https://hub.docker.com/r/natsio/nats-box/tags) | **0.19.7-nonroot**, via Docker image `natsio/nats-box:0.19.7-nonroot` — no native install | Issues Operator/Account/User JWTs for decentralized auth (§4.2, §11 Track A3), and provides the `nats` CLI for manual smoke testing (§11 Step A7). Persistent `nsc` state is a volume mount, not host-installed state. | Official `nats-io` utilities image. `-nonroot` variant used deliberately (least privilege). Bundled tool versions aren't independently pinned by us — see [infra/nats/README.md](infra/nats/README.md) for how to check them. | 2026-08-23 |
 | MySQL | [mysql.com](https://www.mysql.com/) | *pin at adoption* | Database Adapter's backing store; binlog source for CDC. | Industry-standard RDBMS. | 2026-08-23 |
 | Docker / Docker Compose | [docker.com](https://www.docker.com/) | *pin at adoption* | Local deployment/dev environment (§10 Phase 5). | Industry-standard containerization. | 2026-08-23 |
 

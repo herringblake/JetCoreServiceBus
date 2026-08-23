@@ -722,3 +722,245 @@ DevelopmentGuidelines.md — now satisfied by the above.
 Everything's still design-only, nothing built. When you're ready to start Phase 1 (Track A infra bootstrap or Track B gsb-core scaffold), just say the word — otherwise I'll wait here.
 
 --------------------------
+
+Let's proceed with step A1.
+Let me pin these to real, current versions rather than guess.
+
+Web Searchnats-server latest release GitHub 2026
+OUT
+Web search results for query: "nats-server latest release GitHub 2026"
+
+Links: [{"title":"Releases · cloudfoundry/nats-release","url":"https://github.com/cloudfoundry/nats-release/releases"},{"title":"Releases · nats-io/nats-account-server","url":"https://github.com/nats-io/nats-account-server/releases"},{"title":"nats-server-bin · PyPI","url":"https://pypi.org/project/nats-server-bin/"},{"title":"NATS Messaging","url":"https://en.wikipedia.org/wiki/NATS_Messaging"},{"title":"Releases · nats-io/nats-surveyor","url":"https://github.com/nats-io/nats-surveyor/releases"},{"title":"Releases · nats-io/nats-server","url":"https://github.com/nats-io/nats-server/releases"},{"title":"NATS - The Edge & Cloud Native Messaging System · GitHub","url":"https://github.com/nats-io"},{"title":"NATS.io – Cloud Native, Open Source, High-performance Messaging","url":"https://nats.io/download/"},{"title":"Natron (software)","url":"https://en.wikipedia.org/wiki/Natron_(software)"}]
+
+Based on the search results, here's what I found about the latest nats-server release on GitHub in 2026:
+
+The latest nats-server release is version 2.14.5, which was released on August 12, 2026 (2026-08-12T15:14:36Z). The release includes various platform-specific builds including deb and rpm packages for different architectures (386, amd64, arm6, arm64).
+
+You can find the official releases page at the GitHub repository: https://github.com/nats-io/nats-server/releases
+
+
+REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.
+Web Searchnats-io nsc latest release GitHub
+OUT
+Web search results for query: "nats-io nsc latest release GitHub"
+
+Links: [{"title":"GitHub - nats-io/nsc: Tool for creating nkey/jwt based configurations · GitHub","url":"https://github.com/nats-io/nsc"},{"title":"nsc/README.md at main · nats-io/nsc","url":"https://github.com/nats-io/nsc/blob/main/README.md"},{"title":"Release v2.12.0 · nats-io/nsc","url":"https://github.com/nats-io/nsc/releases/tag/v2.12.0"},{"title":"Releases · nats-io/nsc","url":"https://github.com/nats-io/nsc/releases"},{"title":"nsc | NATS Docs","url":"https://docs.nats.io/using-nats/nats-tools/nsc"},{"title":"nats.docs/using-nats/nats-tools/nsc/README.md at master · nats-io/nats.docs","url":"https://github.com/nats-io/nats.docs/blob/master/using-nats/nats-tools/nsc/README.md"},{"title":"Releases · nats-io/natscli","url":"https://github.com/nats-io/natscli/releases/"},{"title":"NATS Messaging","url":"https://en.wikipedia.org/wiki/NATS_Messaging"},{"title":"NSC client tool release · Workflow runs · nats-io/nsc","url":"https://github.com/nats-io/nsc/actions/workflows/release.yaml"},{"title":"nsc/release at main · nats-io/nsc","url":"https://github.com/nats-io/nsc/tree/main/release"}]
+
+Based on the search results, I found information about the nats-io nsc latest release on GitHub:
+
+The latest release of nsc is v2.15.0, released on June 2. This version includes adding --tlsfirst as a hidden alias for --tls-first and bumped dependencies.
+
+You can find the full releases page at: https://github.com/nats-io/nsc/releases
+
+
+REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.
+Web Searchnats-io natscli nats CLI latest release GitHub
+OUT
+Web search results for query: "nats-io natscli nats CLI latest release GitHub"
+
+Links: [{"title":"nats-io/natscli v0.3.1 on GitHub","url":"https://newreleases.io/project/github/nats-io/natscli/release/v0.3.1"},{"title":"GitHub - nats-io/natscli: The NATS Command Line Interface","url":"https://github.com/nats-io/natscli?tab=readme-ov-file"},{"title":"GitHub - nats-io/natscli: The NATS Command Line Interface · GitHub","url":"https://github.com/nats-io/natscli"},{"title":"nats-io/natscli v0.1.0 on GitHub","url":"https://newreleases.io/project/github/nats-io/natscli/release/v0.1.0"},{"title":"natscli/ at main · nats-io/natscli","url":"https://github.com/nats-io/natscli?search=1"},{"title":"natscli module - github.com/nats-io/natscli - Go Packages","url":"https://pkg.go.dev/github.com/nats-io/natscli"},{"title":"GitHub - plejd/nats-io-natscli: The NATS Command Line Interface · GitHub","url":"https://github.com/plejd/nats-io-natscli"},{"title":"Releases · nats-io/natscli","url":"https://github.com/nats-io/natscli/releases/"},{"title":"Release Release 0.0.31 · nats-io/natscli","url":"https://github.com/nats-io/natscli/releases/tag/v0.0.31"},{"title":"Installing nats - NATS Docs","url":"https://docs.nats.io/using-nats/nats-tools/nats_cli"}]
+
+Based on the search results, here's what I found about the NATS CLI latest release:
+
+## Latest Release Information
+
+The latest release of nats-io/natscli is version 0.4.0, released on May 1st.
+
+## Installation Options
+
+You can install the NATS CLI via go install with `go install github.com/nats-io/natscli/nats@latest`, or use Homebrew on macOS with `brew install nats`, or on Windows with scoop using `scoop bucket add extras` followed by `scoop install extras/natscli`.
+
+## Release Details
+
+The search results indicate there's a full changelog available on GitHub. Releases are published to GitHub where Zip, RPMs and DEBs for various operating systems can be found.
+
+You can access the full release details and all releases at:
+- GitHub Releases page: https://github.com/nats-io/natscli/releases/
+- Main repository: https://github.com/nats-io/natscli
+
+
+REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.
+Bash Create infra/nats directory
+IN
+mkdir -p /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats
+
+OUT
+(Bash completed with no output)
+Write README.md
+51 lines
+# NATS Toolchain — Phase 1, Step A1
+
+Companion to [Design.md §11](../../Design.md#11-phase-1--detailed-breakdown) (Track A) and [Dependencies.md](../../Dependencies.md), which is the source of truth for these pins going forward.
+
+## Pinned versions
+
+| Tool | Version | Released | How it's used here |
+|---|---|---|---|
+| `nats-server` | **2.14.5** | 2026-08-12 | Consumed via the official Docker image (`nats:2.14.5`), pinned in `docker-compose.yml` (§11 Track A6) — **not installed locally**. |
+| `nsc` | **2.15.0** | 2026-06-02 (year not explicit in source snippet at time of research — verify against the [releases page](https://github.com/nats-io/nsc/releases) if it matters) | Installed locally; drives the bootstrap script (A3) that issues the Operator/Account/User JWTs. |
+| `nats` CLI (`natscli`) | **0.4.0** | 2026-05-01 (same caveat as above) | Installed locally; used for the manual smoke test (A7) — pub/sub, stream/KV inspection. |
+
+Re-verify these against the linked release pages before pinning `docker-compose.yml` (A6) or the bootstrap script (A3) — NATS ships frequently.
+
+## Local install (dev machine — Linux)
+
+`nsc` and the `nats` CLI are dev-time tools; install them on your host. `nats-server` itself is **not** installed here — it only runs via the pinned Docker image (A6), so there's nothing to install locally for it.
+
+Both tools are distributed through NATS's official install shim, which fetches the pinned version directly from GitHub releases:
+
+```bash
+# nsc — account/JWT management
+curl -sf https://binaries.nats.dev/nats-io/nsc/v2@v2.15.0 | sh
+
+# nats CLI — pub/sub, stream/KV inspection, used in the A7 smoke test
+curl -sf https://binaries.nats.dev/nats-io/natscli/nats@v0.4.0 | sh
+```
+
+Both drop a single binary (`nsc`, `nats`) — the script prompts for (or accepts a flag for) an install directory; make sure it lands somewhere on `$PATH`.
+
+Verify:
+
+```bash
+nsc --version
+nats --version
+```
+
+## Docker image (nats-server)
+
+Referenced here for the record; actually wired into `docker-compose.yml` in step A6:
+
+```
+image: nats:2.14.5
+```
+
+(An `-alpine` variant exists for a smaller image if that matters later — not required for local dev.)
+
+## Not yet done
+
+This step only pins versions and documents install steps. It does **not** install anything automatically, create the Operator/Account (A3), write `nats-server.conf` (A4), or start any container (A6) — those are separate steps in [Design.md §11](../../Design.md#11-phase-1--detailed-breakdown).
+Now update the Dependencies.md infrastructure table with real pins, and mark A1 done in Design.md:
+
+Edit Dependencies.md
+Added 1 line
+Edit Design.md
+Modified
+A1 done. Pinned versions (via web search against current GitHub releases, not guessed):
+
+Tool	Version	Notes
+nats-server	2.14.5 (2026-08-12)	Docker image only — not installed locally, since it always runs via docker-compose (A6)
+nsc	2.15.0	Installed locally, drives the JWT bootstrap (A3)
+nats CLI	0.4.0	Installed locally, used for the A7 smoke test
+Files touched:
+
+infra/nats/README.md (new) — the pin table plus copy-pasteable install commands (both nsc and nats install via NATS's official binaries.nats.dev shim, pinned to exact versions rather than @latest).
+Dependencies.md — infrastructure table updated with real versions/dates/sources; added the nats CLI as its own tracked row (it wasn't listed before).
+Design.md §11 — A1 checked off.
+One honesty note: the release dates for nsc (2026-06-02) and nats CLI (2026-05-01) came from search snippets that didn't spell out the year explicitly — I inferred 2026 from context but flagged it as unverified in the README rather than stating it as fact. Worth a 10-second glance at the actual GitHub releases pages before this matters (e.g. right before A3/A6 lock in docker-compose.yml).
+
+Ready for A2 (the adapter identity manifest) whenever you want to continue.
+
+README.md
+One point of correction. There is no need to install nats natively for development. This host has docker installed, so docker images can be used for development. If persistent data is needed, configure a volume that's mapped to a local path
+Web Searchnats-box docker image nats-io nsc nats CLI bundled
+OUT
+Web search results for query: "nats-box docker image nats-io nsc nats CLI bundled"
+
+Links: [{"title":"GitHub - nats-io/nats-box: A container with NATS utilities · GitHub","url":"https://github.com/nats-io/nats-box"},{"title":"GitHub - nats-io/nsc: Tool for creating nkey/jwt based configurations · GitHub","url":"https://github.com/nats-io/nsc"},{"title":"nats-box/Dockerfile at main · nats-io/nats-box","url":"https://github.com/nats-io/nats-box/blob/main/Dockerfile"},{"title":"Nats","url":"https://docs.nats.io/running-a-nats-service/nats_docker.md"},{"title":"Hardened Images catalog | NATS Box | Guides | Docker Hub","url":"https://hub.docker.com/hardened-images/catalog/dhi/nats-box/guides"},{"title":"nsc command - github.com/nats-io/nsc - Go Packages","url":"https://pkg.go.dev/github.com/nats-io/nsc"},{"title":"GitHub - nats-io/nats-docker: Official Docker image for the NATS server · GitHub","url":"https://github.com/nats-io/nats-docker"},{"title":"nats - Official Image | Docker Hub","url":"https://hub.docker.com/_/nats"},{"title":"hub.docker.com","url":"https://hub.docker.com/r/arulrajnet/nats-cli-eval/tags"}]
+
+Based on the search results, here's what I found about the nats-box Docker image:
+
+The NATS team maintains a lightweight Docker image with many of the NATS utilities called nats-box where nsc is included.
+
+The nats-box Docker image is available as `natsio/nats-box` from Docker Hub. The Dockerfile installs several NATS utilities including nsc (NATS Secure Configuration tool), nats-top, the nats CLI, and nkeys.
+
+Some common use cases include:
+
+1. **Running NATS commands**: You can use the image to run NATS pub/sub commands like `nats pub` and `nats sub` against NATS servers.
+
+2. **Working with NSC**: You can mount a local volume to manage nsc accounts and nkeys configuration, and run commands like `nsc init` to initialize NSC within the container.
+
+3. **Interactive usage**: The image can be run interactively to execute commands or can be deployed in Kubernetes using kubectl.
+
+The image is built as a multi-stage Docker build that compiles these Go-based utilities from source before creating the final lightweight image.
+
+
+REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.
+Web Searchnats-io/nats-box releases tags docker hub natsio/nats-box tag version
+OUT
+Web search results for query: "nats-io/nats-box releases tags docker hub natsio/nats-box tag version"
+
+Links: [{"title":"Release v0.8.1 · nats-io/nats-box","url":"https://github.com/nats-io/nats-box/releases/tag/v0.8.1"},{"title":"Releases · nats-io/nats-box","url":"https://github.com/nats-io/nats-box/releases"},{"title":"GitHub - nats-io/nats-docker: Official Docker image for the NATS server · GitHub","url":"https://github.com/nats-io/nats-docker"},{"title":"natsio/nats-box - Docker Image","url":"https://hub.docker.com/r/natsio/nats-box/tags"},{"title":"GitHub - nats-io/nats-box: A container with NATS utilities · GitHub","url":"https://github.com/nats-io/nats-box"},{"title":"Tags · nats-io/nats-box","url":"https://github.com/nats-io/nats-box/tags"},{"title":"nats Tags | Docker Hub","url":"https://hub.docker.com/_/nats/tags"},{"title":"nats - Official Image | Docker Hub","url":"https://hub.docker.com/_/nats"},{"title":"NATS and Docker - NATS Docs","url":"https://docs.nats.io/running-a-nats-service/nats_docker"},{"title":"hub.docker.com","url":"https://hub.docker.com/r/gr8ninja/nats-box/tags"}]
+
+Based on the search results, I found information about the nats-box releases and Docker Hub tags:
+
+## GitHub Releases
+
+The latest release shown is v0.8.1, which can be pulled with `docker pull natsio/nats-box:0.8.1`. Releases are created using annotated tags like "v0.19.0" with git tag command, and GitHub workflows handle the rest.
+
+## Docker Hub Tags
+
+The natsio/nats-box Docker Hub repository has several available tags including 0.19.7-nonroot, 0.19.7, nonroot, and latest, with the most recent pushed 2 months ago.
+
+For the complete list of available releases and tags, you can visit:
+- **GitHub Releases**: https://github.com/nats-io/nats-box/releases
+- **Docker Hub Tags**: https://hub.docker.com/r/natsio/nats-box/tags
+
+
+REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.
+Good catch — and there's an even better fit than plain host installs: NATS ships an official nats-box image that bundles nsc + the nats CLI (+ nkeys, nats-top) together, so neither needs a native install either. Let me verify the current pin and rewrite this properly.
+
+Write README.md
+36 lines
+# NATS Toolchain — Phase 1, Step A1
+
+Companion to [Design.md §11](../../Design.md#11-phase-1--detailed-breakdown) (Track A) and [Dependencies.md](../../Dependencies.md), which is the source of truth for these pins going forward.
+
+**Nothing here is installed natively on the host.** This dev machine has Docker, so every NATS tool — the server itself, `nsc`, and the `nats` CLI — runs as a container. Anything that needs to persist (the `nsc`-managed Operator/Account/User store) is a volume mapped to a local path, not host-installed state.
+
+## Pinned versions
+
+| Tool | Image | Purpose |
+|---|---|---|
+| `nats-server` | `nats:2.14.5` (released 2026-08-12) | The message bus. Run via `docker-compose` (§11 Track A6). |
+| `nsc` + `nats` CLI | `natsio/nats-box:0.19.7-nonroot` | Bundles `nsc` (JWT/account management, drives bootstrap step A3) and the `nats` CLI (pub/sub, stream/KV inspection, used in the smoke test A7) in one official NATS utilities image. `-nonroot` variant preferred — least-privilege container by default. |
+
+Both are pinned to specific tags rather than `latest`, for the same reproducibility reason as everything else in [Dependencies.md](../../Dependencies.md). The `nsc`/`nats` CLI *tool* versions bundled inside a given `nats-box` release aren't independently pinned by us — if that precision matters later, `docker run natsio/nats-box:0.19.7-nonroot nsc --version` (and `nats --version`) confirms exactly what's inside. Re-verify all tags against their release pages before wiring `docker-compose.yml` (A6) or the bootstrap script (A3) — NATS ships frequently.
+
+- `nats-server` releases: https://github.com/nats-io/nats-server/releases
+- `nats-box` releases / tags: https://github.com/nats-io/nats-box/releases · https://hub.docker.com/r/natsio/nats-box/tags
+
+## Running `nsc` / `nats` CLI via Docker
+
+No local binary to install. General pattern:
+
+```bash
+docker run --rm -it \
+  -v "$(pwd)/infra/nats/operator:/nsc" \
+  natsio/nats-box:0.19.7-nonroot \
+  nsc --version
+```
+
+- `-v "$(pwd)/infra/nats/operator:/nsc"` — persists `nsc`'s Operator/Account/User store (nkeys + JWTs) to a local path instead of leaving it inside the ephemeral container. This is the same `infra/nats/operator/` directory called out as git-ignored in [Design.md §11](../../Design.md#11-phase-1--detailed-breakdown)'s parameter table — nothing containing key material gets committed. **Confirm the exact in-container path `nats-box` expects (`NSC_HOME`/`HOME`-derived) against its docs/entrypoint when actually running `nsc init` in step A3** — `/nsc` above is a placeholder until that's verified, not yet confirmed correct.
+- Once A6 stands up the `docker-compose` network, run this container with `--network <compose network name>` so it can reach the `nats` service by its compose service name for the A7 smoke test, instead of a host port.
+
+## Not yet done
+
+This step only pins versions and documents how they're run. It does **not** install/run anything persistent, create the Operator/Account (A3), write `nats-server.conf` (A4), or start any container (A6) — those are separate steps in [Design.md §11](../../Design.md#11-phase-1--detailed-breakdown).
+Now update Dependencies.md and Design.md to match:
+
+Edit Dependencies.md
+Removed 1 line
+Edit Design.md
+Modified
+Corrected. Better fit than I originally had — NATS ships an official nats-box image (natsio/nats-box) that bundles nsc and the nats CLI together specifically for this "no native install" use case, so I used that rather than two separate host installs.
+
+Changes:
+
+infra/nats/README.md — rewritten. nats-server runs via nats:2.14.5 (as before), and nsc/nats CLI now run via natsio/nats-box:0.19.7-nonroot (the -nonroot variant, for least-privilege by default). Persistent nsc state (Operator/Account/User keys+JWTs) is a -v volume mount to infra/nats/operator/ on the host — that directory stays git-ignored per the existing plan, only the mount changed, not the "don't commit key material" decision.
+Dependencies.md — infra table updated to reflect both tools as Docker-only, no native install.
+Design.md §11 — A1 checklist entry updated.
+One thing I flagged rather than asserted as fact: I don't have the exact in-container path nats-box expects for persistent nsc state confirmed (used /nsc as a placeholder) — the README calls that out explicitly to verify against the image's docs/entrypoint when A3 actually runs nsc init, rather than silently guessing.
+
+Ready for A2 (adapter identity manifest) when you are.
+
+---------------- Step A1 --------------------------
