@@ -1,6 +1,6 @@
 # Gregor's Service Bus — Design Document
 
-Status: Draft v0.1 — companion to [Design_Notes.md](Design_Notes.md)
+Status: Draft v0.2 — companion to [Design_Notes.md](Design_Notes.md)
 Date: 2026-08-22
 Scope: **Design only.** No implementation yet.
 
@@ -33,6 +33,17 @@ This document expands the original design notes into a concrete architecture, re
 | 2 | Where does the "who is allowed to decrypt subject X" directory live? | **JetStream KV bucket** (`service-directory`) — reuses NATS infrastructure, no new datastore. |
 | 3 | Is adapter-level "PII encryption" a separate mechanism from payload encryption? | **No — same mechanism.** Whole-payload public-key encryption covers PII; no separate field-level scheme in v1. |
 | 4 | Should NATS subscribe permissions be wide open ("any connected adapter sees everything") or restricted per adapter? | **Restricted per adapter.** Each adapter gets an explicit subject allow-list. Encryption remains the confidentiality boundary regardless of what an adapter is permitted to subscribe to; permissions add defense-in-depth and reduce blast radius / noise. This is a deliberate refinement of the original notes' "open bus" framing — see §4.4. |
+| 5 | Should events be signed for authenticity independent of transport? | **Yes** — the sender signs a digest of the plaintext with its nkey (Ed25519); the signature travels in the envelope (§4.1, §5). |
+| 6 | Static NATS config or decentralized JWT for adapter onboarding? | **Decentralized JWT (`nsc`)** — adapters are provisioned/deprovisioned by issuing/revoking a User JWT, no server config edit or reload needed (§4.2, §4.4). |
+| 7 | Registry entry lifecycle? | **TTL/heartbeat** — adapters refresh their own KV entry on a heartbeat; a dead adapter's key ages out automatically (§4.5). |
+| 8 | Target Python version? | **3.12** — using the `uuid6` package for UUIDv7 (stdlib support arrives in 3.14) (§7.2). |
+| 9 | `EVENTS` stream retention? | **7 days** age limit, plus a size cap as backstop (§6). |
+| 10 | Database Adapter directionality? | **Bidirectional in v1** — write path (bus → MySQL) plus a CDC read path (MySQL → bus) via binlog streaming (§8). |
+| 11 | File Storage Adapter shape? | **Command-driven CRUD** (list/read/write/delete triggered by bus commands), not a passive archival sink; filesystem-change → bus events deferred (§8). |
+| 12 | Webhook Sender delivery guarantee? | **Best-effort** — single attempt, no retry/backoff (§8). |
+| 13 | CI platform? | **GitHub Actions** (§7.4, §10). |
+| 14 | Subject naming / bounded contexts? | **Placeholder pattern retained** — `events.<context>.<EventType>` with `orders` as a stand-in; real domain names to be supplied later (§5). |
+| 15 | CDC approach for the Database Adapter? | **Lightweight** — `python-mysql-replication` tails the binlog in-process; no Debezium/Kafka Connect for now (§8, §9). |
 
 ---
 
@@ -96,14 +107,19 @@ A service participating in the bus holds **two distinct keypairs**, used for two
 
 This mirrors "public key for access similar to SSH" (nkey) plus "payload encrypted for all public keys allowed to receive data" (encryption keypair) as two independent mechanisms — connecting to the bus and being able to *read a given message* are not the same permission.
 
-**Open Question:** Do we also want each message *signed* by the sender's nkey (a digest of the plaintext, signed before encryption) so a recipient can verify authenticity/integrity independent of transport trust? Recommended: yes, cheap to add, worth it for a bus explicitly designed to be traversed by untrusted-ish intermediaries. Proposed as `eventDetails.signature` in §5.
+**Decision:** Yes — every event is signed. The publisher signs a digest of the plaintext payload with its nkey before encrypting; the signature travels in `eventDetails.signature` (§5), so any recipient can verify authenticity/integrity independent of transport trust, even though the payload itself is only readable by entitled recipients.
 
-### 4.2 Connection authentication (nkeys)
+### 4.2 Connection authentication (nkeys + decentralized JWT)
 
 - Each adapter is provisioned an nkey seed (Ed25519 keypair) at deploy time (analogous to an SSH key pair).
-- The adapter's *public* nkey is registered with the NATS server config (or a JWT resolver, later — see §4.5) — analogous to adding a key to `authorized_keys`.
-- On connect, NATS sends a nonce; the client signs it with the private nkey; the server verifies against the registered public nkey. No secret ever crosses the wire.
-- This is 100% built into NATS — no custom auth service needed for v1.
+- Rather than listing keys statically in `nats-server.conf`, the bus uses NATS's **decentralized JWT auth**, managed via the `nsc` CLI:
+  - An **Operator** identity represents the bus itself.
+  - An **Account** groups related adapters (a single `GSB` account is enough for v1 — subject permissions are still applied per-user within it).
+  - Each adapter gets its own **User JWT**, signed by the account, embedding its nkey identity *and* its subject permissions (publish/subscribe allow-list, per Decision #4).
+  - The NATS server is configured with a JWT **resolver** (a directory of issued JWTs, or a small resolver service) instead of a static authorization block.
+- On connect, NATS sends a nonce; the adapter signs it with its private nkey and presents its User JWT; the server verifies the signature and reads permissions straight out of the JWT claims. No secret ever crosses the wire.
+- Provisioning/deprovisioning an adapter is now an `nsc` operation (issue or revoke a User JWT) — **no server config edit or reload needed**, which is the point of choosing this over static config.
+- Still 100% built into NATS tooling — no custom auth service to build.
 
 ### 4.3 Payload confidentiality (hybrid / envelope encryption)
 
@@ -142,7 +158,7 @@ Per Decision #4, each adapter's NATS identity is granted an explicit `subscribe`
 
 A message an adapter is permitted to subscribe to but not entitled to decrypt is still meaningless noise to it — metadata only. This satisfies the spirit of the original "open bus, encrypted payload" framing while adding least-privilege at the transport layer too.
 
-**Open Question:** Permission assignment mechanism for v1 — static `nats-server.conf` authorization block (per-nkey subject permissions, reloaded on adapter add/remove) is the simplest option and is what's assumed below. If dynamic onboarding (adapters added/removed without a server config reload) turns out to matter operationally, we should move to NATS's decentralized JWT auth (`nsc`/account resolver) instead. Flagging as a v2 candidate, not designing it in detail now.
+**Decision:** Permission assignment happens via the decentralized JWT mechanism in §4.2 — each adapter's User JWT embeds its subject allow-list directly, so onboarding and permission changes don't require a NATS server restart or config reload.
 
 ### 4.5 Registry / recipient directory (JetStream KV)
 
@@ -161,14 +177,14 @@ sequenceDiagram
   participant KV as service-directory (KV)
 
   Adm->>Ad: Provision nkey seed + X25519 keypair
-  Ad->>NS: Connect (nkey signs server-issued nonce)
-  NS-->>Ad: Authenticated, permissions applied
+  Ad->>NS: Connect (nkey signs server-issued nonce, presents User JWT)
+  NS-->>Ad: Authenticated, permissions applied from JWT claims
   Ad->>KV: PUT events.orders.OrderCreated.file-storage-01 = {encryptionPublicKey, adapterType, ...}
   KV-->>Ad: Ack
   Note over Ad,KV: Other adapters watch this bucket to discover recipients
 ```
 
-**Open Question:** Should registry entries expire (TTL / heartbeat) so a decommissioned adapter's stale public key naturally drops out of the recipient list, or is registration purely explicit (add/remove via deploy tooling)? Recommend TTL-based KV entries refreshed on adapter startup/heartbeat, so a dead adapter silently stops receiving new-message encryption after its TTL lapses — but this needs a decision.
+**Decision:** Registry entries use JetStream KV's native per-key TTL. Each adapter refreshes its own entry on a heartbeat interval (shorter than the TTL); if the adapter stops heartbeating, its entry expires and it silently drops out of the recipient list for new messages — no manual deregistration step needed for the common "adapter died" case. Explicit deregistration via the `tools/` CLI remains available for deliberate decommissioning.
 
 ---
 
@@ -186,7 +202,7 @@ Baseline schema (extends the shape from the design notes):
       "eventSchemaVersion": "1.0.0",
       "sourceServiceId": "rest-api-service-01",
       "correlationId": "uuid7 (optional, for request/reply chains)",
-      "signature": "base64 — Ed25519 signature of the plaintext digest, optional (see 4.1)"
+      "signature": "base64 — Ed25519 signature of the plaintext digest, signed with the sender's nkey (see §4.1)"
     },
     "encryption": {
       "algorithm": "age-v1 (X25519 + XChaCha20-Poly1305)",
@@ -200,8 +216,8 @@ Baseline schema (extends the shape from the design notes):
 ```
 
 Notes / assumptions baked into this:
-- **`subject` = one unique subject per `eventType`** (not per message instance). i.e. `events.orders.OrderCreated` is the permanent home for that event type, and its payload schema is documented once, referenced by that subject. **Open Question:** confirm this reading matches intent — the original notes say "all subjects will be a unique value," which I've interpreted as "unique per event type," not "unique per message."
-- Subject naming convention proposed: `events.<boundedContext>.<EventType>` (e.g. `events.orders.OrderCreated`). **Open Question:** confirm naming convention, or provide the real domains/contexts so this can be filled in concretely instead of a placeholder.
+- **`subject` = one unique subject per `eventType`** (not per message instance) — e.g. `events.orders.OrderCreated` is the permanent home for that event type, and its payload schema is documented once, referenced by that subject.
+- Subject naming convention: `events.<boundedContext>.<EventType>` — kept as a **placeholder pattern** for now (`orders` is a stand-in bounded context). Real bounded-context names will replace the placeholder once they're known; nothing else in the design depends on the specific names chosen.
 - Schemas for `eventPayload` (pre-encryption, logical shape) are documented as versioned JSON Schema files, one per subject, checked into `schemas/` in the repo (see §7). `eventSchemaVersion` lets consumers detect breaking changes.
 
 ---
@@ -209,7 +225,7 @@ Notes / assumptions baked into this:
 ## 6. NATS JetStream Layout
 
 - **Stream:** single stream `EVENTS`, subject filter `events.>` (one stream is simplest to operate; can be split by bounded context later if retention/ops needs diverge).
-- **Retention:** durable, limits-based retention (age + size caps) — not work-queue, since multiple adapters need independent delivery of the same message. **Open Question:** what retention window is actually needed (hours/days/weeks)? Affects storage sizing in `docker-compose`.
+- **Retention:** durable, limits-based retention — **7 days** age limit, plus a size cap as a backstop — not work-queue, since multiple adapters need independent delivery of the same message. Long enough to recover from adapter downtime/redeploys without replaying stale data; revisit if audit requirements later call for a longer window.
 - **Consumers:** one durable, filtered consumer per adapter (`filter_subject` scoped to what that adapter is permitted/configured to handle), so each adapter tracks its own delivery cursor independently and can restart without replaying everything.
 - **KV bucket:** `service-directory`, as above.
 
@@ -244,8 +260,12 @@ GregorsServiceBus/
     file_storage_adapter/
       # each: pyproject.toml, app/, tests/, Dockerfile
   infra/
-    nats/nats-server.conf
-    mysql/init.sql
+    nats/
+      nats-server.conf        # JetStream + JWT resolver config (no static authorization block)
+      operator/                # nsc-managed Operator/Account/User JWTs + nkeys (secrets git-ignored)
+    mysql/
+      init.sql
+      # my.cnf snippet enabling binlog (log_bin, binlog_format=ROW, server-id) for CDC
   tools/                         # key-generation CLI, registry admin CLI
 ```
 
@@ -259,20 +279,21 @@ Each adapter is its own installable Python package with its own `Dockerfile`, de
 | Data modeling / validation | `pydantic` v2 | Event envelope, config models, adapter-specific payload schemas. |
 | Config | `pydantic-settings` | Env-var/`.env`-driven adapter configuration. |
 | Payload encryption | `pyrage` (age bindings) | Native multi-recipient encryption — matches §4.3 exactly. Fallback: `PyNaCl` (libsodium) if `age` integration proves awkward, at the cost of hand-rolling the envelope. |
-| Signing (nkey / Ed25519) | `nats-py`'s built-in nkey support (`nkeys` lib) | Reused for optional payload signing (§4.1). |
+| Signing (nkey / Ed25519) | `nats-py`'s built-in nkey support (`nkeys` lib) | Reused for the payload signing that's part of every event (§4.1). |
 | REST API Service / Webhook Listener | `fastapi` + `uvicorn` | ASGI HTTP surface for inbound adapters. |
 | Outbound HTTP (HTTP Adapter, Webhook Sender) | `httpx` (async) | |
-| Retry/backoff | `tenacity` | Webhook delivery, DB writes. |
-| MySQL adapter | `SQLAlchemy` 2.0 (async) + `asyncmy` | |
-| File storage adapter | `aiofiles` | |
-| UUIDv7 | `uuid6` (PyPI) | Stdlib `uuid` doesn't have `uuid7()` until Python 3.14; confirm target Python version (§9 open question). |
+| Retry/backoff | `tenacity` | Database Adapter writes (not the Webhook Sender, which is best-effort per §8). |
+| MySQL adapter (write path) | `SQLAlchemy` 2.0 (async) + `asyncmy` | |
+| MySQL adapter (CDC read path) | `python-mysql-replication` | Tails the MySQL binlog directly (row-based) and turns row changes into bus events — avoids standing up a full Debezium/Kafka Connect stack for a single-adapter use case. Confirmed choice for v1 (Decision #15). |
+| File storage adapter | `aiofiles` | Backs the list/read/write/delete command handlers (§8). |
+| UUIDv7 | `uuid6` (PyPI) | Stdlib `uuid` doesn't have `uuid7()` until Python 3.14; project targets Python 3.12, so this stays a dependency. |
 | Structured logging | `structlog` | JSON logs correlated by `eventId`/`correlationId`. |
 | CLI tooling | `typer` | Key generation, registry admin, local dev utilities. |
 
 ### 7.3 Required services (for `docker-compose`, described — not written yet)
 
 - `nats` — NATS server with JetStream + KV enabled.
-- `mysql` — for the Database Adapter.
+- `mysql` — for the Database Adapter; configured with binlog enabled (`log_bin`, `binlog_format=ROW`, unique `server-id`) to support the CDC read path (§8).
 - One container per adapter (6 total for v1).
 - Optional: `adminer` (DB inspection, dev convenience).
 
@@ -289,7 +310,7 @@ Each adapter is its own installable Python package with its own `Dockerfile`, de
 | Git hook orchestration | `pre-commit` (ties the above together) |
 | Containerization | `docker`, `docker-compose` |
 
-**Open Question:** any CI preference (GitHub Actions vs. something else)? Not blocking for design, but worth deciding before Phase 4 below.
+**Decision:** GitHub Actions runs the above (lint, type-check, test, security scans) on every push/PR.
 
 ---
 
@@ -299,10 +320,10 @@ Each adapter is its own installable Python package with its own `Dockerfile`, de
 |---|---|---|---|
 | **HTTP Adapter** | Bus → external, external → Bus | On event, calls a configured external REST API; may publish the response back as a correlated event. | "Emit and receive" read as: outbound call triggered by a bus event, response optionally re-published. |
 | **REST API Service** | External → Bus (+ optional sync reply) | Exposes a REST API for external clients; translates calls into bus events. Can do request/reply by publishing then waiting on a correlated response subject. | This is the "front door" for external HTTP clients — confirm that's the intent vs. something else. |
-| **Webhook Sender** | Bus → external | Subscribes to configured subjects; POSTs decrypted payload (or a projection) to a registered external webhook URL, with retry/backoff. | Delivery guarantees needed (at-least-once + dedupe on `eventId`, presumably)? |
+| **Webhook Sender** | Bus → external | Subscribes to configured subjects; POSTs decrypted payload (or a projection) to a registered external webhook URL — **single attempt, best-effort, no retry/backoff**. | A downstream outage can silently drop a delivery at this boundary; acceptable per current requirements. If this changes later, add `tenacity`-based retry + `eventId` dedupe guidance for the receiver. |
 | **Webhook Listener** | External → Bus | Exposes an HTTP endpoint for inbound third-party webhooks; verifies source, converts to the event envelope, encrypts, publishes. | Source verification mechanism (shared secret, HMAC header) is source-specific — TBD per integration. |
-| **Database Adapter (MySQL)** | Bus → DB (write path assumed; CDC read path optional) | Subscribes to subjects and persists decrypted event data into MySQL (event sink / read model). | Is a DB→Bus (change-data-capture) direction needed for v1, or is write-only sufficient to start? Assumed write-only for v1; CDC flagged as Phase-2/optional. |
-| **File Storage Adapter (local)** | Bus → filesystem (assumed); watch-folder → Bus optional | Subscribes and writes payload to local disk, structured by subject/date/eventId (archival/audit use case). | Same direction question as above — is a folder-watch → publish path also needed? |
+| **Database Adapter (MySQL)** | Bidirectional | **Write path:** subscribes to subjects and persists decrypted event data into MySQL. **Read path (CDC):** tails the MySQL binlog via `python-mysql-replication` and publishes row-level changes as bus events. Both in scope for v1. | Bidirectional scope makes this adapter meaningfully bigger than originally sketched, but the CDC mechanism itself is settled (Decision #15). |
+| **File Storage Adapter (local)** | Command-driven (bus → adapter → bus) | Not a passive archival sink — a **file operations service** invoked via bus commands: `list`, `read`, `write`, `delete` against local files (e.g. subjects like `events.files.FileWriteRequested` / `FileReadRequested` / `FileListRequested` / `FileDeleteRequested`), replying on a correlated response subject. Filesystem-change → bus events (folder-watch) explicitly **deferred** to a later phase. | Exact command/response subject and payload schema TBD when this adapter is built (Phase 3). |
 
 All adapters are built on `gsb-core`, so "build a new adapter" mostly means writing the integration-specific glue (HTTP call, file write, SQL write) around a shared `BusClient`.
 
@@ -310,29 +331,20 @@ All adapters are built on `gsb-core`, so "build a new adapter" mostly means writ
 
 ## 9. Open Questions Summary
 
-Consolidated from above, so nothing gets lost:
+All architectural questions have been resolved and folded into §2–§8 above (Decisions #1–#15). What's left is deliberately deferred, not blocking:
 
-1. **Message-level signing** — sign plaintext digest with sender's nkey for authenticity independent of transport? (§4.1)
-2. **Dynamic onboarding** — is static NATS config sufficient, or do we need decentralized JWT auth (`nsc`) so adapters can be added/removed without a config reload? (§4.4)
-3. **Registry entry lifecycle** — explicit add/remove only, or TTL/heartbeat-based expiry for decommissioned adapters? (§4.5)
-4. **Subject uniqueness** — confirm "unique subject per event type" reading, and supply real bounded-context names for the `events.<context>.<EventType>` convention. (§5)
-5. **Retention window** for the JetStream `EVENTS` stream (affects storage sizing). (§6)
-6. **Target Python version** — affects whether stdlib `uuid.uuid7()` is available (3.14+) or the `uuid6` package is needed. (§7.2)
-7. **DB Adapter / File Storage Adapter directionality** — write-only sufficient for v1, or is a read/ingest path (CDC, folder-watch) needed too? (§8)
-8. **Webhook Sender delivery guarantees** — at-least-once with `eventId`-based dedupe on the receiving end assumed; confirm.
-9. **CI platform** preference, if any. (§7.4)
-
-None of these block writing more design, but each changes concrete details (schema fields, config shape, which components get built when) — worth resolving before Phase 1 implementation starts.
+1. **File Storage Adapter command/response schema** — exact subject names and payload shape for the `list`/`read`/`write`/`delete` commands are TBD, to be nailed down when that adapter is actually built (Phase 3).
+2. **Subject naming** — real bounded-context names are deferred by choice; `events.<context>.<EventType>` stays a placeholder pattern (`orders` as stand-in) until real domains are known. Nothing else in the design depends on the specific names chosen.
 
 ---
 
 ## 10. Proposed Implementation Plan (high-level, no code yet)
 
-1. **Phase 0** — Resolve §9 open questions; finalize this document.
-2. **Phase 1** — Core infra: NATS JetStream config (nkeys, `EVENTS` stream, `service-directory` KV bucket); `gsb-core` library (envelope, crypto, bus client, registry client) with unit tests, no adapters yet.
-3. **Phase 2** — One vertical slice end-to-end to prove the pattern, e.g. **Webhook Listener → File Storage Adapter** (simplest data path: inbound HTTP → encrypted publish → subscribe → decrypt → write to disk). Wire into `docker-compose`.
-4. **Phase 3** — Remaining adapters (HTTP Adapter, REST API Service, Webhook Sender, Database Adapter).
-5. **Phase 4** — Hardening: security scanning in CI, populate `schemas/` for all defined event types, integration test suite via `testcontainers-python`.
+1. **Phase 0** — Resolve remaining §9 items as they come up; finalize this document.
+2. **Phase 1** — Core infra: `nsc`-issued Operator/Account/User JWTs, NATS JetStream config (JWT resolver, `EVENTS` stream, `service-directory` KV bucket); `gsb-core` library (envelope, signing, crypto, bus client, registry client) with unit tests, no adapters yet.
+3. **Phase 2** — One vertical slice end-to-end to prove the pattern: **Webhook Listener → File Storage Adapter** (inbound HTTP → encrypted+signed publish of a `FileWriteRequested` command → File Storage Adapter decrypts, verifies signature, writes the file, publishes a result event). Wire into `docker-compose`.
+4. **Phase 3** — Remaining adapters (HTTP Adapter, REST API Service, Webhook Sender, Database Adapter — including its CDC read path per Decision #10; nail down the File Storage Adapter's full command/response schema).
+5. **Phase 4** — Hardening: GitHub Actions CI (ruff, mypy, pytest, bandit, pip-audit), populate `schemas/` for all defined event types, integration test suite via `testcontainers-python`.
 6. **Phase 5** — Finalize `docker-compose.yml` as the complete local demo environment.
 
 ---

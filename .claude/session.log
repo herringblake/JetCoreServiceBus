@@ -393,3 +393,95 @@ Worth flagging: your notes described the bus as fully "open" (any connected adap
 
 Want to work through the §9 open questions next, or is there a part of the architecture you'd like to push back on first?
 ------------------------------------------------
+Let work through the open questions
+Let's go through them in batches. First round covers the security/infra questions:
+
+AskUserQuestion
+OUT
+Your questions have been answered: "Should each event also be signed by the sender's nkey (Ed25519 signature over the plaintext digest), giving recipients authenticity/integrity independent of transport trust?"="Yes, add signing (Recommended)", "Should adapter onboarding use static NATS config (edit config, reload) or NATS's decentralized JWT auth (nsc) so adapters can be added/removed without touching the server config?"="Decentralized JWT (nsc) now", "Should service-directory KV entries expire automatically (TTL/heartbeat) so a decommissioned adapter's public key drops out of the recipient list on its own, or only via explicit deregistration?"="TTL/heartbeat (Recommended)", "What Python version should the project target? This determines whether stdlib uuid.uuid7() is available or the uuid6 package is needed."="Python 3.12 (Recommended)". You can now continue with these answers in mind.
+Second round covers stream/adapter behavior:
+
+AskUserQuestion
+OUT
+The user answered: "How long should the JetStream EVENTS stream retain messages before they age out?"="7 days (Recommended)", "Should the Database Adapter (MySQL) be write-only (bus → DB) for v1, or also support a read path (DB changes → bus, via CDC)?"="Bidirectional now", "Should the File Storage Adapter be write-only (bus → disk, for archival) for v1, or also support a folder-watch ingest path (disk → bus)?"="start with Read/Write access to files, events for files can be added later (adapter will be able to list, read, write and delete files)", "What delivery guarantee should the Webhook Sender provide to external webhook consumers?"="Best-effort, no retry". Read the answers carefully — they may request clarification, changes, or that you not proceed — and follow what they actually say.
+AskUserQuestion
+OUT
+Your questions have been answered: "Any CI platform preference for lint/type-check/test/security-scan automation?"="GitHub Actions (Recommended)". You can now continue with these answers in mind.
+One thing I can't guess for you: the real subject-naming convention needs your actual bounded contexts/domains (I used events.orders.OrderCreated as a placeholder). What are the actual domains this bus will carry events for (e.g. orders, users, payments, inventory... whatever your real ones are)? If you'd rather leave this as a placeholder pattern for now and fill in real subjects as adapters get built, just say so and I'll note that.
+
+Use a placeholder for now.
+Good — I'll keep the placeholder pattern. Now let me fold all these decisions into the design doc.
+
+Edit Design.md
+Modified
+Edit Design.md
+Added 10 lines
+Edit Design.md
+Modified
+Edit Design.md
+Added 5 lines
+Edit Design.md
+Modified
+Edit Design.md
+Modified
+Edit Design.md
+Modified
+Edit Design.md
+Modified
+Edit Design.md
+Modified
+Edit Design.md
+Added 4 lines
+Now the library table (uuid6 note + CDC library + retry scope) and the required-services note:
+
+Edit Design.md
+Added 1 line
+Edit Design.md
+Modified
+Now the adapters table — DB, File Storage, Webhook Sender rows:
+
+Edit Design.md
+Modified
+Now rewrite §9 (Open Questions Summary) to reflect what's actually left, and §10's Phase 2–4 wording:
+
+Edit Design.md
+Removed 8 lines
+Edit Design.md
+Modified
+Read Design.md
+A few leftover inconsistencies from the earlier draft — fixing now:
+
+Edit Design.md
+Modified
+Edit Design.md
+Modified
+Edit Design.md
+Modified
+Design.md is now fully updated with all 14 decisions folded in. Summary of what changed in this pass:
+
+§2 — extended the decisions table to all 14 resolved items (5–14 added).
+§4.1/§4.2/§4.4/§4.5 — signing is now committed (not optional); connection auth rewritten around nsc-managed decentralized JWT instead of static config; subject permissions decision reframed as flowing from the JWT claims; registry lifecycle locked to TTL/heartbeat.
+§5 — signature field is no longer "optional"; subject-naming section now states the placeholder is deliberate, not a pending question.
+§6 — retention set to 7 days.
+§7 — repo layout's infra/nats/ now reflects nsc-managed JWTs instead of a flat conf file; MySQL gets a binlog-config note; library table adds python-mysql-replication for CDC and fixes the tenacity/signing notes; Python 3.12 confirmed; CI decision resolved to GitHub Actions.
+§8 — Database Adapter is now bidirectional (write + CDC), File Storage Adapter reframed as a command-driven CRUD service (not a passive archival sink) with placeholder command subjects, Webhook Sender locked to best-effort/no-retry.
+§9 — trimmed from 9 open items down to 3 genuinely-remaining ones: the CDC library choice (binlog tailer vs. Debezium — I've recommended the lightweight option but it's flagged, not decided), the File Storage Adapter's exact command/response schema (deferred to Phase 3 by nature), and the subject-naming placeholder (deferred by your choice).
+§10 — implementation phases updated to match (JWT provisioning in Phase 1, signed+encrypted command flow in the Phase 2 slice, CDC scope in Phase 3, GitHub Actions in Phase 4).
+The one item still genuinely open is #1 in §9 — lightweight python-mysql-replication vs. a full Debezium/Kafka Connect pipeline for the Database Adapter's CDC path. I recommended the lightweight option but didn't force a decision since it's more of an implementation-detail tradeoff than an architecture fork. Want to settle that now, or leave it flagged for Phase 3?
+
+Let's go with the lightweight for now.
+Edit Design.md
+Added 1 line
+Edit Design.md
+Modified
+Edit Design.md
+Modified
+Now updating §9 to drop that item since it's resolved, leaving only the two genuinely deferred ones:
+
+Edit Design.md
+Removed 1 line
+Click to expand
+Locked in as Decision #15. Design.md now has all 15 decisions resolved — the only things still open are the two deliberately-deferred items (File Storage Adapter's exact command schema, and real subject/domain names), both of which naturally get filled in once you're actually building those pieces rather than needing a decision now.
+
+The design is in a solid state to build from whenever you're ready to move into Phase 1 (NATS/JWT infra + the gsb-core library). Let me know if you want to review or adjust anything else, or start scoping Phase 1 in more detail.
+
