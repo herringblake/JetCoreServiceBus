@@ -963,4 +963,189 @@ One thing I flagged rather than asserted as fact: I don't have the exact in-cont
 
 Ready for A2 (adapter identity manifest) when you are.
 
----------------- Step A1 --------------------------
+---------------- Step A1 Completed --------------------------
+
+Looking good so far, let's move to step A2
+Let's design this manifest — but first, thinking through it surfaced two things worth pinning down: whether entries are keyed per adapter type or per instance (the KV registry's <subject>.<serviceId> key shape from §4.5 already implies instance-level identity, since you could run e.g. multiple HTTP Adapter instances against different external APIs), and a subject-naming gotcha for the Database Adapter — its write path (bus→MySQL) and CDC read path (MySQL→bus) need different subjects, or it could end up consuming its own CDC output as a write-path trigger.
+
+Write adapter_identities.yaml
+126 lines
+# Adapter Identity Manifest — Phase 1, Step A2
+#
+# Declarative source of truth for "who's allowed to say what" on the bus.
+# The bootstrap script (Step A3) reads this file and, for each entry, issues
+# one nsc User (nkey + JWT) under the `account` below, embedding that entry's
+# publish/subscribe subjects as the User's NATS permissions (Design.md §4.2,
+# §4.4, Decision #6).
+#
+# GRANULARITY: one entry per adapter *instance*, not per adapter *type*.
+# The service-directory KV registry (Design.md §4.5) already keys entries as
+# <subject>.<serviceId> with instance-level ids like "file-storage-01", which
+# implies a deployment can run multiple independent instances of the same
+# adapter type (e.g. two HTTP Adapter instances, each integrated with a
+# different external API, each with its own identity/permissions). Recorded
+# as Decision #18 in Design.md §2.
+#
+# DERIVED PERMISSIONS (computed by the bootstrap script, not hand-authored
+# per entry below):
+#   - KV write  -> $KV.service-directory.<subject>.<serviceId>  for every
+#     subject in that entry's `subscribe` list (lets the adapter register
+#     itself as a decrypt-capable recipient, and re-PUT the same key on its
+#     heartbeat interval — Design.md §11 parameter table: TTL 60s / hb 20s).
+#   - KV read   -> $KV.service-directory.>  for every entry that has a
+#     non-empty `publish` list (a publisher must look up recipients before
+#     encrypting — Design.md §4.3).
+#   - Low-level NATS/JetStream API subjects (e.g. $JS.API.>, _INBOX.>)
+#     needed for the client library to function are NOT enumerated here —
+#     those are finalized when nats-server.conf and the bootstrap script are
+#     actually written (Steps A3/A4), not part of this application-level
+#     manifest.
+#
+# PLACEHOLDER SUBJECTS: per Design.md Decision #14, real bounded-context
+# names aren't chosen yet. Subjects below follow the events.<context>.<Type>
+# convention with `orders` as a stand-in, except the File Storage Adapter's
+# command subjects (events.files.*), which are named in Design.md §8. The
+# exact reply/result-subject scoping convention for command/response pairs
+# (e.g. whether a result subject is scoped per-requester) is still TBD —
+# tracked as an open item in Design.md §9 — so result subjects below are
+# shared, not yet per-requester-scoped. Revisit before Phase 3 builds these
+# adapters for real.
+
+version: 1
+account: GSB
+
+adapters:
+
+  # --- Phase 2 vertical slice (Design.md §10) — these two are used first ---
+
+  - serviceId: webhook-listener-01
+    adapterType: webhook-listener
+    description: >
+      Inbound HTTP webhook receiver. Converts an accepted webhook into a
+      FileWriteRequested command and publishes it. Fire-and-forget from the
+      HTTP caller's perspective (§8) — no reply subject needed yet.
+    permissions:
+      publish:
+        - events.files.FileWriteRequested
+      subscribe: []
+
+  - serviceId: file-storage-01
+    adapterType: file-storage-adapter
+    description: >
+      Command-driven file operations service (§8) — list/read/write/delete
+      against local files, triggered by bus commands.
+    permissions:
+      publish:
+        - events.files.FileWriteCompleted
+        - events.files.FileReadCompleted
+        - events.files.FileListCompleted
+        - events.files.FileDeleteCompleted
+      subscribe:
+        - events.files.FileWriteRequested
+        - events.files.FileReadRequested
+        - events.files.FileListRequested
+        - events.files.FileDeleteRequested
+
+  # --- Remaining adapter types (Phase 3, Design.md §10) — one placeholder
+  #     instance each, so the manifest schema and bootstrap script get
+  #     exercised against all 6 types now, not just the Phase 2 pair. ---
+
+  - serviceId: http-adapter-01
+    adapterType: http-adapter
+    description: >
+      Calls a configured external REST API when triggered by a bus event;
+      publishes the response back as a correlated event (§8).
+    permissions:
+      publish:
+        - events.http.RequestCompleted
+      subscribe:
+        - events.orders.OrderCreated   # placeholder trigger subject
+
+  - serviceId: rest-api-service-01
+    adapterType: rest-api-service
+    description: >
+      "Front door" for external HTTP clients — translates inbound REST calls
+      into bus events (§8).
+    permissions:
+      publish:
+        - events.orders.OrderCreated   # placeholder published subject
+      subscribe: []
+
+  - serviceId: webhook-sender-01
+    adapterType: webhook-sender
+    description: >
+      Subscribes to configured subjects and POSTs to an external webhook URL,
+      best-effort, no retry (Decision #12). No result event published.
+    permissions:
+      publish: []
+      subscribe:
+        - events.orders.OrderCreated   # placeholder subject to relay outward
+
+  - serviceId: db-adapter-mysql-01
+    adapterType: database-adapter-mysql
+    description: >
+      Bidirectional (Decision #10). Write path persists bus events to MySQL;
+      CDC read path tails the binlog and publishes row changes. These two
+      paths deliberately use DIFFERENT subjects (see note below) so the
+      adapter never consumes its own CDC output as a write-path trigger.
+    permissions:
+      publish:
+        - events.db.orders.RowChanged   # CDC read path output — distinct
+                                         # namespace from the write-path
+                                         # input subject below, on purpose.
+      subscribe:
+        - events.orders.OrderCreated    # write path input
+Now let's fold the two things this surfaced back into Design.md — the instance-vs-type granularity decision, and the CDC/write-path subject-collision note — then check off A2:
+
+Edit Design.md
+Added 1 line
+Edit Design.md
+Modified
+Edit Design.md
+Modified
+A2 done. infra/nats/adapter_identities.yaml is the new manifest — one entry per adapter instance (not type), each with a serviceId, adapterType, and its publish/subscribe subject allow-list. Populated:
+
+Phase 2 pair (used first): webhook-listener-01 → events.files.FileWriteRequested → file-storage-01, which handles all four file commands (write/read/list/delete) and publishes matching *Completed results.
+One placeholder instance per remaining adapter type (HTTP Adapter, REST API Service, Webhook Sender, Database Adapter), using the existing placeholder subject convention, so the manifest schema and A3's bootstrap script get exercised against all 6 types now rather than just the two Phase-2 ones.
+Two things this surfaced that I folded back into Design.md rather than silently deciding:
+
+Decision #18 — the manifest is keyed per adapter instance, not type. The KV registry's <subject>.<serviceId> key shape already implied this (instance-level ids like file-storage-01), so it just makes explicit that e.g. two HTTP Adapter instances wired to different external APIs would be two separate identities with independent permissions.
+Database Adapter subject collision risk — its write path (bus→MySQL) and CDC path (MySQL→bus) need different subjects, or it'd end up consuming its own CDC output as a write trigger. Noted in both the manifest and the §8 adapter table.
+Left deliberately unresolved (already flagged as TBD in §9, didn't try to force it here): the exact reply/result-subject scoping convention for command/response pairs — right now file-storage-01's result subjects are shared, not per-requester-scoped. Fine for a placeholder manifest; worth revisiting before Phase 3 builds these adapters for real.
+
+Ready for A3 (the bootstrap script that reads this manifest and issues the actual nsc Users) whenever you want to continue.
+
+Let's go ahead and add a FileCreateCompleted event to the file-storage-adapter
+Quick check before I add this — "Create" implies different semantics than the existing "Write" operation, and I don't want to guess wrong:
+
+AskUserQuestion
+OUT
+The user answered: "What should distinguish FileCreate from the existing FileWrite operation?"="Same operation, just the FileCreateCompleted is only sent whan a file is created. It also is sent if a file is created by an outside service, say in the case of a remote shared directory.  FileWriteCompleted is sent when a file is written to or updated. We only need a FileWriteRequest operation. Implementation will automatically create files that do not exist.". Read the answers carefully — they may request clarification, changes, or that you not proceed — and follow what they actually say.
+That reframes it nicely — it's not a new command, just a second possible outcome event for the existing FileWriteRequested command (auto-create-if-missing), plus the adapter also needs to notice files that show up from outside its own command handling (e.g. an external process writing into a shared/watched directory) and emit FileCreateCompleted for those too, with no preceding command or correlationId. That last part quietly pulls forward a narrow slice of the folder-watch capability that was otherwise deferred — worth flagging explicitly rather than letting it slide in unnoticed.
+
+Updating the manifest and the design doc to match:
+
+Edit adapter_identities.yaml
+Added 13 lines
+Now Design.md — decisions table, the adapter table, the library table (new dependency), and §9:
+
+Edit Design.md
+Added 1 line
+Edit Design.md
+Modified
+Edit Design.md
+Added 1 line
+Edit Design.md
+Added 1 line
+Now let's add watchfiles to the Dependencies.md ledger:
+
+Edit Dependencies.md
+Added 1 line
+Done. Summary of what changed:
+
+infra/nats/adapter_identities.yaml — file-storage-01 now publishes events.files.FileCreateCompleted alongside the existing FileWriteCompleted. No new subscribe subject — FileWriteRequested stays the single write-side command, auto-creating a missing file, with the completion event type telling the caller which happened.
+Design.md — Decision #19 records the semantics; the §8 adapter table and §9 open questions updated to match; added watchfiles to the library table (§7.2) for detecting externally-created files, and flagged the one loose end: the adapter now watches for external file creation but not external updates — I left that asymmetry as an open question (§9 item 3) rather than assuming you want it extended, since you only asked for the create case.
+Dependencies.md — watchfiles added to the ledger (Rust-backed, async-native, same author as pydantic).
+Let me know if the update-detection asymmetry should actually be resolved now, or left open — otherwise, ready to continue with A3 whenever you are.
+
+----------------- Step A2 Completed -------------------------
