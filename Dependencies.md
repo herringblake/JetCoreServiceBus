@@ -1,0 +1,65 @@
+# Dependencies Ledger
+
+Companion to [Design.md](Design.md) — satisfies [DevelopmentGuidelines.md](DevelopmentGuidelines.md)'s requirement to track, per dependency: **version, release date, source, and what security validation has been performed**.
+
+**Status: not yet pinned.** No dependency has been installed yet (project is still in the design phase — see [Design_Notes.md](Design_Notes.md)). This ledger currently records the *architectural choice and vetting rationale* for each candidate; the **Version** and **Release Date** columns get filled in at the point each dependency is actually added via `uv add` (Phase 1, [Design.md §11](Design.md#11-phase-1--detailed-breakdown)) and re-verified whenever it's upgraded.
+
+**Ongoing security validation process:**
+- New dependency, at adoption time: check maintenance activity (recent releases/commits), check for known CVEs (PyPI advisory DB / OSV), check adoption/provenance signals (org-backed vs. single maintainer, download counts), check license compatibility.
+- Existing dependencies, continuously: `pip-audit` and `bandit` run in CI on every push/PR ([Design.md §7.4](Design.md#74-development-tooling)); GitHub **Dependabot** (version updates + security alerts) should be enabled on the repo once it's on GitHub, since CI already runs there (Decision #13) — cheap addition, flagged here as a recommendation rather than a blocking decision.
+- Each row below gets a **Last Reviewed** date when its vetting notes are written or revisited.
+
+---
+
+## 1. Core Bus Library (`gsb-core`)
+
+| Dependency | Source | Version | Release Date | Purpose | Security Vetting Notes | Last Reviewed |
+|---|---|---|---|---|---|---|
+| `nats-py` | [PyPI](https://pypi.org/project/nats-py/) / [GitHub](https://github.com/nats-io/nats.py) | *pin at adoption* | *pin at adoption* | Official async NATS/JetStream client; also provides the `[nkeys]` extra used for signing. | Official `nats-io` org project (backed by Synadia); same trust tier as the NATS server itself. | 2026-08-23 |
+| `nkeys` | [PyPI](https://pypi.org/project/nkeys/) / [GitHub](https://github.com/nats-io/nkeys.py) | *pin at adoption* | *pin at adoption* | Ed25519 keypair generation/signing for both NATS connection auth and event signing (§4.1). Installed via `nats-py[nkeys]`. | Official `nats-io` org project. Implements NATS's own key format (not custom crypto). | 2026-08-23 |
+| `pydantic` (v2) | [PyPI](https://pypi.org/project/pydantic/) | *pin at adoption* | *pin at adoption* | Event envelope, config, and adapter payload schema modeling/validation. | Extremely widely adopted (FastAPI's foundation); large maintainer team, active CVE monitoring history. | 2026-08-23 |
+| `pydantic-settings` | [PyPI](https://pypi.org/project/pydantic-settings/) | *pin at adoption* | *pin at adoption* | Env-var/`.env`-driven adapter configuration loading. | Maintained by the Pydantic org itself; same trust tier as `pydantic`. | 2026-08-23 |
+| `pyrage` | [PyPI](https://pypi.org/project/pyrage/) / [background](https://blog.yossarian.net/2022/07/25/age-encryption-in-python-with-pyrage) | *pin at adoption* (≈1.3.0 seen at review time) | *pin at adoption* | Python bindings (via PyO3) to `rage`, the Rust implementation of the [age](https://age-encryption.org) format — provides the multi-recipient hybrid encryption in §4.3. | The cryptography itself is implemented in vetted Rust (`rage`/`age` core), not reimplemented in Python — bindings only. PyPI releases use Trusted Publishing (supply-chain provenance signal). Smaller install base than mainstream crypto libs; **recommendation:** re-check for an independent security review of `rage` before production use, and keep `PyNaCl` (below) as a documented fallback. | 2026-08-23 |
+| `PyNaCl` *(fallback candidate, not adopted unless `pyrage` integration proves impractical)* | [PyPI](https://pypi.org/project/PyNaCl/) | — | — | libsodium bindings; would require hand-rolling the multi-recipient envelope construction described in §4.3. | Long-established, widely audited (wraps libsodium). Not currently in the dependency tree — listed here only as the documented fallback per §7.2. | 2026-08-23 |
+
+## 2. Adapter-Specific
+
+| Dependency | Source | Version | Release Date | Purpose | Security Vetting Notes | Last Reviewed |
+|---|---|---|---|---|---|---|
+| `fastapi` | [PyPI](https://pypi.org/project/fastapi/) | *pin at adoption* | *pin at adoption* | ASGI HTTP surface for REST API Service and Webhook Listener adapters. | Extremely widely adopted; large, active maintainer community. | 2026-08-23 |
+| `uvicorn` | [PyPI](https://pypi.org/project/uvicorn/) | *pin at adoption* | *pin at adoption* | ASGI server running the FastAPI apps above. | Standard companion to FastAPI; widely adopted. | 2026-08-23 |
+| `httpx` | [PyPI](https://pypi.org/project/httpx/) | *pin at adoption* | *pin at adoption* | Async outbound HTTP for the HTTP Adapter and Webhook Sender. | Maintained by Encode (same org as `starlette`/`uvicorn`); widely adopted. | 2026-08-23 |
+| `tenacity` | [PyPI](https://pypi.org/project/tenacity/) | *pin at adoption* | *pin at adoption* | Retry/backoff for Database Adapter writes (not the Webhook Sender, which is best-effort per Decision #12). | Long-established, widely adopted retry library. | 2026-08-23 |
+| `SQLAlchemy` (2.0, async) | [PyPI](https://pypi.org/project/SQLAlchemy/) | *pin at adoption* | *pin at adoption* | ORM/core for the Database Adapter's write path. | De facto standard Python SQL toolkit; long track record. | 2026-08-23 |
+| `asyncmy` | [PyPI](https://pypi.org/project/asyncmy/) | *pin at adoption* | *pin at adoption* | Async MySQL driver used under SQLAlchemy. | Smaller community than `mysqlclient`/`PyMySQL`; **recommendation:** re-check maintenance activity at adoption time, since MySQL async driver options churn. | 2026-08-23 |
+| `mysql-replication` (import name `pymysqlreplication`, the "`python-mysql-replication`" project) | [PyPI](https://pypi.org/project/mysql-replication/) / [GitHub](https://github.com/julien-duponchelle/python-mysql-replication) | *pin at adoption* | last seen updated Oct 2024 | Pure-Python MySQL binlog protocol client (built on PyMySQL) — powers the Database Adapter's CDC read path (Decision #15). | No independent third-party security audit found publicly. Single-maintainer-led project, though it's cited as used in production at "medium internet corporations" per its own docs. **Mitigations planned:** run it against a MySQL account restricted to `REPLICATION SLAVE`/`REPLICATION CLIENT` grants only (least privilege — no read/write access to actual table data needed for binlog tailing); treat parsed row-events as untrusted input and validate/schema-check before publishing to the bus. | 2026-08-23 |
+| `aiofiles` | [PyPI](https://pypi.org/project/aiofiles/) | *pin at adoption* | *pin at adoption* | Async file I/O backing the File Storage Adapter's list/read/write/delete commands (§8). | Small, focused, widely used utility library. | 2026-08-23 |
+| `uuid6` | [PyPI](https://pypi.org/project/uuid6/) | *pin at adoption* | *pin at adoption* | `uuid7()` for event IDs — stdlib `uuid` doesn't gain native support until Python 3.14 (project targets 3.12, Decision #8). | Small, single-purpose implementation of a published RFC (RFC 9562); low risk surface. | 2026-08-23 |
+| `structlog` | [PyPI](https://pypi.org/project/structlog/) | *pin at adoption* | *pin at adoption* | Structured JSON logging correlated by `eventId`/`correlationId`. | Long-established, widely adopted. | 2026-08-23 |
+| `typer` | [PyPI](https://pypi.org/project/typer/) | *pin at adoption* | *pin at adoption* | CLI tooling — key generation, registry admin, `tools/` scripts (§11). | Maintained by the FastAPI author; widely adopted. | 2026-08-23 |
+
+## 3. Development & QA Tooling
+
+| Dependency | Source | Version | Release Date | Purpose | Security Vetting Notes | Last Reviewed |
+|---|---|---|---|---|---|---|
+| `uv` | [PyPI](https://pypi.org/project/uv/) / [docs](https://docs.astral.sh/uv/) | *pin at adoption* | *pin at adoption* | Packaging/dependency management, workspace resolution (Decision #16). | Backed by Astral (same org as `ruff`); rapidly growing adoption as the modern default. | 2026-08-23 |
+| `pytest`, `pytest-asyncio`, `pytest-cov` | [PyPI](https://pypi.org/project/pytest/) | *pin at adoption* | *pin at adoption* | Test framework + async support + coverage. | De facto standard Python test tooling. | 2026-08-23 |
+| `testcontainers-python` | [PyPI](https://pypi.org/project/testcontainers/) | *pin at adoption* | *pin at adoption* | Spins up real NATS+JetStream and MySQL containers for integration tests (§10 Phase 4). | Widely adopted across language ecosystems (originated in Java); active Python port. | 2026-08-23 |
+| `ruff` | [PyPI](https://pypi.org/project/ruff/) | *pin at adoption* | *pin at adoption* | Lint + format. | Backed by Astral; has effectively become the standard, replacing flake8/isort/black for new projects. | 2026-08-23 |
+| `mypy` | [PyPI](https://pypi.org/project/mypy/) | *pin at adoption* | *pin at adoption* | Static type checking. | Long-established, reference type checker for Python. | 2026-08-23 |
+| `bandit` | [PyPI](https://pypi.org/project/bandit/) | *pin at adoption* | *pin at adoption* | Static security analysis of our own code. | PyCQA project; long track record as the standard Python SAST tool. | 2026-08-23 |
+| `pip-audit` | [PyPI](https://pypi.org/project/pip-audit/) | *pin at adoption* | *pin at adoption* | Dependency vulnerability scanning (checks this ledger's contents against known CVEs on every CI run). | Maintained by the PyPA (official Python Packaging Authority) org. | 2026-08-23 |
+| `pre-commit` | [PyPI](https://pypi.org/project/pre-commit/) | *pin at adoption* | *pin at adoption* | Git hook orchestration tying the above together locally. | Long-established, widely adopted. | 2026-08-23 |
+
+## 4. Infrastructure Services (non-Python)
+
+| Dependency | Source | Version | Purpose | Security Vetting Notes | Last Reviewed |
+|---|---|---|---|---|---|
+| NATS Server (JetStream) | [nats.io](https://nats.io) / [GitHub](https://github.com/nats-io/nats-server) | *pin at adoption* | The message bus itself. | Official, CNCF-hosted project; core to the whole design (§3–§6). | 2026-08-23 |
+| `nsc` CLI | [GitHub](https://github.com/nats-io/nsc) | *pin at adoption* | Issues Operator/Account/User JWTs for decentralized auth (§4.2, §11 Track A). | Official `nats-io` tooling. | 2026-08-23 |
+| MySQL | [mysql.com](https://www.mysql.com/) | *pin at adoption* | Database Adapter's backing store; binlog source for CDC. | Industry-standard RDBMS. | 2026-08-23 |
+| Docker / Docker Compose | [docker.com](https://www.docker.com/) | *pin at adoption* | Local deployment/dev environment (§10 Phase 5). | Industry-standard containerization. | 2026-08-23 |
+
+---
+
+*Update this ledger whenever a dependency is added, upgraded, or re-reviewed — don't let it drift out of sync with the actual `uv.lock`.*

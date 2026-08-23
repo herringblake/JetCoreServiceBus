@@ -1,10 +1,10 @@
-# Gregor's Service Bus — Design Document
+# Title: Gregor's Service Bus — Design Document
 
 Status: Draft v0.2 — companion to [Design_Notes.md](Design_Notes.md)
 Date: 2026-08-22
 Scope: **Design only.** No implementation yet.
 
-This document expands the original design notes into a concrete architecture, resolves the ambiguous points through the decisions recorded below, and proposes an implementation plan. Sections marked **Open Question** are still unresolved and need a decision before that part of the system can be built with confidence.
+This document expands the original design notes into a concrete architecture, resolves the ambiguous points through the decisions recorded below, and proposes an implementation plan. Sections marked **Open Question** are still unresolved and need a decision before that part of the system can be built with confidence. This document also aims to satisfy [DevelopmentGuidelines.md](DevelopmentGuidelines.md)'s documentation standards as the project proceeds; per-dependency version/provenance/security-vetting detail lives in the companion [Dependencies.md](Dependencies.md) ledger rather than here.
 
 ---
 
@@ -44,6 +44,8 @@ This document expands the original design notes into a concrete architecture, re
 | 13 | CI platform? | **GitHub Actions** (§7.4, §10). |
 | 14 | Subject naming / bounded contexts? | **Placeholder pattern retained** — `events.<context>.<EventType>` with `orders` as a stand-in; real domain names to be supplied later (§5). |
 | 15 | CDC approach for the Database Adapter? | **Lightweight** — `python-mysql-replication` tails the binlog in-process; no Debezium/Kafka Connect for now (§8, §9). |
+| 16 | Python packaging/dependency-management tool? | **`uv`** — workspace mode handles `gsb-core` as a shared local dependency across all 6 adapter packages cleanly (§7.5). |
+| 17 | Where does per-dependency version/release-date/source/security-vetting documentation live (per [DevelopmentGuidelines.md](DevelopmentGuidelines.md))? | **New [Dependencies.md](Dependencies.md) ledger** — keeps Design.md focused on architecture; the ledger is updated whenever a dependency is added, pinned, or reviewed (§7.2). |
 
 ---
 
@@ -239,6 +241,10 @@ Notes / assumptions baked into this:
 GregorsServiceBus/
   Design.md
   Design_Notes.md
+  Dependencies.md               # dependency ledger: version, release date, source, security vetting
+  DevelopmentGuidelines.md
+  pyproject.toml                 # uv workspace root — members: libs/*, adapters/*
+  .python-version                # pins 3.12 for uv
   docker-compose.yml            # infra + all adapters (built later)
   schemas/                      # versioned JSON Schema per subject/eventType
   libs/
@@ -272,6 +278,8 @@ GregorsServiceBus/
 Each adapter is its own installable Python package with its own `Dockerfile`, depending on `gsb-core` as a local/editable dependency (or a private index later). This keeps adapters independently deployable while sharing the crypto/envelope/bus logic in one audited place.
 
 ### 7.2 Libraries (proposed)
+
+Architectural rationale for each choice is below; **version pins, release dates, sources, and security-vetting notes live in [Dependencies.md](Dependencies.md)**, updated as each dependency is actually added via `uv add`.
 
 | Concern | Library | Notes |
 |---|---|---|
@@ -311,6 +319,25 @@ Each adapter is its own installable Python package with its own `Dockerfile`, de
 | Containerization | `docker`, `docker-compose` |
 
 **Decision:** GitHub Actions runs the above (lint, type-check, test, security scans) on every push/PR.
+
+### 7.5 Development environment setup
+
+- **Packaging/dependency management:** [`uv`](https://docs.astral.sh/uv/) (Decision #16). The repo root `pyproject.toml` declares a **uv workspace** with members `libs/*` and `adapters/*` — `gsb-core` is consumed by every adapter as an in-workspace path dependency (no publishing to an index needed), and `uv sync` at the root resolves/installs the whole project's dependency graph in one lockfile (`uv.lock`).
+- **Python version:** pinned via a root `.python-version` file (3.12, Decision #8); `uv` provisions/uses that interpreter automatically.
+- **Per-package env:** `uv` manages a single shared virtual environment for the workspace by default (`.venv/` at the repo root) — no per-adapter venv juggling.
+- **Local paths / system paths:** nothing outside the repo tree is required beyond `uv` itself and Docker; `nsc`'s store is repo-local and git-ignored (§11, Track A parameters).
+
+### 7.6 Environment properties (docker-compose)
+
+Full documentation of each service's ports/volumes/env vars happens when `docker-compose.yml` is actually authored (§10 Phase 5), but the anticipated shape, per [DevelopmentGuidelines.md](DevelopmentGuidelines.md)'s "document environment properties" requirement:
+
+| Service | Anticipated env vars | Ports | Volumes |
+|---|---|---|---|
+| `nats` | — (config-file driven) | `4222` (client), `8222` (monitoring) | JetStream store dir; `infra/nats/` config + resolver |
+| `mysql` | `MYSQL_ROOT_PASSWORD`, `MYSQL_DATABASE`, binlog settings via `my.cnf` mount | `3306` | data dir; `infra/mysql/init.sql` |
+| each adapter | `GSB_SERVICE_ID`, `GSB_NKEY_SEED_PATH`, `GSB_JWT_PATH`, `GSB_NATS_URL`, `GSB_SUBJECTS`, `GSB_LOG_LEVEL` (via `config.py`, §7.1) | adapter-specific (e.g. `8080` for REST API Service / Webhook Listener) | none by default; File Storage Adapter additionally mounts a data volume |
+
+This table is a preview, not a commitment — it will be corrected/expanded against the real compose file once written.
 
 ---
 
