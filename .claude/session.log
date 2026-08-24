@@ -6703,3 +6703,516 @@ Verified: 20 tests total, all passing (10 new), plus clean ruff, mypy (needed a 
 Ready for B4 (config.py — the pydantic-settings loader for adapter config) whenever you want to continue.
 
 ----------------- Step B3 Completed -----------------------
+
+continue on to Step B4
+Let's check how pydantic-settings actually parses a comma-separated list from an env var before designing around an assumption:
+
+Bash Add pydantic-settings dependency
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core
+export PATH="$HOME/.local/bin:$PATH"
+uv add pydantic-settings 2>&1 | tail -8
+
+OUT
+   Building gsb-core @ file:///home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core
+      Built gsb-core @ file:///home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core
+Prepared 3 packages in 342ms
+Uninstalled 1 package in 0.64ms
+Installed 3 packages in 1ms
+ ~ gsb-core==0.1.0 (from file:///home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core)
+ + pydantic-settings==2.15.0
+ + python-dotenv==1.2.3
+Bash Test how pydantic-settings parses list fields from env vars
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class S(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix='GSB_')
+    subjects: list[str] = []
+
+import os
+os.environ['GSB_SUBJECTS'] = 'events.a,events.b,events.c'
+try:
+    s = S()
+    print('comma-separated works:', s.subjects)
+except Exception as e:
+    print('comma-separated failed:', type(e).__name__, str(e)[:200])
+
+os.environ['GSB_SUBJECTS'] = '[\"events.a\", \"events.b\"]'
+s2 = S()
+print('JSON list works:', s2.subjects)
+"
+
+OUT
+comma-separated failed: SettingsError error parsing value for field "subjects" from source "EnvSettingsSource"
+JSON list works: ['events.a', 'events.b']
+Confirmed — plain comma-separated fails, only JSON-array syntax works by default. Since a human writing docker-compose.yml/.env would much rather write events.a,events.b than JSON with careful shell-quoting, let's add a small validator that accepts both, then verify it actually works:
+
+Write config.py
+69 lines
+"""Adapter configuration loading (Design.md §7.6) — Step B4 (Design.md §11
+Track B). Env-var/`.env`-driven, via `pydantic-settings`.
+
+Field <-> env var mapping (all `GSB_`-prefixed, per §7.6):
+  service_id       GSB_SERVICE_ID       — must match this instance's
+                                          serviceId in adapter_identities.yaml
+                                          (Step A2)
+  nats_url         GSB_NATS_URL         — defaults to the docker-compose
+                                          service name (Step A6)
+  nats_creds_path  GSB_NATS_CREDS_PATH  — the .creds file Step A3's
+                                          bootstrap_auth.sh generated for
+                                          this service_id (JWT+nkey bundled)
+  subjects         GSB_SUBJECTS         — subjects this instance subscribes
+                                          to / registers itself as a
+                                          recipient for (Design.md §4.5).
+                                          NOT publish subjects — what an
+                                          adapter publishes to is inherent
+                                          to its own logic (e.g. "reply to
+                                          FileWriteRequested with
+                                          FileWriteCompleted"), not
+                                          something you'd reconfigure
+                                          without also changing code.
+  log_level        GSB_LOG_LEVEL        — defaults to INFO
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Literal
+
+from pydantic import FilePath, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+
+
+class AdapterSettings(BaseSettings):
+    """Base config every adapter loads. Subclass to add adapter-specific
+    settings (still `GSB_`-prefixed) — pydantic-settings merges them."""
+
+    model_config = SettingsConfigDict(env_prefix="GSB_", env_file=".env", extra="ignore")
+
+    service_id: str
+    nats_url: str = "nats://nats:4222"
+    # FilePath: pydantic's built-in "must exist and be a file" type — fails
+    # fast at config-load time rather than surfacing as a confusing
+    # connection error later (Step B6).
+    nats_creds_path: FilePath
+    subjects: list[str] = []
+    log_level: LogLevel = "INFO"
+
+    @field_validator("subjects", mode="before")
+    @classmethod
+    def _parse_subjects(cls, value: object) -> object:
+        """Accept a JSON array string (pydantic-settings' native list
+        parsing, confirmed by testing — plain comma-separated fails there)
+        OR a plain comma-separated string (much more natural to hand-write
+        in a docker-compose `environment:` block or a .env file — no JSON
+        quoting to get right) OR an already-parsed list (constructing this
+        directly in Python/tests)."""
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        if not stripped:
+            return []
+        if stripped.startswith("["):
+            return json.loads(stripped)
+        return [s.strip() for s in stripped.split(",") if s.strip()]
+Now the tests, using monkeypatch for proper env var isolation:
+
+Write test_config.py
+112 lines
+"""Tests for config.py (Design.md §7.6) — Step B4."""
+
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from gsb_core.config import AdapterSettings
+
+
+@pytest.fixture
+def creds_file(tmp_path: Path) -> Path:
+    """A file that merely needs to exist — AdapterSettings only validates
+    that the path is real, not that it's a well-formed .creds file (that's
+    for whoever actually connects with it, Step B6)."""
+    path = tmp_path / "test.creds"
+    path.write_text("not a real creds file, just needs to exist")
+    return path
+
+
+def _env(monkeypatch: pytest.MonkeyPatch, creds_file: Path, **extra: str) -> None:
+    monkeypatch.setenv("GSB_SERVICE_ID", "file-storage-01")
+    monkeypatch.setenv("GSB_NATS_CREDS_PATH", str(creds_file))
+    for key, value in extra.items():
+        monkeypatch.setenv(key, value)
+
+
+def test_loads_required_fields_from_env(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
+    _env(monkeypatch, creds_file)
+
+    settings = AdapterSettings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.service_id == "file-storage-01"
+    assert settings.nats_creds_path == creds_file
+
+
+def test_defaults(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
+    _env(monkeypatch, creds_file)
+
+    settings = AdapterSettings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.nats_url == "nats://nats:4222"
+    assert settings.subjects == []
+    assert settings.log_level == "INFO"
+
+
+def test_subjects_comma_separated(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
+    _env(monkeypatch, creds_file, GSB_SUBJECTS="events.files.FileWriteRequested, events.files.FileReadRequested")
+
+    settings = AdapterSettings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.subjects == [
+        "events.files.FileWriteRequested",
+        "events.files.FileReadRequested",
+    ]
+
+
+def test_subjects_json_array(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
+    _env(monkeypatch, creds_file, GSB_SUBJECTS='["events.a", "events.b"]')
+
+    settings = AdapterSettings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.subjects == ["events.a", "events.b"]
+
+
+def test_subjects_empty_string_means_empty_list(
+    monkeypatch: pytest.MonkeyPatch, creds_file: Path
+) -> None:
+    _env(monkeypatch, creds_file, GSB_SUBJECTS="")
+
+    settings = AdapterSettings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.subjects == []
+
+
+def test_missing_required_service_id_raises(
+    monkeypatch: pytest.MonkeyPatch, creds_file: Path
+) -> None:
+    monkeypatch.setenv("GSB_NATS_CREDS_PATH", str(creds_file))
+
+    with pytest.raises(ValidationError):
+        AdapterSettings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_nonexistent_creds_path_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("GSB_SERVICE_ID", "file-storage-01")
+    monkeypatch.setenv("GSB_NATS_CREDS_PATH", str(tmp_path / "does-not-exist.creds"))
+
+    with pytest.raises(ValidationError):
+        AdapterSettings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_invalid_log_level_raises(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
+    _env(monkeypatch, creds_file, GSB_LOG_LEVEL="VERBOSE")
+
+    with pytest.raises(ValidationError):
+        AdapterSettings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_subclassing_adds_adapter_specific_settings(
+    monkeypatch: pytest.MonkeyPatch, creds_file: Path
+) -> None:
+    _env(monkeypatch, creds_file, GSB_WATCH_DIR="/data/files")
+
+    class FileStorageSettings(AdapterSettings):
+        watch_dir: str
+
+    settings = FileStorageSettings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.watch_dir == "/data/files"
+    assert settings.service_id == "file-storage-01"  # inherited field still works
+Now let's run the full toolchain:
+
+Bash Run the config tests
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== pytest ==="
+uv run --all-packages pytest -v 2>&1 | tail -20
+
+OUT
+=== pytest ===
+            try:
+                field_value, field_key, value_is_complex = self._get_resolved_field_value(field, field_name)
+            except Exception as e:
+                raise SettingsError(
+                    f'error getting value for field "{field_name}" from source "{self.__class__.__name__}"'
+                ) from e
+    
+            try:
+                field_value = self.prepare_field_value(field_name, field, field_value, value_is_complex)
+            except ValueError as e:
+>               raise SettingsError(
+                    f'error parsing value for field "{field_name}" from source "{self.__class__.__name__}"'
+                ) from e
+E               pydantic_settings.exceptions.SettingsError: error parsing value for field "subjects" from source "EnvSettingsSource"
+
+.venv/lib/python3.12/site-packages/pydantic_settings/sources/base.py:610: SettingsError
+=========================== short test summary info ============================
+FAILED libs/gsb-core/tests/test_config.py::test_subjects_comma_separated - py...
+FAILED libs/gsb-core/tests/test_config.py::test_subjects_empty_string_means_empty_list
+========================= 2 failed, 27 passed in 0.26s =========================
+Real finding — pydantic-settings does its own JSON-decode attempt for complex-typed fields at the settings-source layer, before my field_validator ever runs, so plain comma-separated text errors out before my custom logic gets a chance. Let me check if there's a documented way to opt a field out of that automatic decoding:
+
+Bash Check for a NoDecode-style escape hatch in pydantic-settings
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import pydantic_settings
+print([x for x in dir(pydantic_settings) if 'decode' in x.lower() or 'Decode' in x])
+"
+
+OUT
+['ForceDecode', 'NoDecode']
+NoDecode exists. Let's use it and verify it actually fixes the behavior:
+
+Read config.py (lines 29-38)
+Edit config.py
+Modified
+Read config.py (lines 43-52)
+Edit config.py
+Added 5 lines
+Bash Re-run config tests with NoDecode fix
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest libs/gsb-core/tests/test_config.py -v 2>&1 | tail -20
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0 -- /home/bherring/dev/clodhopper/GregorsServiceBus/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/bherring/dev/clodhopper/GregorsServiceBus
+configfile: pyproject.toml
+plugins: cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 9 items
+
+libs/gsb-core/tests/test_config.py::test_loads_required_fields_from_env PASSED [ 11%]
+libs/gsb-core/tests/test_config.py::test_defaults PASSED                 [ 22%]
+libs/gsb-core/tests/test_config.py::test_subjects_comma_separated PASSED [ 33%]
+libs/gsb-core/tests/test_config.py::test_subjects_json_array PASSED      [ 44%]
+libs/gsb-core/tests/test_config.py::test_subjects_empty_string_means_empty_list PASSED [ 55%]
+libs/gsb-core/tests/test_config.py::test_missing_required_service_id_raises PASSED [ 66%]
+libs/gsb-core/tests/test_config.py::test_nonexistent_creds_path_raises PASSED [ 77%]
+libs/gsb-core/tests/test_config.py::test_invalid_log_level_raises PASSED [ 88%]
+libs/gsb-core/tests/test_config.py::test_subclassing_adds_adapter_specific_settings PASSED [100%]
+
+============================== 9 passed in 0.10s ===============================
+All 9 pass. Now let's run the full suite plus ruff/mypy/bandit/pip-audit/pre-commit:
+
+Bash Full suite plus ruff and mypy
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== pytest (all) ==="
+uv run --all-packages pytest -q 2>&1 | tail -5
+echo "=== ruff ==="
+uv run ruff check . 2>&1
+uv run ruff format --check . 2>&1
+echo "=== mypy ==="
+uv run --all-packages mypy libs 2>&1
+
+OUT
+Exit code 1
+=== pytest (all) ===
+.............................                                            [100%]
+29 passed in 0.19s
+=== ruff ===
+I001 [*] Import block is un-sorted or un-formatted
+ --> libs/gsb-core/tests/test_config.py:3:1
+  |
+1 |   """Tests for config.py (Design.md §7.6) — Step B4."""
+2 |
+3 | / from pathlib import Path
+4 | |
+5 | | import pytest
+6 | | from pydantic import ValidationError
+7 | |
+8 | | from gsb_core.config import AdapterSettings
+  | |___________________________________________^
+help: Organize imports
+  |
+5 | import pytest
+  - from pydantic import ValidationError
+  -
+6 | from gsb_core.config import AdapterSettings
+7 + from pydantic import ValidationError
+8 |
+  |
+
+E501 Line too long (113 > 100)
+  --> libs/gsb-core/tests/test_config.py:48:101
+   |
+47 | def test_subjects_comma_separated(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
+48 |     _env(monkeypatch, creds_file, GSB_SUBJECTS="events.files.FileWriteRequested, events.files.FileReadRequested")
+   |                                                                                                     ^^^^^^^^^^^^^
+49 |
+50 |     settings = AdapterSettings(_env_file=None)  # type: ignore[call-arg]
+   |
+
+Found 2 errors.
+[*] 1 fixable with the `--fix` option.
+unformatted: File would be reformatted
+  --> libs/gsb-core/tests/test_config.py:48:10
+   |
+47 | def test_subjects_comma_separated(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
+   -     _env(monkeypatch, creds_file, GSB_SUBJECTS="events.files.FileWriteRequested, events.files.FileReadRequested")
+48 +     _env(
+49 +         monkeypatch,
+50 +         creds_file,
+51 +         GSB_SUBJECTS="events.files.FileWriteRequested, events.files.FileReadRequested",
+52 +     )
+53 |
+   |
+
+1 file would be reformatted, 13 files already formatted
+=== mypy ===
+libs/gsb-core/tests/test_config.py:31: error: Unused "type: ignore" comment  [unused-ignore]
+libs/gsb-core/tests/test_config.py:40: error: Unused "type: ignore" comment  [unused-ignore]
+libs/gsb-core/tests/test_config.py:50: error: Unused "type: ignore" comment  [unused-ignore]
+libs/gsb-core/tests/test_config.py:61: error: Unused "type: ignore" comment  [unused-ignore]
+libs/gsb-core/tests/test_config.py:71: error: Unused "type: ignore" comment  [unused-ignore]
+libs/gsb-core/tests/test_config.py:82: error: Unused "type: ignore" comment  [unused-ignore]
+libs/gsb-core/tests/test_config.py:90: error: Unused "type: ignore" comment  [unused-ignore]
+libs/gsb-core/tests/test_config.py:97: error: Unused "type: ignore" comment  [unused-ignore]
+libs/gsb-core/tests/test_config.py:108: error: Unused "type: ignore" comment  [unused-ignore]
+Found 9 errors in 1 file (checked 8 source files)
+All false-positive type: ignore comments — mypy actually understands _env_file fine. Let me strip those, fix the long line, and auto-fix import order:
+
+Bash Strip all the unnecessary type:ignore comments
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+sed -i 's/  # type: ignore\[call-arg\]//' libs/gsb-core/tests/test_config.py
+grep -c "type: ignore" libs/gsb-core/tests/test_config.py
+
+OUT
+0
+Now let's fix the long line and run ruff's auto-fixer:
+
+Edit test_config.py
+Added 4 lines
+Bash Auto-fix import order and formatting
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check --fix . 2>&1
+uv run ruff format . 2>&1 | tail -3
+
+OUT
+Found 1 error (1 fixed, 0 remaining).
+14 files left unchanged
+[This command modified 1 file you've previously read: libs/gsb-core/tests/test_config.py. Call Read before editing.]
+Now let's run the full verification suite once more, end to end:
+
+Bash Full toolchain verification
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== pytest ==="
+uv run --all-packages pytest -q 2>&1 | tail -5
+echo "=== ruff ==="
+uv run ruff check . 2>&1
+echo "=== mypy ==="
+uv run --all-packages mypy libs 2>&1
+echo "=== bandit ==="
+uv run bandit -q -r libs/gsb-core/gsb_core 2>&1
+echo "=== pip-audit ==="
+uv run pip-audit 2>&1 | tail -8
+
+OUT
+=== pytest ===
+.............................                                            [100%]
+29 passed in 0.14s
+=== ruff ===
+All checks passed!
+=== mypy ===
+Success: no issues found in 8 source files
+=== bandit ===
+=== pip-audit ===
+No known vulnerabilities found
+Name     Skip Reason
+-------- -----------------------------------------------------------------------
+gsb-core Dependency not found on PyPI and could not be audited: gsb-core (0.1.0)
+All clean. Let's confirm pre-commit end to end, then finalize the docs:
+
+Bash Full pre-commit verification
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+git add -N libs/gsb-core/gsb_core/config.py libs/gsb-core/tests/test_config.py
+uv run --all-packages pre-commit run --all-files 2>&1
+git reset libs/gsb-core/gsb_core/config.py libs/gsb-core/tests/test_config.py >/dev/null 2>&1
+
+OUT
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+mypy.....................................................................Passed
+bandit...................................................................Passed
+Now let's update Design.md and Dependencies.md:
+
+Bash Find B4 checklist line
+IN
+grep -n "B4\.\|B5\." /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md
+
+OUT
+412:- [ ] **B4. `config.py`** — `pydantic-settings` loader for adapter config (NATS creds file path — JWT+nkey bundled, per Step A3's `nsc generate creds` output — subject list, service ID).
+413:- [ ] **B5. `registry.py`** — KV client wrapper (get/watch/put-with-TTL, heartbeat loop). First piece that needs a live NATS — build against the Track A `docker-compose` stack (A6).
+Edit Design.md
+Modified
+Now let's update Dependencies.md with the real pydantic-settings version:
+
+Bash Find pydantic-settings row
+IN
+grep -n "pydantic-settings" /home/bherring/dev/clodhopper/GregorsServiceBus/Dependencies.md
+
+OUT
+21:| `pydantic-settings` | [PyPI](https://pypi.org/project/pydantic-settings/) | *pin at adoption* | *pin at adoption* | Env-var/`.env`-driven adapter configuration loading. | Maintained by the Pydantic org itself; same trust tier as `pydantic`. | 2026-08-23 |
+Edit Dependencies.md
+Added 1 line
+Bash Final status and sanity check
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+git status --short
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest -q 2>&1 | tail -3
+
+OUT
+ M .claude/session.log
+ M Dependencies.md
+ M Design.md
+ M libs/gsb-core/pyproject.toml
+ M uv.lock
+?? libs/gsb-core/gsb_core/config.py
+?? libs/gsb-core/tests/test_config.py
+.............................                                            [100%]
+29 passed in 0.13s
+B4 done — verified for real, with one more genuine library-behavior surprise caught by actually running it.
+
+What's built: config.py — AdapterSettings, a pydantic-settings base class matching §7.6's env vars exactly (GSB_SERVICE_ID, GSB_NATS_URL, GSB_NATS_CREDS_PATH, GSB_SUBJECTS, GSB_LOG_LEVEL), designed to be subclassed per adapter for its own additional settings. nats_creds_path uses pydantic's FilePath type, so a missing .creds file fails immediately at config-load time rather than as a confusing connection error later.
+
+One clarification worth flagging: §7.6 only ever sketched GSB_SUBJECTS as a name, no real definition. I settled it as "subjects this instance subscribes to / registers as a recipient for" — not publish subjects, since what an adapter publishes in response to what is inherent to its own code, not something you'd want to change via env var without also changing logic.
+
+The real finding: pydantic-settings attempts its own JSON-decode of list-typed fields at the settings-source layer, before any field_validator runs — I'd written a mode="before" validator specifically to accept comma-separated input, and it silently never got invoked; the library errored out first with a low-level SettingsError. Fixed with Annotated[list[str], NoDecode], which defers entirely to the validator. Comma-separated support was worth keeping deliberately — GSB_SUBJECTS=events.a,events.b is far more natural to write in a docker-compose.yml environment: block than JSON, which needs careful shell-quoting.
+
+Verified: 9 new tests (29 total), clean ruff, mypy, bandit, pip-audit, and the full pre-commit chain. Dependencies.md updated with real resolved versions, including python-dotenv, pulled in transitively for .env file support.
+
+Ready for B5 (registry.py — the KV client wrapper) whenever you want to continue. That's the first Track B piece that needs a live NATS, so I'll be testing it against the real A6 stack, same as Track A.
+
+----------------- Step B4 Completed -----------------------
