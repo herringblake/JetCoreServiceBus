@@ -4007,3 +4007,463 @@ Ready for A7 (the manual smoke test) — though at this point A6's own verificat
 
 ------------------ Step A6 Completed --------------------
 
+Lets proceed wtih step A7
+Good — A6's testing already covered plain pub/sub and KV, but not the actual mechanism adapters will use: a durable JetStream consumer pulling from the EVENTS stream (Design.md §6). Let me check the CLI syntax for that before running it, then do a complete, clean A7 pass against the live stack.
+
+Bash Check nats consumer add syntax
+IN
+sg docker -c "docker run --rm natsio/nats-box:0.19.7-nonroot nats consumer add --help" 2>&1 | head -25
+
+OUT
+usage: nats consumer add [<flags>] [<stream>] [<consumer>]
+
+Creates a new consumer
+
+Args:
+  [<stream>]    Stream name
+  [<consumer>]  Consumer name
+
+Flags:
+  --config=CONFIG               JSON file to read configuration from
+  --validate                    Only validates the configuration against the
+                                official Schema
+  --output=FILE                 Save configuration instead of creating
+  --ack=ACK                     Acknowledgment policy (none, all, explicit,
+                                flow_control)
+  --bps=0                       Restrict message delivery to a certain bit per
+                                second
+  --backoff=MODE                Creates a consumer backoff policy using a
+                                specific pre-written algorithm (none, linear)
+  --backoff-steps=10            Number of steps to use when creating the backoff
+                                policy
+  --backoff-min=1m              The shortest backoff period that will be
+                                generated
+  --backoff-max=20m             The longest backoff period that will be
+                                generated
+Bash Check filter-subject flag and consumer next/fetch syntax
+IN
+sg docker -c "docker run --rm natsio/nats-box:0.19.7-nonroot nats consumer add --help" 2>&1 | grep -iE "filter|durable|pull|push|defaults"
+echo "--- next/fetch ---"
+sg docker -c "docker run --rm natsio/nats-box:0.19.7-nonroot nats consumer next --help" 2>&1 | head -15
+
+OUT
+  --deliver-group=GROUP         Delivers push messages only to subscriptions
+  --filter=SUBJECTS ...         Filter Stream by subjects
+  --flow-control                Enable Push consumer flow control
+  --heartbeat=HEARTBEAT         Enable idle Push consumer heartbeats (-1
+  --max-waiting=PULLS           Maximum number of outstanding pulls allowed
+  --max-pull-batch=BATCH_SIZE   Maximum size batch size for a pull request to
+  --max-pull-expire=EXPIRES     Maximum expire duration for a pull request to
+  --max-pull-bytes=BYTES        Maximum max bytes for a pull request to accept
+  --pull                        Deliver messages in 'pull' mode
+  --target=SUBJECT              Push based delivery target subject
+  --pinned-ttl=TTL              The time to allow for a client to pull before
+  --defaults                    Accept default values for all prompts
+--- next/fetch ---
+usage: nats consumer next [<flags>] <stream> <consumer>
+
+Retrieves messages from Pull consumers without interactive prompts
+
+Args:
+  <stream>    Stream name
+  <consumer>  Consumer name
+
+Flags:
+      --[no-]ack   Acknowledge received message
+      --nak        Perform a Negative Acknowledgement on the message
+      --term       Terms the message
+  -r, --raw        Show only the message
+      --wait=WAIT  Wait up to this period to acknowledge messages
+      --count=1    Number of messages to try to fetch from the pull consumer
+Bash Check current EVENTS stream message count before testing
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+CREDS="infra/nats/operator/creds"
+natsrun() {
+  sg docker -c "docker run --rm --network gsb_default -v \"\$(pwd)/$CREDS:/creds:ro\" natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/gsb-admin.creds $*"
+}
+echo "--- current EVENTS state ---"
+natsrun "stream info EVENTS -j" 2>&1 | grep -E '"messages"|"bytes"'
+
+OUT
+--- current EVENTS state ---
+    "messages": 0,
+    "bytes": 0,
+Clean state. Now let's run the full A7 sequence: allowed publish → durable pull-consumer delivery → denied publish → KV allowed write → KV denied write.
+
+Bash A7 test 1-2: allowed publish and stream capture confirmation
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+CREDS="infra/nats/operator/creds"
+
+as() {
+  local who="$1"; shift
+  sg docker -c "docker run --rm --network gsb_default -v \"\$(pwd)/$CREDS:/creds:ro\" natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/$who.creds $*"
+}
+
+echo "### 1. Allowed publish (webhook-listener-01 -> events.files.FileWriteRequested) ###"
+as webhook-listener-01 pub events.files.FileWriteRequested '{"path":"smoke-test.txt","content":"A7 smoke test"}'
+
+echo ""
+echo "### 2. Stream captured it? ###"
+as gsb-admin stream info EVENTS -j 2>&1 | grep -E '"messages"|"bytes"'
+
+OUT
+### 1. Allowed publish (webhook-listener-01 -> events.files.FileWriteRequested) ###
+17:15:30 Published 43 bytes to "events.files.FileWriteRequested"
+
+### 2. Stream captured it? ###
+    "messages": 1,
+    "bytes": 104,
+The publish landed in the stream. Now the durable pull-consumer, as file-storage-01 — the actual mechanism adapters will use:
+
+Bash A7 test 3-4: create durable consumer and pull the message through it
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+CREDS="infra/nats/operator/creds"
+
+as() {
+  local who="$1"; shift
+  sg docker -c "docker run --rm --network gsb_default -v \"\$(pwd)/$CREDS:/creds:ro\" natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/$who.creds $*"
+}
+
+echo "### 3. Create durable pull consumer as file-storage-01 ###"
+as file-storage-01 consumer add EVENTS file-storage-01-consumer \
+  --filter events.files.FileWriteRequested \
+  --pull --ack explicit --deliver all --replay instant --defaults
+
+echo ""
+echo "### 4. Pull the message ###"
+as file-storage-01 consumer next EVENTS file-storage-01-consumer --ack
+
+OUT
+### 3. Create durable pull consumer as file-storage-01 ###
+Information for Consumer EVENTS > file-storage-01-consumer created 2026-08-24 17:15:38
+
+Configuration:
+
+                    Name: file-storage-01-consumer
+               Pull Mode: true
+          Filter Subject: events.files.FileWriteRequested
+          Deliver Policy: All
+              Ack Policy: Explicit
+                Ack Wait: 30.00s
+           Replay Policy: Instant
+         Max Ack Pending: 1,000
+       Max Waiting Pulls: 512
+
+State:
+
+            Host Version: 2.14.5
+      Required API Level: 0 hosted at level 4
+  Last Delivered Message: Consumer sequence: 0 Stream sequence: 0
+    Acknowledgment Floor: Consumer sequence: 0 Stream sequence: 0
+        Outstanding Acks: 0 out of maximum 1,000
+    Redelivered Messages: 0
+    Unprocessed Messages: 1
+           Waiting Pulls: 0 of maximum 512
+
+### 4. Pull the message ###
+[17:15:39] subj: events.files.FileWriteRequested / tries: 1 / cons seq: 1 / str seq: 1 / pending: 0
+
+{path:smoke-test.txt,content:A7 smoke test}
+
+Acknowledged message
+Full mechanism confirmed — payload delivered intact through the durable filtered consumer. Now the negative tests: a denied publish and a denied KV write (the KV denial specifically hasn't been tested yet):
+
+Bash A7 test 5-7: denied publish, allowed KV write, denied KV write
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+CREDS="infra/nats/operator/creds"
+
+as() {
+  local who="$1"; shift
+  sg docker -c "docker run --rm --network gsb_default -v \"\$(pwd)/$CREDS:/creds:ro\" natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/$who.creds $*"
+}
+
+echo "### 5. Denied publish (webhook-sender-01 has no publish list at all) ###"
+as webhook-sender-01 pub events.files.FileWriteRequested 'should be denied' 2>&1
+
+echo ""
+echo "### 6. Allowed KV write (file-storage-01 -> its own recipient-registration key) ###"
+as file-storage-01 kv put service-directory events.files.FileWriteRequested.file-storage-01 '{"encryptionPublicKey":"placeholder"}'
+
+echo ""
+echo "### 7. Denied KV write (file-storage-01 -> a DIFFERENT adapter's registration key) ###"
+as file-storage-01 kv put service-directory events.files.FileWriteRequested.some-other-adapter 'should be denied' 2>&1
+
+OUT
+Exit code 1
+### 5. Denied publish (webhook-sender-01 has no publish list at all) ###
+error: unexpected argument be
+
+usage: nats publish [<flags>] <subject> [<body>]
+
+Generic data publish utility
+
+Body and Header values of the messages may use Go templates to create unique
+messages.
+
+  nats pub test --count 10 "Message {{Count}} @ {{Time}}"
+
+Multiple messages with random strings between 10 and 100 long:
+
+  nats pub test --count 10 "Message {{Count}}: {{ Random 10 100 }}"
+
+Available template functions are:
+
+  Count            the message number
+  TimeStamp        RFC3339 format current time
+  Unix             seconds since 1970 in UTC
+  UnixNano         nano seconds since 1970 in UTC
+  Time             the current time
+  ID               an unique ID
+  Random(min, max) random string at least min long, at most max
+
+Args:
+  <subject>  Subject to publish to
+  [<body>]   Message body
+
+Flags:
+      --reply=SUBJECT            Sets a custom reply to subject
+  -H, --header=K:V ...           Adds headers to the message using K:V format
+      --atomic                   Atomic batch publish to JetStream (implies
+                                 --jetstream)
+      --count=1                  Publish multiple messages
+      --force-stdin              Force reading from stdin
+  -J, --jetstream                Publish messages to JetStream
+  -q, --quiet                    Show just the output received
+      --schedule-after=DURATION  Schedule the message after a certain duration
+                                 (implies --jetstream)
+      --schedule-at=TIME         Schedule the message at a certain RFC3339 time
+                                 (implies --jetstream)
+      --schedule-cron=CRON       Cron definition for a scheduled message
+                                 (implies --jetstream)
+      --schedule-dest=SUBJECT    Subject the message will publish to when the
+                                 schedule fires (implies --jetstream)
+      --schedule-every=DURATION  Schedules the message every interval (implies
+                                 --jetstream)
+      --schedule-source=SUBJECT  Reads a specific subject when scheduling
+                                 (implies --jetstream)
+      --schedule-ttl=DURATION    How long generated messages should live in the
+                                 stream
+      --send-on=eof              When to send data from stdin: 'eof' (default)
+                                 or 'newline'
+      --sleep=SLEEP              When publishing multiple messages, sleep
+                                 between publishes
+      --[no-]templates           Enables template functions in the body and
+                                 subject (does not affect headers)
+
+Command Aliases: pub
+
+Pass --help to see global flags applicable to this command.
+
+### 6. Allowed KV write (file-storage-01 -> its own recipient-registration key) ###
+{encryptionPublicKey:placeholder}
+
+### 7. Denied KV write (file-storage-01 -> a DIFFERENT adapter's registration key) ###
+error: unexpected argument be
+
+usage: nats kv put <bucket> <key> [<value>]
+
+Puts a value into a key
+
+Args:
+  <bucket>   The bucket to act on
+  <key>      The key to act on
+  [<value>]  The value to store, when empty reads STDIN
+
+
+Pass --help to see global flags applicable to this command.
+A quoting artifact from my nested wrapper, not a real result — spaces in the args got split. Let me retest #5 and #7 with single-word payloads:
+
+Bash Retest denied publish and denied KV write with single-word payloads
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+CREDS="infra/nats/operator/creds"
+
+as() {
+  local who="$1"; shift
+  sg docker -c "docker run --rm --network gsb_default -v \"\$(pwd)/$CREDS:/creds:ro\" natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/$who.creds $*"
+}
+
+echo "### 5. Denied publish (webhook-sender-01 has no publish list at all) ###"
+as webhook-sender-01 pub events.files.FileWriteRequested should-be-denied 2>&1
+
+echo ""
+echo "### 7. Denied KV write (file-storage-01 -> a DIFFERENT adapter's registration key) ###"
+as file-storage-01 kv put service-directory events.files.FileWriteRequested.some-other-adapter should-be-denied 2>&1
+
+OUT
+Exit code 1
+### 5. Denied publish (webhook-sender-01 has no publish list at all) ###
+nats: error: nats: permissions violation: Permissions Violation for Publish to "events.files.FileWriteRequested"
+
+### 7. Denied KV write (file-storage-01 -> a DIFFERENT adapter's registration key) ###
+nats: error: context deadline exceeded
+Different failure mode than the plain-pub case — a timeout rather than an explicit rejection. Let me confirm that's really the permission boundary and not a syntax issue, by trying the identical write with an identity that should have access:
+
+Bash Confirm the same KV path succeeds for an identity with actual permission
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+CREDS="infra/nats/operator/creds"
+
+as() {
+  local who="$1"; shift
+  sg docker -c "docker run --rm --network gsb_default -v \"\$(pwd)/$CREDS:/creds:ro\" natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/$who.creds $*"
+}
+
+echo "### Same key, but as gsb-admin (has full \$KV.service-directory.> access) ###"
+as gsb-admin kv put service-directory events.files.FileWriteRequested.some-other-adapter should-succeed 2>&1
+
+OUT
+### Same key, but as gsb-admin (has full $KV.service-directory.> access) ###
+should-succeed
+Confirmed — that's a real behavioral nuance worth documenting: KV write permission violations manifest as a timeout, not an explicit rejection, unlike plain pub/sub's immediate error. Now let's clean up test artifacts:
+
+Bash Clean up test consumer, purge test messages, delete test KV keys
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+CREDS="infra/nats/operator/creds"
+
+as() {
+  local who="$1"; shift
+  sg docker -c "docker run --rm --network gsb_default -v \"\$(pwd)/$CREDS:/creds:ro\" natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/$who.creds $*"
+}
+
+as gsb-admin consumer rm EVENTS file-storage-01-consumer -f 2>&1
+as gsb-admin stream purge EVENTS -f 2>&1
+as gsb-admin kv del service-directory events.files.FileWriteRequested.file-storage-01 -f 2>&1
+as gsb-admin kv del service-directory events.files.FileWriteRequested.some-other-adapter -f 2>&1
+echo "--- final check: EVENTS empty, KV empty ---"
+as gsb-admin stream info EVENTS -j 2>&1 | grep -E '"messages"'
+as gsb-admin kv ls -n 2>&1
+
+OUT
+Purged 1 messages from EVENTS
+
+State for Stream EVENTS created 2026-08-24 17:03:05
+
+State:
+
+        Host Version: 2.14.5
+  Required API Level: 0 hosted at level 4
+            Messages: 0
+               Bytes: 0 B
+      First Sequence: 2
+       Last Sequence: 1 @ 2026-08-24 17:15:30
+    Active Consumers: 0
+--- final check: EVENTS empty, KV empty ---
+    "messages": 0,
+service-directory
+Bash Find the A7 checklist line
+IN
+grep -n "A7\." /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md
+
+OUT
+404:- [ ] **A7. Manual smoke test** — using the `nats` CLI with one issued User JWT/nkey: publish/subscribe on an allowed subject (works), attempt a disallowed subject (rejected), KV put/get against `service-directory` (works). Confirms A1–A6 before any library code depends on it.
+Edit Design.md
+Modified
+Now let's add the final README section and update the "Not yet done" footer:
+
+Edit README.md
+Added 14 lines
+Bash Final status check
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+git status --short
+echo "---"
+sg docker -c "docker compose ps" 2>&1
+
+OUT
+ M Design.md
+ M infra/nats/README.md
+---
+NAME         IMAGE         COMMAND                  SERVICE   CREATED          STATUS          PORTS
+gsb-nats-1   nats:2.14.5   "/nats-server -c /et…"   nats      14 minutes ago   Up 14 minutes   0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+A7 done — and with it, Track A (A1–A7) is fully complete and empirically verified.
+
+The smoke test covered the one thing earlier steps hadn't exercised yet: an actual durable pull consumer — the real mechanism adapters will use (Design.md §6), not just plain pub/sub or KV. Full sequence, all against the live A6 stack:
+
+Published as webhook-listener-01 → landed in the EVENTS stream.
+Created a durable, filtered pull consumer as file-storage-01 and pulled the message through it — payload intact, acknowledged.
+Re-confirmed webhook-sender-01 is hard-denied publishing outside its allow-list.
+Confirmed file-storage-01 can write its own KV registration key but not another adapter's.
+Proved #4 was real permission enforcement (not a typo) by succeeding with the identical write as gsb-admin.
+One genuinely new finding, worth carrying into Track B: KV write violations fail as a timeout, not an explicit error the way pub/sub denials do. When gsb-core's registry.py gets built (Step B5), a hang on a KV write should be treated as a likely permissions issue, not a network one — that's not obvious from the docs, only from watching it happen.
+
+All test artifacts cleaned up (stream purged, test keys deleted); the real stack is still up and healthy.
+
+Where this leaves things: Track A (infra: auth, server, JetStream objects, compose, smoke test) is done — 7 steps, every one of them actually run against real Docker, not just written and assumed correct. That leaves Track B (gsb-core — B1–B7: envelope, crypto, config, registry client, bus client, and an end-to-end proof with two fake adapters), which can now build against this real infrastructure instead of a hypothetical one, and Phase 2 (the Webhook Listener → File Storage Adapter vertical slice) beyond that.
+
+Want to move into Track B next, or pause here to review the running stack / the accumulated Design.md decisions first?
+
+session.log
+How can I replecate smoke tests in step A7 by hand?
+Here's the full sequence, cleaned up for manual use (no sg docker -c needed — that workaround was only for my session; your regular terminal already has docker group access). All commands assume the stack is up (docker compose ps should show gsb-nats-1 running — if not, run bash infra/nats/up.sh first) and that you're in the repo root.
+
+A small helper makes the rest less repetitive:
+
+
+CREDS="infra/nats/operator/creds"
+as() {
+  local who="$1"; shift
+  docker run --rm --network gsb_default \
+    -v "$(pwd)/$CREDS:/creds:ro" \
+    natsio/nats-box:0.19.7-nonroot \
+    nats --server nats://nats:4222 --creds "/creds/$who.creds" "$@"
+}
+1. Allowed publish — webhook-listener-01 is allowed to publish here:
+
+
+as webhook-listener-01 pub events.files.FileWriteRequested '{"path":"manual-test.txt"}'
+2. Confirm the stream captured it:
+
+
+as gsb-admin stream info EVENTS -j | grep '"messages"'
+Should show 1 (or however many you've published since the last purge).
+
+3. Durable pull consumer — the real delivery mechanism adapters use:
+
+
+as file-storage-01 consumer add EVENTS file-storage-01-consumer \
+  --filter events.files.FileWriteRequested \
+  --pull --ack explicit --deliver all --replay instant --defaults
+
+as file-storage-01 consumer next EVENTS file-storage-01-consumer --ack
+You should see the message payload printed, then Acknowledged message.
+
+4. Denied publish — webhook-sender-01 has no publish permissions:
+
+
+as webhook-sender-01 pub events.files.FileWriteRequested should-be-denied
+Expect: nats: error: nats: permissions violation: Permissions Violation for Publish to "...".
+
+5. KV write scoping — allowed on your own key, denied on someone else's:
+
+
+as file-storage-01 kv put service-directory events.files.FileWriteRequested.file-storage-01 '{"encryptionPublicKey":"placeholder"}'
+
+as file-storage-01 kv put service-directory events.files.FileWriteRequested.some-other-adapter should-be-denied
+The first succeeds. The second hangs for a few seconds and then times out (context deadline exceeded) — that's the permission denial; KV violations don't fail fast like plain pub/sub does.
+
+6. Confirm #5's denial was real permissions, not a typo — same key, as gsb-admin (broad KV access):
+
+
+as gsb-admin kv put service-directory events.files.FileWriteRequested.some-other-adapter should-succeed
+This one succeeds, proving the key path itself was valid.
+
+Cleanup (optional, but keeps the real stream/bucket free of test junk):
+
+
+as gsb-admin consumer rm EVENTS file-storage-01-consumer -f
+as gsb-admin stream purge EVENTS -f
+as gsb-admin kv del service-directory events.files.FileWriteRequested.file-storage-01 -f
+as gsb-admin kv del service-directory events.files.FileWriteRequested.some-other-adapter -f
+I've also added this as a runnable reference in infra/nats/README.md so it doesn't only live in chat history:
+
+Edit README.md
+Added 45 lines
+That section is now permanent reference material in infra/nats/README.md under Step A7, not just something you'd have to scroll back through chat to find again.
+
+------------------ Step A7 Completed -----------------------

@@ -84,6 +84,67 @@ Two things confirmed only by running this, not by reading Compose docs:
 
 **Executed and verified end-to-end, twice, from a fully clean state** — no operator, account, users, stream, bucket, or containers existing beforehand. First run: auth bootstrap → `nats` starts clean → readiness confirmed → `EVENTS` stream and `service-directory` bucket created. Second run: every step correctly reports "already exists, skipping add" while still confirming the server is up — genuine idempotency of the *entire* pipeline end to end, not just individual scripts tested in isolation. Left running afterward (this is the real deployment now, not a throwaway test container) — `docker compose down` to stop it, `docker compose down -v` to also drop the JetStream data volume.
 
-## Not yet done
+## Step A7 — Manual smoke test
 
-Steps A1–A6 pin versions, bootstrap auth identities, configure the server, provision JetStream objects, and wire it all into `docker-compose`. Still outstanding: the manual smoke test (A7) — see [Design.md §11](../../Design.md#11-phase-1--detailed-breakdown).
+Ran the full sequence from Design.md §11 against the live A6 stack:
+
+1. **Allowed publish** — `webhook-listener-01` → `events.files.FileWriteRequested`; confirmed it landed in the `EVENTS` stream (`messages: 0 → 1`).
+2. **Durable pull consumer** — created one as `file-storage-01` (`--filter events.files.FileWriteRequested --pull --ack explicit`), the actual delivery mechanism adapters use (Design.md §6), not exercised by any earlier step. Pulled the message through it — payload intact, acknowledged.
+3. **Denied publish** — `webhook-sender-01` still hard-rejected outside its allow-list (re-confirmed from A4).
+4. **KV write scoping** — `file-storage-01` can write its own registration key, denied writing another adapter's.
+5. **Confirmed (4) is real enforcement, not a typo** — the identical key write succeeds for `gsb-admin` (which has broad KV access).
+
+**New finding, worth remembering for `gsb-core`'s `registry.py` (Track B, Step B5):** a KV write permission violation manifests as a **timeout** (`context deadline exceeded`), not an explicit rejection the way plain pub/sub denials are (`Permissions Violation for Publish`, immediate). A hang on a KV write is more likely a permissions problem than a network one — don't assume otherwise when that code gets built.
+
+All test messages/consumers/keys were cleaned up afterward (stream purged back to 0 messages, test KV keys deleted); the running stack itself stayed up.
+
+### Reproducing this by hand
+
+Requires the stack up (`docker compose ps` shows `gsb-nats-1` running — `bash up.sh` if not) and a shell with real `docker` group access (no `sg docker -c` needed there). Run from the repo root:
+
+```bash
+CREDS="infra/nats/operator/creds"
+as() {
+  local who="$1"; shift
+  docker run --rm --network gsb_default \
+    -v "$(pwd)/$CREDS:/creds:ro" \
+    natsio/nats-box:0.19.7-nonroot \
+    nats --server nats://nats:4222 --creds "/creds/$who.creds" "$@"
+}
+
+# 1. Allowed publish
+as webhook-listener-01 pub events.files.FileWriteRequested '{"path":"manual-test.txt"}'
+
+# 2. Confirm the stream captured it
+as gsb-admin stream info EVENTS -j | grep '"messages"'
+
+# 3. Durable pull consumer — the real delivery mechanism adapters use
+as file-storage-01 consumer add EVENTS file-storage-01-consumer \
+  --filter events.files.FileWriteRequested \
+  --pull --ack explicit --deliver all --replay instant --defaults
+as file-storage-01 consumer next EVENTS file-storage-01-consumer --ack
+
+# 4. Denied publish (expect: Permissions Violation for Publish)
+as webhook-sender-01 pub events.files.FileWriteRequested should-be-denied
+
+# 5. KV write scoping: allowed on your own key, denied on someone else's
+#    (the second one hangs a few seconds then times out — KV denials don't
+#    fail fast the way pub/sub denials do)
+as file-storage-01 kv put service-directory events.files.FileWriteRequested.file-storage-01 '{"encryptionPublicKey":"placeholder"}'
+as file-storage-01 kv put service-directory events.files.FileWriteRequested.some-other-adapter should-be-denied
+
+# 6. Confirm #5 was a real permission denial, not a typo — same key, admin creds
+as gsb-admin kv put service-directory events.files.FileWriteRequested.some-other-adapter should-succeed
+
+# Cleanup
+as gsb-admin consumer rm EVENTS file-storage-01-consumer -f
+as gsb-admin stream purge EVENTS -f
+as gsb-admin kv del service-directory events.files.FileWriteRequested.file-storage-01 -f
+as gsb-admin kv del service-directory events.files.FileWriteRequested.some-other-adapter -f
+```
+
+## Track A: complete
+
+Steps A1–A7 are done and empirically verified, not just written — versions pinned, auth bootstrapped, server configured, JetStream objects provisioned, everything wired into `docker-compose`, and the whole pipeline smoke-tested end to end including the actual durable-consumer delivery mechanism. See [Design.md §11](../../Design.md#11-phase-1--detailed-breakdown) for Track B (`gsb-core` library — B1–B7), which can now build against this real infrastructure instead of a hypothetical one.
+
+
