@@ -1,0 +1,41 @@
+# Gregor's Service Bus — docker-compose
+# Phase 1, Step A6 (Design.md §11 Track A) — infra-only for now.
+#
+# Just the `nats` service. Adapters get added here in Phase 3 (Design.md §10).
+#
+# IMPORTANT — run order, not automated by this file:
+#   1. infra/nats/bootstrap_auth.sh   (Step A3 — generates resolver.conf and
+#      the .creds files this service's config depends on; must exist BEFORE
+#      `nats` can start, since nats-server.conf `include`s it)
+#   2. docker compose up -d nats
+#   3. infra/nats/bootstrap_jetstream.sh   (Step A5 — needs a running,
+#      authenticated server to create the EVENTS stream + service-directory
+#      KV bucket against)
+# infra/nats/up.sh runs all three in order. See infra/nats/README.md for why
+# this isn't wired into Compose's own dependency graph (`depends_on` +
+# service_completed_successfully/service_healthy): both bootstrap scripts
+# already shell out to `docker run` themselves (Design.md §11's "no native
+# install" decision — nsc/nats CLI/yq all run containerized); running them
+# as Compose services too would mean Docker-outside-of-Docker (mounting the
+# host's docker.sock into a container just to spawn sibling containers),
+# which is real added fragility for scripts that already work well as
+# host-level tooling. Revisit if that tradeoff stops being worth it.
+
+name: gsb   # fixes the Compose project/network name (gsb_default) regardless
+            # of the checkout directory's name — infra/nats/up.sh depends on it
+
+services:
+  nats:
+    image: nats:2.14.5
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    ports:
+      - "4222:4222"   # client connections
+      - "8222:8222"   # monitoring (/varz, /healthz, ...)
+    volumes:
+      - ./infra/nats/nats-server.conf:/etc/nats/nats-server.conf:ro
+      - ./infra/nats/resolver.conf:/etc/nats/resolver.conf:ro
+      - nats-data:/data/jetstream
+    restart: unless-stopped
+
+volumes:
+  nats-data:

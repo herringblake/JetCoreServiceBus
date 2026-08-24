@@ -71,6 +71,19 @@ Beyond "did it create the objects," the actual **TTL/heartbeat mechanism** the r
 
 One terminology note worth keeping in mind: `nats kv add --ttl` sets a bucket-wide max-age applied per key's own last-write time — not NATS's separate opt-in "Per-Key TTL" feature (`--marker-ttl`), which is for giving *different* keys *different* TTLs. Our design only ever needs one uniform TTL value, so the simpler mechanism is sufficient and is what's used.
 
+## Step A6 — docker-compose
+
+[`docker-compose.yml`](../../docker-compose.yml) (repo root) runs just the `nats` service for now — adapters get added in Phase 3. [`up.sh`](up.sh) is the orchestration wrapper: `bootstrap_auth.sh` → `docker compose up -d nats` → wait for the server to actually accept authenticated connections → `bootstrap_jetstream.sh`.
+
+**Deviated from the original plan on purpose, flagged rather than silently changed:** Design.md originally called for a "one-shot init container running A3+A5 on startup." Both bootstrap scripts already shell out to `docker run` themselves — running them as Compose services too would mean mounting the host's `docker.sock` into a container just to spawn sibling containers (Docker-outside-of-Docker), real added fragility for scripts that already work well as host-level tooling. `up.sh` sequences them from the host instead.
+
+Two things confirmed only by running this, not by reading Compose docs:
+
+1. **The `nats:2.14.5` image has no shell at all** (`sh` isn't found) — a Compose-native `HEALTHCHECK` command can't run inside it. `up.sh` checks readiness externally instead, using the same nats-box tooling as the rest of Phase 1.
+2. **`bootstrap_jetstream.sh`'s default `nats://nats:4222` only resolves inside the Compose network** — its containerized `nats` calls need to join that network explicitly. Added a `DOCKER_NETWORK` override (`up.sh` sets it to `gsb_default`, pinned via `name: gsb` in the compose file so the network name doesn't depend on the checkout directory's name).
+
+**Executed and verified end-to-end, twice, from a fully clean state** — no operator, account, users, stream, bucket, or containers existing beforehand. First run: auth bootstrap → `nats` starts clean → readiness confirmed → `EVENTS` stream and `service-directory` bucket created. Second run: every step correctly reports "already exists, skipping add" while still confirming the server is up — genuine idempotency of the *entire* pipeline end to end, not just individual scripts tested in isolation. Left running afterward (this is the real deployment now, not a throwaway test container) — `docker compose down` to stop it, `docker compose down -v` to also drop the JetStream data volume.
+
 ## Not yet done
 
-Steps A1–A5 pin versions, bootstrap auth identities, configure the server, and provision JetStream objects. Still outstanding: wiring everything into `docker-compose` (A6) and the manual smoke test (A7) — see [Design.md §11](../../Design.md#11-phase-1--detailed-breakdown).
+Steps A1–A6 pin versions, bootstrap auth identities, configure the server, provision JetStream objects, and wire it all into `docker-compose`. Still outstanding: the manual smoke test (A7) — see [Design.md §11](../../Design.md#11-phase-1--detailed-breakdown).

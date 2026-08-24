@@ -24,10 +24,12 @@ CREDS_DIR="$SCRIPT_DIR/operator/creds"
 CREDS_FILE="$CREDS_DIR/gsb-admin.creds"
 NATS_BOX_IMAGE="natsio/nats-box:0.19.7-nonroot"
 
-# Overridable for local testing (e.g. `--network container:<name>` puts this
-# container in the server's own network namespace, where it's reachable as
-# localhost); defaults to the service name Step A6's docker-compose will use.
+# Overridable for local testing; defaults to the service name Step A6's
+# docker-compose uses. For that hostname to resolve, this script's
+# containerized `nats` calls need to join the compose network — set
+# DOCKER_NETWORK (up.sh does this automatically; e.g. `gsb_default`).
 NATS_URL="${NATS_URL:-nats://nats:4222}"
+DOCKER_NETWORK="${DOCKER_NETWORK:-}"
 
 STREAM_NAME="EVENTS"
 STREAM_SUBJECTS="events.>"
@@ -45,7 +47,9 @@ if [ ! -f "$CREDS_FILE" ]; then
 fi
 
 nats() {
-  docker run --rm \
+  local net_args=()
+  [ -n "$DOCKER_NETWORK" ] && net_args=(--network "$DOCKER_NETWORK")
+  docker run --rm "${net_args[@]}" \
     -v "$CREDS_DIR:/creds:ro" \
     "$NATS_BOX_IMAGE" \
     nats --server "$NATS_URL" --creds /creds/gsb-admin.creds "$@"
