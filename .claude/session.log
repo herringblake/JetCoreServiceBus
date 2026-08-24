@@ -2399,3 +2399,349 @@ Verified outcome: 3 consecutive full runs, all 6 adapter identities created with
 Design.md §11, the README, and Dependencies.md are all updated to reflect what was actually verified rather than what was hoped to work. A3 is genuinely done now, not just written. Ready for A4 (nats-server.conf, wiring in resolver.conf) whenever you want to continue.
 
 ---------------- Step A3 Completed -------------------
+
+Lets continue with step A4
+Let's verify the config syntax before writing it, then actually test it against the pinned nats-server image — same rigor as A3.
+
+Web Searchnats-server.conf include directive syntax jetstream store_dir example
+OUT
+Web search results for query: "nats-server.conf include directive syntax jetstream store_dir example"
+
+Links: [{"title":"Config management | NATS Documentation","url":"https://docs.nats.io/learn/deployment/config-management"},{"title":"Nats Jetstream Implementation Steps","url":"https://www.c-sharpcorner.com/article/nats-jetstream-implementation-steps/"},{"title":"nats.docs/running-a-nats-service/configuration/README.md at master · nats-io/nats.docs","url":"https://github.com/nats-io/nats.docs/blob/master/running-a-nats-service/configuration/README.md"},{"title":"Nats","url":"https://docs.nats.io/running-a-nats-service/configuration.md"},{"title":"NATS Jetstreams creation and management · nats-io/nats-server · Discussion #4457","url":"https://github.com/nats-io/nats-server/discussions/4457"},{"title":"Configuring JetStream | NATS Docs","url":"https://docs.nats.io/running-a-nats-service/configuration/resource_management"},{"title":"NATS Server Configuration | wasmCloud","url":"https://wasmcloud.com/docs/v1/deployment/nats/cluster-config/"},{"title":"Server Configuration - NATS Server","url":"https://www.mintlify.com/nats-io/nats-server/deployment/configuration"},{"title":"Configuring NATS Server - NATS Docs","url":"https://docs.nats.io/running-a-nats-service/configuration"},{"title":"Running a basic NATS JetStream cluster - Into dotNET","url":"https://intodot.net/running-a-basic-nats-jetstream-cluster/"}]
+
+Based on the search results, here's information about the NATS server configuration directives:
+
+## Include Directive Syntax
+
+The include directive is not followed by = or :, as it is a directive. An include pulls another file into the config at the point of the directive. The keyword is include, and the path is relative to the directory of the config file that contains it, not to the directory you launch the server from. Starting the server only needs to refer to the top-level config containing the include.
+
+## JetStream store_dir Configuration
+
+By default, the JetStream subsystem will store data in the /tmp directory, but you can specify the directory to use via the store_dir, as well as the limits for JetStream storage (a value of 0 means no limit).
+
+## Example Configuration
+
+Here's an example of JetStream configuration with store_dir:
+
+jetstream { store_dir: /data/jetstream max_mem: 1G max_file: 100G }
+
+The JetStream store_dir: the server won't move its storage directory on a reload. A reload can change policy (who connects, what they may do, how much they may store), but it can't change identity (the addresses the server and its cluster bind, or where JetStream keeps its data).
+
+
+REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.
+Web Searchofficial nats docker image custom config file -c usage docker run
+OUT
+Web search results for query: "official nats docker image custom config file -c usage docker run"
+
+Links: [{"title":"How to Use NATS with Docker","url":"https://oneuptime.com/blog/post/2026-02-02-nats-docker/view"},{"title":"NATS - Testcontainers for Go","url":"https://golang.testcontainers.org/modules/nats/"},{"title":"Passing options or config overrides? · Issue #1 · nats-io/nats-docker","url":"https://github.com/nats-io/nats-docker/issues/1"},{"title":"How to set up nats with docker and docker compose with token - DEV Community","url":"https://dev.to/shaikhalamin/how-to-set-up-nats-with-docker-and-docker-compose-with-token-2ddb"},{"title":"Getting a Config File Inside a Container Volume - GitLab CI/CD - GitLab Forum","url":"https://forum.gitlab.com/t/getting-a-config-file-inside-a-container-volume/124243"},{"title":"nats - Official Image | Docker Hub","url":"https://hub.docker.com/_/nats"},{"title":"Usage: docker run [OPTIONS] IMAGE [COMMAND] [ARG...]","url":"https://github.com/docker/docker/blob/7e29b33546098816d5dbc1fc429e868f02b69e44/docs/reference/commandline/run.md"}]
+
+Based on the search results, here's how to use a custom config file with the official NATS Docker image:
+
+## Basic docker run Example
+
+To run NATS with a custom config file, mount your local config into the container and tell NATS to use it with the `-c` flag: `docker run -d \ --name nats \ -p 4222:4222 \ -p 8222:8222 \ -v $(pwd)/nats.conf:/etc/nats/nats.conf:ro \ -v nats-data:/data \ nats:latest \ -c /etc/nats/nats.conf`
+
+## Key Components
+
+- **Volume Mount**: `-v $(pwd)/nats.conf:/etc/nats/nats.conf:ro` mounts your local config file into the container
+- **Config Flag**: `-c /etc/nats/nats.conf` tells the NATS server to use the mounted config file
+
+## Docker Compose Alternative
+
+In Docker Compose, you can specify the config file using the command field: `command: ["-c", "/etc/nats/nats.conf"]`
+
+The `-c` flag is the NATS server parameter for specifying a configuration file path, separate from Docker's `-c/--cpu-shares` option. The configuration file allows you to define settings like JetStream storage, logging, authentication, and other server options.
+
+
+REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.
+Write nats-server.conf
+29 lines
+# infra/nats/nats-server.conf
+# Phase 1, Step A4 (Design.md §11 Track A)
+#
+# Client + monitoring listeners, JetStream storage, and auth. Auth is wired
+# in via `include resolver.conf` below — resolver.conf is generated by
+# bootstrap_auth.sh (Step A3), not hand-written, and is git-ignored. Run
+# that script first if it doesn't exist yet.
+
+listen: 0.0.0.0:4222
+http_port: 8222   # monitoring endpoint (/varz, /healthz, ...) — Design.md §7.6
+
+jetstream {
+  # Overridden by the docker-compose volume mount in Step A6; this default
+  # matches where that mount will land.
+  store_dir: /data/jetstream
+
+  # Dev-sized defaults — adjust if local storage needs grow. NATS docs'
+  # own example uses 100G for max_file; that's a production-cluster figure,
+  # not appropriate for a laptop dev environment.
+  max_mem: 256M
+  max_file: 2G
+}
+
+# NOTE: `include`'s path resolves relative to *this* file's directory, not
+# the directory the server is launched from (confirmed via NATS docs) — so
+# this only works because resolver.conf lives alongside nats-server.conf in
+# infra/nats/, and both get mounted into the container together (Step A6).
+include resolver.conf
+Now let's actually pull the pinned nats-server image and test it against this config:
+
+Bash Pull pinned nats-server image
+IN
+sg docker -c "docker pull nats:2.14.5" 2>&1 | tail -5
+
+OUT
+60d2ebe32288: Pull complete
+97fd9c8bfbc9: Download complete
+Digest: sha256:026a66a4497c6d7d3eed741781770099c48c755bf3a55b6950d76dd210596eb3
+Status: Downloaded newer image for nats:2.14.5
+docker.io/library/nats:2.14.5
+Bash Confirm resolver.conf still present from earlier A3 run
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+test -f infra/nats/resolver.conf && echo "resolver.conf present" || echo "MISSING - need to regenerate"
+
+OUT
+resolver.conf present
+Now let's start the server against this config and check it comes up clean:
+
+Bash Start the pinned nats-server with the new config and check startup logs
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+sg docker -c "docker rm -f gsb-nats-test >/dev/null 2>&1; docker run -d --name gsb-nats-test \
+  -v \"\$(pwd)/infra/nats/nats-server.conf:/etc/nats/nats-server.conf:ro\" \
+  -v \"\$(pwd)/infra/nats/resolver.conf:/etc/nats/resolver.conf:ro\" \
+  -v gsb-nats-test-data:/data/jetstream \
+  -p 14222:4222 -p 18222:8222 \
+  nats:2.14.5 -c /etc/nats/nats-server.conf"
+sleep 2
+echo "--- logs ---"
+sg docker -c "docker logs gsb-nats-test" 2>&1
+
+OUT
+e28e4a33e441efaa791ed82dfff45f0f881085ef2912e87ae7b5deb6fb229658
+--- logs ---
+[1] 2026/08/24 15:42:30.315178 [INF] Starting nats-server
+[1] 2026/08/24 15:42:30.315482 [INF]   Version:  2.14.5
+[1] 2026/08/24 15:42:30.315489 [INF]   Git:      [d3bc045]
+[1] 2026/08/24 15:42:30.315494 [INF]   Name:     NB22FAXTF4ZC36LWPVWSCPAXGWYTPFZ6HUYNENS6SWW53VIP2OPBFRQ6
+[1] 2026/08/24 15:42:30.315503 [INF]   Node:     E0u4lcyd
+[1] 2026/08/24 15:42:30.315508 [INF]   ID:       NB22FAXTF4ZC36LWPVWSCPAXGWYTPFZ6HUYNENS6SWW53VIP2OPBFRQ6
+[1] 2026/08/24 15:42:30.315538 [INF] Using configuration file: /etc/nats/nats-server.conf (sha256:81dd6824d0df08b035cd5d85c63e0ea7a670c7b7bb50880c777bdf61347e9bd2)
+[1] 2026/08/24 15:42:30.315580 [INF] Trusted Operators
+[1] 2026/08/24 15:42:30.315584 [INF]   System  : ""
+[1] 2026/08/24 15:42:30.315588 [INF]   Operator: "GregorsServiceBus"
+[1] 2026/08/24 15:42:30.315594 [INF]   Issued  : 2026-08-23 19:29:12 +0000 UTC
+[1] 2026/08/24 15:42:30.315614 [INF]   Expires : Never
+[1] 2026/08/24 15:42:30.315618 [WRN] Trusted Operators should utilize a System Account
+[1] 2026/08/24 15:42:30.316346 [INF] Starting http monitor on 0.0.0.0:8222
+[1] 2026/08/24 15:42:30.316502 [INF] Starting JetStream
+[1] 2026/08/24 15:42:30.316663 [INF]     _ ___ _____ ___ _____ ___ ___   _   __  __
+[1] 2026/08/24 15:42:30.316667 [INF]  _ | | __|_   _/ __|_   _| _ \ __| /_\ |  \/  |
+[1] 2026/08/24 15:42:30.316669 [INF] | || | _|  | | \__ \ | | |   / _| / _ \| |\/| |
+[1] 2026/08/24 15:42:30.316672 [INF]  \__/|___| |_| |___/ |_| |_|_\___/_/ \_\_|  |_|
+[1] 2026/08/24 15:42:30.316673 [INF] 
+[1] 2026/08/24 15:42:30.316675 [INF]          https://docs.nats.io/jetstream
+[1] 2026/08/24 15:42:30.316677 [INF] 
+[1] 2026/08/24 15:42:30.316679 [INF] ---------------- JETSTREAM ----------------
+[1] 2026/08/24 15:42:30.316681 [INF]   Strict:          true
+[1] 2026/08/24 15:42:30.316689 [INF]   Max Memory:      244.14 MB
+[1] 2026/08/24 15:42:30.316691 [INF]   Max Storage:     1.86 GB
+[1] 2026/08/24 15:42:30.316693 [INF]   Store Directory: "/data/jetstream/jetstream"
+[1] 2026/08/24 15:42:30.316695 [INF]   API Level:       4
+[1] 2026/08/24 15:42:30.316697 [INF] -------------------------------------------
+[1] 2026/08/24 15:42:30.316936 [INF] Took 423.155µs to start JetStream
+[1] 2026/08/24 15:42:30.316970 [FTL] Can't start JetStream: setting up internal jetstream subscriptions failed: system account not setup
+Real finding — JetStream under decentralized JWT auth requires a system account, and my A3 script didn't create one (nsc add operator needs -s/--sys at creation time). This is a hard requirement, not just the warning it looked like. Let me fix A3 and regenerate.
+
+Bash Clean up test container and volume
+IN
+sg docker -c "docker rm -f gsb-nats-test >/dev/null 2>&1; docker volume rm gsb-nats-test-data >/dev/null 2>&1"; echo done
+
+OUT
+done
+Edit bootstrap_auth.sh
+Added 4 lines
+Bash Wipe state and rerun bootstrap with --sys fix
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+rm -rf infra/nats/operator infra/nats/resolver.conf
+sg docker -c "bash infra/nats/bootstrap_auth.sh" 2>&1 | tail -20
+
+OUT
+wrote /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats/operator/creds/webhook-sender-01.creds
+-- db-adapter-mysql-01 (database-adapter-mysql) --
+[ OK ] generated and stored user key "UAK7WFDMWXAH7B3TWZACHVWGC44YFKQBC23M3ODXSCLGUU5OZP7VBBY4"
+[ OK ] generated user creds file `/nsc/keys/creds/GregorsServiceBus/GSB/db-adapter-mysql-01.creds`
+[ OK ] added user "db-adapter-mysql-01" to account "GSB"
+[ OK ] added pub "events.db.orders.RowChanged"
+[ OK ] added pub "$JS.API.>"
+[ OK ] added pub "$KV.service-directory.events.orders.OrderCreated.db-adapter-mysql-01"
+[ OK ] added sub "events.orders.OrderCreated"
+[ OK ] added sub "$JS.API.>"
+[ OK ] added sub "_INBOX.>"
+[ OK ] added sub "$KV.service-directory.>"
+[ OK ] generated user creds file `/nsc/keys/creds/GregorsServiceBus/GSB/db-adapter-mysql-01.creds`
+[ OK ] edited user "db-adapter-mysql-01"
+wrote /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats/operator/creds/db-adapter-mysql-01.creds
+== Memory resolver config ==
+Success!! - generated `/workspace/resolver.conf`
+[ OK ] wrote server configuration to `/workspace/resolver.conf`
+wrote /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats/resolver.conf
+Done. Next: Step A4 wires resolver.conf into nats-server.conf.
+Let's check whether resolver.conf now includes a system_account directive automatically:
+
+Bash Check for system_account directive in regenerated resolver.conf
+IN
+grep -i "system_account\|SYS" /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats/resolver.conf
+
+OUT
+system_account: AC7Q6Q4EHHMXHTD7WVJ4MVJLXB4CSRURTB4CM5ID5VIK5IWOL62KKF25
+  // Account "SYS"
+nsc generate config picked it up automatically — no changes needed to nats-server.conf itself. Let's retest the server startup:
+
+Bash Retest server startup with system account fix
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+sg docker -c "docker rm -f gsb-nats-test >/dev/null 2>&1; docker run -d --name gsb-nats-test \
+  -v \"\$(pwd)/infra/nats/nats-server.conf:/etc/nats/nats-server.conf:ro\" \
+  -v \"\$(pwd)/infra/nats/resolver.conf:/etc/nats/resolver.conf:ro\" \
+  -v gsb-nats-test-data:/data/jetstream \
+  -p 14222:4222 -p 18222:8222 \
+  nats:2.14.5 -c /etc/nats/nats-server.conf"
+sleep 2
+sg docker -c "docker logs gsb-nats-test" 2>&1
+
+OUT
+95495a2521e20cd662817b431255fa6be67da4065dd65eba7bcdb66a130ecf67
+[1] 2026/08/24 15:43:40.609100 [INF] Starting nats-server
+[1] 2026/08/24 15:43:40.609164 [INF]   Version:  2.14.5
+[1] 2026/08/24 15:43:40.609167 [INF]   Git:      [d3bc045]
+[1] 2026/08/24 15:43:40.609170 [INF]   Name:     NCV5FCA6BXEX3CGOJM4HHOMUUMVHTFL7E6KX7QOWTY3HQRS77WWR3WPD
+[1] 2026/08/24 15:43:40.609174 [INF]   Node:     loCWWPq9
+[1] 2026/08/24 15:43:40.609176 [INF]   ID:       NCV5FCA6BXEX3CGOJM4HHOMUUMVHTFL7E6KX7QOWTY3HQRS77WWR3WPD
+[1] 2026/08/24 15:43:40.609208 [INF] Using configuration file: /etc/nats/nats-server.conf (sha256:0b6d4b95f31790c3b1271df839e12304e7395820f621acbfa854a41490e0ebd3)
+[1] 2026/08/24 15:43:40.609210 [INF] Trusted Operators
+[1] 2026/08/24 15:43:40.609212 [INF]   System  : ""
+[1] 2026/08/24 15:43:40.609214 [INF]   Operator: "GregorsServiceBus"
+[1] 2026/08/24 15:43:40.609216 [INF]   Issued  : 2026-08-24 15:43:05 +0000 UTC
+[1] 2026/08/24 15:43:40.609231 [INF]   Expires : Never
+[1] 2026/08/24 15:43:40.610251 [INF] Starting http monitor on 0.0.0.0:8222
+[1] 2026/08/24 15:43:40.610398 [INF] Starting JetStream
+[1] 2026/08/24 15:43:40.610533 [INF]     _ ___ _____ ___ _____ ___ ___   _   __  __
+[1] 2026/08/24 15:43:40.610537 [INF]  _ | | __|_   _/ __|_   _| _ \ __| /_\ |  \/  |
+[1] 2026/08/24 15:43:40.610539 [INF] | || | _|  | | \__ \ | | |   / _| / _ \| |\/| |
+[1] 2026/08/24 15:43:40.610540 [INF]  \__/|___| |_| |___/ |_| |_|_\___/_/ \_\_|  |_|
+[1] 2026/08/24 15:43:40.610542 [INF] 
+[1] 2026/08/24 15:43:40.610550 [INF]          https://docs.nats.io/jetstream
+[1] 2026/08/24 15:43:40.610552 [INF] 
+[1] 2026/08/24 15:43:40.610553 [INF] ---------------- JETSTREAM ----------------
+[1] 2026/08/24 15:43:40.610555 [INF]   Strict:          true
+[1] 2026/08/24 15:43:40.610561 [INF]   Max Memory:      244.14 MB
+[1] 2026/08/24 15:43:40.610564 [INF]   Max Storage:     1.86 GB
+[1] 2026/08/24 15:43:40.610566 [INF]   Store Directory: "/data/jetstream/jetstream"
+[1] 2026/08/24 15:43:40.610568 [INF]   API Level:       4
+[1] 2026/08/24 15:43:40.610569 [INF] -------------------------------------------
+[1] 2026/08/24 15:43:40.611010 [INF] Took 608.272µs to start JetStream
+[1] 2026/08/24 15:43:40.611115 [INF] Listening for client connections on 0.0.0.0:4222
+[1] 2026/08/24 15:43:40.611382 [INF] Server is ready
+Let's confirm the whole auth chain actually works end to end — connect with real .creds files and pass a message through:
+
+Bash Publish a test message using a generated adapter credential
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+sg docker -c "docker run --rm --network container:gsb-nats-test \
+  -v \"\$(pwd)/infra/nats/operator/creds:/creds:ro\" \
+  natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://localhost:4222 --creds /creds/webhook-listener-01.creds \
+  pub events.files.FileWriteRequested 'hello from webhook-listener-01'" 2>&1
+
+OUT
+15:43:56 Published 30 bytes to "events.files.FileWriteRequested"
+Publish succeeded. Now let's confirm the reverse — that a subject not in an adapter's allow-list is actually rejected, proving the permission scoping is real, not just present:
+
+Bash Verify permission scoping is actually enforced (allowed vs denied subject)
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+echo "--- allowed: file-storage-01 subscribing to its own subject ---"
+sg docker -c "docker run --rm --network container:gsb-nats-test \
+  -v \"\$(pwd)/infra/nats/operator/creds:/creds:ro\" \
+  natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://localhost:4222 --creds /creds/file-storage-01.creds \
+  request events.files.FileWriteRequested '' --timeout 1s" 2>&1
+echo "--- denied: webhook-sender-01 publishing outside its allow-list ---"
+sg docker -c "docker run --rm --network container:gsb-nats-test \
+  -v \"\$(pwd)/infra/nats/operator/creds:/creds:ro\" \
+  natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://localhost:4222 --creds /creds/webhook-sender-01.creds \
+  pub events.files.FileWriteRequested 'should be denied'" 2>&1
+
+OUT
+Exit code 1
+--- allowed: file-storage-01 subscribing to its own subject ---
+15:44:04 Sending request on "events.files.FileWriteRequested"
+--- denied: webhook-sender-01 publishing outside its allow-list ---
+nats: error: nats: permissions violation: Permissions Violation for Publish to "events.files.FileWriteRequested"
+Both confirmed — server starts cleanly with JetStream running, and the per-adapter permission scoping from A2/A3 is genuinely enforced by the server (webhook-sender-01 was hard-rejected publishing outside its allow-list). Let's clean up the test resources and finalize the docs.
+
+Bash Clean up test container and volume
+IN
+sg docker -c "docker rm -f gsb-nats-test >/dev/null 2>&1; docker volume rm gsb-nats-test-data >/dev/null 2>&1"; echo done
+
+OUT
+done
+Edit Design.md
+Edit failed
+Bash Locate exact line for the jq bug bullet
+IN
+grep -n "jq' wasn't actually present\|Also settled: client connection" /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md
+
+OUT
+400:- [x] **A3. Bootstrap script (auth)** — [infra/nats/bootstrap_auth.sh](infra/nats/bootstrap_auth.sh): idempotent, containerized (`nsc` via `natsio/nats-box`, manifest parsed via `mikefarah/yq`), creates the Operator, `GSB` Account, and one User per A2 manifest entry, applies its permissions plus a derived KV-write grant and a v1 baseline (`$JS.API.>`, `_INBOX.>`, KV-read-all — not scoped down further in v1, a candidate for later tightening), generates a `.creds` file per adapter, and emits the memory-resolver config block. **Executed and verified end-to-end** (Docker access resolved — host user added to the `docker` group) across 3 consecutive runs, confirming true idempotency (no duplicate permission entries on repeat `edit user` calls). Three real bugs surfaced only by running it, not by reading docs — worth remembering: (1) `nsc list ... --json` writes to **stderr**, not stdout — a `2>/dev/null` silently broke every existence check; (2) `nsc`'s table output carries ANSI color codes even without a TTY, breaking `grep -w` matching — switched existence checks to `--json` throughout; (3) `jq` wasn't actually present on the host despite being assumed — dropped entirely in favor of `yq` alone. Also settled: client connection uses a single `.creds` file (JWT+nkey bundled, `nsc generate creds`), not separate nkey-seed/JWT paths — §7.6 and B4 updated accordingly.
+It's a single-line paragraph, not a bulleted list. Let me update it correctly and add the A4 checkbox:
+
+Edit Design.md
+Added 1 line
+Bash Check for duplicate A4 lines
+IN
+grep -n "A4\." /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md
+
+OUT
+401:- [x] **A4. `nats-server.conf`** — [infra/nats/nats-server.conf](infra/nats/nats-server.conf): client listener (`0.0.0.0:4222`), monitoring (`8222`), `jetstream {}` block (dev-sized: 256M mem / 2G file, store dir matching Step A6's planned volume mount), and `include resolver.conf` for auth. **Executed and verified**: started the pinned `nats:2.14.5` image against this config — clean startup ("Server is ready", JetStream initialized, no warnings) after the A3 system-account fix. Further confirmed with real traffic: published successfully using `webhook-listener-01`'s `.creds` on its allowed subject, and confirmed `webhook-sender-01` is hard-rejected ("Permissions Violation for Publish") publishing outside its allow-list — the per-adapter subject restriction from Decision #4 is genuinely enforced by the server, not just declared.
+402:- [ ] **A4. `nats-server.conf`** — JetStream enabled (storage dir/mode for dev), wired to the resolver config from A3.
+As suspected, a duplicate. Let me remove the stale unchecked line:
+
+Edit Design.md
+Removed 1 line
+Now let's add the A4 section to the infra README, matching the pattern used for A1–A3:
+
+Edit README.md
+Added 8 lines
+Bash Final status check
+IN
+git status --short && echo "---" && bash -n infra/nats/bootstrap_auth.sh && echo "SCRIPT_SYNTAX_OK"
+
+OUT
+ M Design.md
+ M infra/nats/README.md
+ M infra/nats/bootstrap_auth.sh
+?? infra/nats/nats-server.conf
+---
+SCRIPT_SYNTAX_OK
+A4 done — and genuinely verified, including a fix that flowed back into A3.
+
+What I built: infra/nats/nats-server.conf — client listener (0.0.0.0:4222), monitoring (8222), a dev-sized jetstream {} block (256M mem / 2G file — the NATS docs' own example uses 100G, which is a production-cluster figure, not a laptop default), and include resolver.conf for auth.
+
+Testing it against the real pinned nats:2.14.5 image caught a real bug — this time in A3, not A4: JetStream refuses to start under decentralized JWT auth without a System Account. The first startup attempt got as far as [FTL] Can't start JetStream: ... system account not setup — the earlier [WRN] Trusted Operators should utilize a System Account line looked like a nicety, not a hard requirement, until it actually failed. Fixed by adding --sys to A3's operator-creation call and regenerating everything; nsc generate config --mem-resolver then emits the needed system_account: directive automatically, so nats-server.conf itself needed no changes.
+
+Then went a step further than "does it start" — used the real generated .creds files to prove the auth chain actually works:
+
+Published successfully as webhook-listener-01 on its allowed subject.
+Confirmed webhook-sender-01 gets a hard "Permissions Violation for Publish" when publishing outside its allow-list.
+That second check matters: it's not just that the server starts — the per-adapter subject restrictions from A2/A3 (Decision #4) are actually enforced by NATS at connection time, not merely recorded in a manifest nobody's checked yet.
+
+All test containers/volumes cleaned up afterward; nothing left running. Design.md §11 and the infra README are updated to match what was actually verified.
+
+Ready for A5 (bootstrapping the EVENTS stream and service-directory KV bucket) whenever you want to continue.
+
+------------------ Step A4 Complete -------------------------

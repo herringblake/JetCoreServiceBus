@@ -50,6 +50,14 @@ docker run --rm -it \
 2. **`nsc`'s table output carries ANSI color codes even without a TTY**, and they sit flush against the name with no word boundary — a plain `grep -w` on that output silently never matches. Fixed by switching every existence check to `--json` output instead of parsing tables.
 3. **`jq` wasn't actually installed on the host**, despite being assumed as a "standard, ubiquitous" utility. Rather than ask for another native install, the script was rewritten to do all JSON extraction through the already-containerized `yq` instead.
 
+## Step A4 — `nats-server.conf`
+
+[`nats-server.conf`](nats-server.conf) enables the client listener (`4222`), monitoring (`8222`), and a dev-sized `jetstream {}` block, then `include`s the generated `resolver.conf` for auth.
+
+**Executed and verified** — ran the pinned `nats:2.14.5` image against this config directly (not just checked syntax): clean startup, JetStream initialized, no warnings. That test caught a 4th real bug, this one in **Step A3**: JetStream refuses to start under decentralized JWT auth without a **System Account** (`[FTL] Can't start JetStream: ... system account not setup`) — the `[WRN] Trusted Operators should utilize a System Account` line on the first attempt looked like a nicety, not a hard requirement. Fixed by adding `--sys` to `bootstrap_auth.sh`'s operator-creation call (now in the script); `nsc generate config --mem-resolver` then emits the needed `system_account:` directive into `resolver.conf` automatically — no changes needed to `nats-server.conf` itself.
+
+Further confirmed with real traffic, using the actual `.creds` files A3 generates: published successfully as `webhook-listener-01` on its allowed subject, and confirmed `webhook-sender-01` is hard-rejected ("Permissions Violation for Publish") publishing outside its allow-list — the per-adapter subject restrictions from A2/A3 are genuinely enforced by the server, not just declared in the manifest.
+
 ## Not yet done
 
-Steps A1–A3 pin versions, document how they're run, and bootstrap auth identities. Still outstanding: writing `nats-server.conf` (A4), bootstrapping the `EVENTS` stream and `service-directory` KV bucket (A5), wiring everything into `docker-compose` (A6), and the manual smoke test (A7) — see [Design.md §11](../../Design.md#11-phase-1--detailed-breakdown).
+Steps A1–A4 pin versions, bootstrap auth identities, and configure the server. Still outstanding: bootstrapping the `EVENTS` stream and `service-directory` KV bucket (A5), wiring everything into `docker-compose` (A6), and the manual smoke test (A7) — see [Design.md §11](../../Design.md#11-phase-1--detailed-breakdown).

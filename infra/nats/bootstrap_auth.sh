@@ -102,7 +102,11 @@ echo "== Operator: $OPERATOR_NAME =="
 if nsc_has "$OPERATOR_NAME" list operators; then
   echo "already exists, skipping add"
 else
-  nsc add operator --name "$OPERATOR_NAME"
+  # --sys: generates a System Account alongside the operator. Confirmed via
+  # a real run (not just the docs) that this isn't optional — nats-server
+  # refuses to start JetStream under decentralized JWT auth without one
+  # ("[FTL] Can't start JetStream: ... system account not setup").
+  nsc add operator --name "$OPERATOR_NAME" --sys
 fi
 
 echo "== Account: $ACCOUNT_NAME =="
