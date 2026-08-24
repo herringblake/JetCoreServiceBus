@@ -18,18 +18,38 @@ Both are pinned to specific tags rather than `latest`, for the same reproducibil
 
 ## Running `nsc` / `nats` CLI via Docker
 
-No local binary to install. General pattern:
+No local binary to install. General pattern (confirmed against `nsc`'s documented env vars and `nats-box`'s own README — see Sources below):
 
 ```bash
 docker run --rm -it \
-  -v "$(pwd)/infra/nats/operator:/nsc" \
+  -v "$(pwd)/infra/nats/operator/nsc:/nsc" \
+  -e NSC_HOME=/nsc \
+  -e NKEYS_PATH=/nsc/keys \
   natsio/nats-box:0.19.7-nonroot \
   nsc --version
 ```
 
-- `-v "$(pwd)/infra/nats/operator:/nsc"` — persists `nsc`'s Operator/Account/User store (nkeys + JWTs) to a local path instead of leaving it inside the ephemeral container. This is the same `infra/nats/operator/` directory called out as git-ignored in [Design.md §11](../../Design.md#11-phase-1--detailed-breakdown)'s parameter table — nothing containing key material gets committed. **Confirm the exact in-container path `nats-box` expects (`NSC_HOME`/`HOME`-derived) against its docs/entrypoint when actually running `nsc init` in step A3** — `/nsc` above is a placeholder until that's verified, not yet confirmed correct.
+- `NSC_HOME` (JWT/account store) and `NKEYS_PATH` (private keys) are `nsc`'s own documented env vars — pointing both under the one mounted volume persists everything to `infra/nats/operator/nsc/` on the host. That directory is git-ignored (see [.gitignore](../../.gitignore)) — nothing containing key material gets committed.
 - Once A6 stands up the `docker-compose` network, run this container with `--network <compose network name>` so it can reach the `nats` service by its compose service name for the A7 smoke test, instead of a host port.
+
+**Sources:** [`nsc` env vars](https://docs.nats.io/using-nats/nats-tools/nsc/basics) · [`nats-box` README](https://github.com/nats-io/nats-box/blob/main/README.md)
+
+## Additional pinned tools (Step A3)
+
+| Tool | Image/version | Purpose |
+|---|---|---|
+| `yq` (mikefarah) | `mikefarah/yq:4.52.4` (Docker only) | Parses `adapter_identities.yaml` to JSON, and does all JSON field extraction, inside [bootstrap_auth.sh](bootstrap_auth.sh). Originally paired with a host-installed `jq` for the JSON side — `jq` turned out not to actually be present on this host, so the script does everything through `yq` alone instead. |
+
+## Step A3 — Auth bootstrap
+
+[`bootstrap_auth.sh`](bootstrap_auth.sh) reads [adapter_identities.yaml](adapter_identities.yaml) (Step A2) and idempotently creates the Operator, the `GSB` Account, and one `nsc` User per manifest entry — applying that entry's subject permissions plus a derived KV-write grant and a v1 baseline (JetStream API + `_INBOX` + KV-read). It then generates a `.creds` file per adapter (JWT+nkey bundled — the standard NATS client connection artifact) and the memory-resolver config block consumed by `nats-server.conf` in Step A4.
+
+**Executed and verified end-to-end** against real Docker + `nsc` — 3 consecutive runs confirmed the script is genuinely idempotent (no duplicate permission entries accumulate on repeat `edit user` calls). Three real bugs only surfaced by running it, not by reading docs, all now fixed in the script:
+
+1. **`nsc list ... --json` writes its output to stderr, not stdout.** The first version of `nsc_has()` (the idempotency check) discarded stderr — so every entity looked "not found" on every run, and re-running the script failed with `operator ... exists already`.
+2. **`nsc`'s table output carries ANSI color codes even without a TTY**, and they sit flush against the name with no word boundary — a plain `grep -w` on that output silently never matches. Fixed by switching every existence check to `--json` output instead of parsing tables.
+3. **`jq` wasn't actually installed on the host**, despite being assumed as a "standard, ubiquitous" utility. Rather than ask for another native install, the script was rewritten to do all JSON extraction through the already-containerized `yq` instead.
 
 ## Not yet done
 
-This step only pins versions and documents how they're run. It does **not** install/run anything persistent, create the Operator/Account (A3), write `nats-server.conf` (A4), or start any container (A6) — those are separate steps in [Design.md §11](../../Design.md#11-phase-1--detailed-breakdown).
+Steps A1–A3 pin versions, document how they're run, and bootstrap auth identities. Still outstanding: writing `nats-server.conf` (A4), bootstrapping the `EVENTS` stream and `service-directory` KV bucket (A5), wiring everything into `docker-compose` (A6), and the manual smoke test (A7) — see [Design.md §11](../../Design.md#11-phase-1--detailed-breakdown).

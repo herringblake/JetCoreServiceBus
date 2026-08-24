@@ -1,0 +1,22 @@
+# --- NATS auth material (Design.md §11 Track A parameters: never committed) ---
+# nsc's Operator/Account/User store (nkeys + JWTs) and everything derived
+# from it (generated .creds files, the memory-resolver config, the operator
+# JWT) are regenerated locally by infra/nats/bootstrap_auth.sh, not committed.
+infra/nats/operator/
+infra/nats/resolver.conf
+infra/nats/operator.jwt
+
+# --- Python (uv workspace — Design.md §7.5, Track B) ---
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- General ---
+.env
+.DS_Store
