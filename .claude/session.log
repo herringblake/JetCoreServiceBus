@@ -5132,3 +5132,543 @@ Ready for B2 (envelope.py — the pydantic event envelope models) whenever you w
 
 -------------- Step B1 Completed -----------------
 
+on to B2
+Let's check Design.md §5's exact envelope schema again before modeling it, to make sure I match it precisely rather than from memory:
+
+Bash Re-read the exact envelope schema from Design.md §5
+IN
+sed -n '/^## 5. Event Envelope/,/^---/p' /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md
+
+OUT
+## 5. Event Envelope
+
+Baseline schema (extends the shape from the design notes):
+
+```json
+{
+  "event": {
+    "eventDetails": {
+      "eventId": "uuid7",
+      "eventCreated": "2026-08-22T18:04:00Z",
+      "eventType": "OrderCreated",
+      "eventSchemaVersion": "1.0.0",
+      "sourceServiceId": "rest-api-service-01",
+      "correlationId": "uuid7 (optional, for request/reply chains)",
+      "signature": "base64 — Ed25519 signature of the plaintext digest, signed with the sender's nkey (see §4.1)"
+    },
+    "encryption": {
+      "algorithm": "age-v1 (X25519 + XChaCha20-Poly1305)",
+      "recipients": [
+        { "keyId": "<recipient pubkey fingerprint>", "wrappedKey": "<base64>" }
+      ]
+    },
+    "eventPayload": "<base64 ciphertext>"
+  }
+}
+```
+
+Notes / assumptions baked into this:
+- **`subject` = one unique subject per `eventType`** (not per message instance) — e.g. `events.orders.OrderCreated` is the permanent home for that event type, and its payload schema is documented once, referenced by that subject.
+- Subject naming convention: `events.<boundedContext>.<EventType>` — kept as a **placeholder pattern** for now (`orders` is a stand-in bounded context). Real bounded-context names will replace the placeholder once they're known; nothing else in the design depends on the specific names chosen.
+- Schemas for `eventPayload` (pre-encryption, logical shape) are documented as versioned JSON Schema files, one per subject, checked into `schemas/` in the repo (see §7). `eventSchemaVersion` lets consumers detect breaking changes.
+
+---
+Now let's add the dependencies and write the models:
+
+Read pyproject.toml
+Edit pyproject.toml
+Added 3 lines
+Write envelope.py
+101 lines
+"""The event envelope (Design.md §5).
+
+Pure data modeling + (de)serialization — Step B2 (Design.md §11 Track B).
+Does not touch NATS or crypto: `signature` and the `encryption`/
+`eventPayload` fields are populated by whoever actually signs and encrypts
+(crypto.py, Step B3), not by this module. This module's job is just to be
+an accurate, round-trippable model of the wire format everyone else agrees
+on, plus the one piece of "pure logic" that doesn't need crypto — generating
+fresh metadata (eventId/eventCreated) for a new event.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+from pydantic import BaseModel, ConfigDict, Field
+from uuid6 import uuid7
+
+_MODEL_CONFIG = ConfigDict(frozen=True, populate_by_name=True)
+
+
+def new_event_id() -> str:
+    """A fresh UUIDv7 event id, as a string."""
+    return str(uuid7())
+
+
+def utc_now() -> datetime:
+    """The current time, UTC, timezone-aware — used as eventCreated's
+    default so every envelope gets a real timestamp without the caller
+    having to remember to supply one."""
+    return datetime.now(UTC)
+
+
+class EventDetails(BaseModel):
+    """Baseline event metadata (Design.md §5)."""
+
+    model_config = _MODEL_CONFIG
+
+    event_id: str = Field(default_factory=new_event_id, alias="eventId")
+    event_created: datetime = Field(default_factory=utc_now, alias="eventCreated")
+    event_type: str = Field(alias="eventType")
+    event_schema_version: str = Field(alias="eventSchemaVersion")
+    source_service_id: str = Field(alias="sourceServiceId")
+    correlation_id: str | None = Field(default=None, alias="correlationId")
+
+    # Optional here on purpose: Step B2 doesn't sign anything (that's
+    # crypto.py, B3). BusClient (B6) is responsible for refusing to publish
+    # an envelope whose signature is still None — see Design.md Decision #5.
+    signature: str | None = Field(default=None, alias="signature")
+
+
+class RecipientKey(BaseModel):
+    """One recipient's wrapped Content Encryption Key (Design.md §4.3)."""
+
+    model_config = _MODEL_CONFIG
+
+    key_id: str = Field(alias="keyId")
+    wrapped_key: str = Field(alias="wrappedKey")
+
+
+class EncryptionMetadata(BaseModel):
+    """Design.md §4.3 / §5 — the hybrid-encryption envelope metadata."""
+
+    model_config = _MODEL_CONFIG
+
+    algorithm: str
+    recipients: list[RecipientKey]
+
+
+class EventEnvelope(BaseModel):
+    """The `event` object itself (Design.md §5) — everything except the
+    outer wrapper key."""
+
+    model_config = _MODEL_CONFIG
+
+    event_details: EventDetails = Field(alias="eventDetails")
+    encryption: EncryptionMetadata
+    event_payload: str = Field(alias="eventPayload")
+
+
+class Event(BaseModel):
+    """The full wire-format message: `{"event": {...}}` (Design.md §5).
+
+    This is what actually gets published to / received from NATS.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    event: EventEnvelope
+
+    def to_wire(self) -> bytes:
+        """Serialize to the exact JSON-over-the-wire shape (camelCase
+        keys, per Design.md §5) as UTF-8 bytes, ready to publish."""
+        return self.model_dump_json(by_alias=True).encode("utf-8")
+
+    @classmethod
+    def from_wire(cls, data: bytes) -> Event:
+        """Parse a message received off the bus back into a validated
+        Event. Raises pydantic.ValidationError on a malformed envelope."""
+        return cls.model_validate_json(data)
+Now the round-trip tests, then let's actually run everything to verify — including checking the real datetime serialization format empirically rather than assuming:
+
+Write test_envelope.py
+131 lines
+"""Round-trip and shape tests for the event envelope (Design.md §5).
+
+No crypto here (that's B3) — encryption/signature fields use dummy sample
+values, just enough to exercise the model faithfully.
+"""
+
+import json
+from datetime import UTC, datetime
+
+import pytest
+from pydantic import ValidationError
+
+from gsb_core.envelope import (
+    EncryptionMetadata,
+    Event,
+    EventDetails,
+    EventEnvelope,
+    RecipientKey,
+    new_event_id,
+)
+
+
+def _sample_event(**details_overrides: object) -> Event:
+    details = EventDetails(
+        eventType="OrderCreated",
+        eventSchemaVersion="1.0.0",
+        sourceServiceId="rest-api-service-01",
+        **details_overrides,  # type: ignore[arg-type]
+    )
+    envelope = EventEnvelope(
+        eventDetails=details,
+        encryption=EncryptionMetadata(
+            algorithm="age-v1 (X25519 + XChaCha20-Poly1305)",
+            recipients=[RecipientKey(keyId="fingerprint-abc", wrappedKey="d2VpcmQ=")],
+        ),
+        eventPayload="Y2lwaGVydGV4dA==",
+    )
+    return Event(event=envelope)
+
+
+def test_round_trip_preserves_all_fields() -> None:
+    original = _sample_event(correlationId="corr-123", signature="c2ln")
+
+    wire_bytes = original.to_wire()
+    restored = Event.from_wire(wire_bytes)
+
+    assert restored == original
+
+
+def test_wire_shape_matches_design_doc_section_5() -> None:
+    """The exact key names/nesting from Design.md §5 — camelCase, under a
+    top-level "event" key. If this drifts, the design doc and the code have
+    diverged."""
+    event = _sample_event(correlationId="corr-123", signature="c2ln")
+    parsed = json.loads(event.to_wire())
+
+    assert set(parsed.keys()) == {"event"}
+    details = parsed["event"]["eventDetails"]
+    assert set(details.keys()) == {
+        "eventId",
+        "eventCreated",
+        "eventType",
+        "eventSchemaVersion",
+        "sourceServiceId",
+        "correlationId",
+        "signature",
+    }
+    encryption = parsed["event"]["encryption"]
+    assert set(encryption.keys()) == {"algorithm", "recipients"}
+    assert set(encryption["recipients"][0].keys()) == {"keyId", "wrappedKey"}
+    assert "eventPayload" in parsed["event"]
+
+
+def test_event_id_defaults_to_a_fresh_uuid7_when_not_supplied() -> None:
+    d1 = EventDetails(eventType="X", eventSchemaVersion="1.0.0", sourceServiceId="svc-1")
+    d2 = EventDetails(eventType="X", eventSchemaVersion="1.0.0", sourceServiceId="svc-1")
+
+    assert d1.event_id != d2.event_id
+    # UUIDv7 is time-ordered: string comparison of the standard hex form
+    # reflects creation order for ids minted moments apart.
+    assert d1.event_id < d2.event_id
+
+
+def test_new_event_id_helper_produces_a_valid_uuid7_string() -> None:
+    from uuid6 import UUID
+
+    parsed = UUID(new_event_id())
+    assert parsed.version == 7
+
+
+def test_event_created_defaults_to_now_utc_when_not_supplied() -> None:
+    before = datetime.now(UTC)
+    details = EventDetails(eventType="X", eventSchemaVersion="1.0.0", sourceServiceId="svc-1")
+    after = datetime.now(UTC)
+
+    assert before <= details.event_created <= after
+    assert details.event_created.tzinfo is not None
+
+
+def test_correlation_id_and_signature_default_to_none() -> None:
+    details = EventDetails(eventType="X", eventSchemaVersion="1.0.0", sourceServiceId="svc-1")
+
+    assert details.correlation_id is None
+    assert details.signature is None
+
+    parsed = json.loads(details.model_dump_json(by_alias=True))
+    assert parsed["correlationId"] is None
+    assert parsed["signature"] is None
+
+
+def test_missing_required_field_raises_validation_error() -> None:
+    with pytest.raises(ValidationError):
+        EventDetails(eventSchemaVersion="1.0.0", sourceServiceId="svc-1")  # type: ignore[call-arg]
+
+
+def test_envelope_is_frozen() -> None:
+    event = _sample_event()
+    with pytest.raises(ValidationError):
+        event.event.event_payload = "different"  # type: ignore[misc]
+
+
+def test_can_construct_with_python_attribute_names_too() -> None:
+    """populate_by_name=True — internal code (crypto.py, bus_client.py)
+    shouldn't be forced to use camelCase kwargs."""
+    details = EventDetails(
+        event_type="OrderCreated",
+        event_schema_version="1.0.0",
+        source_service_id="rest-api-service-01",
+    )
+    assert details.event_type == "OrderCreated"
+Now let's actually run this — sync the new deps, run pytest/ruff/mypy, and check the real datetime wire format:
+
+Bash Sync new pydantic/uuid6 dependencies
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv sync --all-packages 2>&1 | tail -15
+
+OUT
+Resolved 59 packages in 5.46s
+   Building gsb-core @ file:///home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core
+Downloading pydantic-core (2.0MiB)
+ Downloaded pydantic-core
+      Built gsb-core @ file:///home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core
+Prepared 6 packages in 353ms
+Uninstalled 1 package in 0.39ms
+Installed 6 packages in 5ms
+ + annotated-types==0.8.0
+ ~ gsb-core==0.1.0 (from file:///home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core)
+ + pydantic==2.13.4
+ + pydantic-core==2.46.4
+ + typing-inspection==0.4.4
+ + uuid6==2025.0.1
+Bash Run the envelope tests
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== pytest ==="
+uv run --all-packages pytest -v 2>&1 | tail -25
+
+OUT
+=== pytest ===
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0 -- /home/bherring/dev/clodhopper/GregorsServiceBus/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/bherring/dev/clodhopper/GregorsServiceBus
+configfile: pyproject.toml
+testpaths: libs, adapters
+plugins: cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 10 items
+
+libs/gsb-core/tests/test_envelope.py::test_round_trip_preserves_all_fields PASSED [ 10%]
+libs/gsb-core/tests/test_envelope.py::test_wire_shape_matches_design_doc_section_5 PASSED [ 20%]
+libs/gsb-core/tests/test_envelope.py::test_event_id_defaults_to_a_fresh_uuid7_when_not_supplied PASSED [ 30%]
+libs/gsb-core/tests/test_envelope.py::test_new_event_id_helper_produces_a_valid_uuid7_string PASSED [ 40%]
+libs/gsb-core/tests/test_envelope.py::test_event_created_defaults_to_now_utc_when_not_supplied PASSED [ 50%]
+libs/gsb-core/tests/test_envelope.py::test_correlation_id_and_signature_default_to_none PASSED [ 60%]
+libs/gsb-core/tests/test_envelope.py::test_missing_required_field_raises_validation_error PASSED [ 70%]
+libs/gsb-core/tests/test_envelope.py::test_envelope_is_frozen PASSED     [ 80%]
+libs/gsb-core/tests/test_envelope.py::test_can_construct_with_python_attribute_names_too PASSED [ 90%]
+libs/gsb-core/tests/test_scaffold.py::test_package_imports_and_has_version PASSED [100%]
+
+============================== 10 passed in 0.20s ==============================
+Bash Run ruff and mypy, check actual datetime serialization format
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== ruff ==="
+uv run ruff check . 2>&1
+uv run ruff format --check . 2>&1
+echo "=== mypy ==="
+uv run --all-packages mypy libs 2>&1
+echo "=== actual datetime wire format ==="
+uv run python -c "
+from gsb_core.envelope import EventDetails
+import json
+d = EventDetails(eventType='X', eventSchemaVersion='1.0.0', sourceServiceId='svc-1')
+print(json.loads(d.model_dump_json(by_alias=True))['eventCreated'])
+"
+
+OUT
+=== ruff ===
+I001 [*] Import block is un-sorted or un-formatted
+  --> libs/gsb-core/tests/test_envelope.py:7:1
+   |
+ 5 |   """
+ 6 |
+ 7 | / import json
+ 8 | | from datetime import UTC, datetime
+ 9 | |
+10 | | import pytest
+11 | | from pydantic import ValidationError
+12 | |
+13 | | from gsb_core.envelope import (
+14 | |     EncryptionMetadata,
+15 | |     Event,
+16 | |     EventDetails,
+17 | |     EventEnvelope,
+18 | |     RecipientKey,
+19 | |     new_event_id,
+20 | | )
+   | |_^
+help: Organize imports
+   |
+10 | import pytest
+   - from pydantic import ValidationError
+   -
+11 | from gsb_core.envelope import (
+--------------------------------------------------------------------------------
+18 | )
+19 + from pydantic import ValidationError
+20 |
+   |
+
+Found 1 error.
+[*] 1 fixable with the `--fix` option.
+10 files already formatted
+=== mypy ===
+libs/gsb-core/tests/test_envelope.py:119: error: Unused "type: ignore" comment  [unused-ignore]
+libs/gsb-core/tests/test_envelope.py:125: error: Unexpected keyword argument "event_type" for "EventDetails"; did you mean "eventType"?  [call-arg]
+libs/gsb-core/tests/test_envelope.py:125: error: Unexpected keyword argument "event_schema_version" for "EventDetails"; did you mean "eventSchemaVersion"?  [call-arg]
+libs/gsb-core/tests/test_envelope.py:125: error: Unexpected keyword argument "source_service_id" for "EventDetails"; did you mean "sourceServiceId"?  [call-arg]
+Found 4 errors in 1 file (checked 4 source files)
+=== actual datetime wire format ===
+2026-08-24T22:09:17.515177Z
+Real, useful findings — let's fix them one at a time rather than guess. First, the import order (auto-fixable), then add pydantic's mypy plugin (which should properly understand populate_by_name):
+
+Bash Auto-fix the import order issue
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check --fix . 2>&1
+
+OUT
+Found 1 error (1 fixed, 0 remaining).
+[This command modified 1 file you've previously read: libs/gsb-core/tests/test_envelope.py. Call Read before editing.]
+Good, the auto-fix landed cleanly. Now let's add pydantic's mypy plugin and see if that resolves the populate_by_name false positives:
+
+Read pyproject.toml
+Edit pyproject.toml
+Added 1 line
+Bash Re-run mypy with the pydantic plugin enabled
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages mypy libs 2>&1
+
+OUT
+Exit code 1
+libs/gsb-core/tests/test_envelope.py:27: error: Unused "type: ignore" comment  [unused-ignore]
+libs/gsb-core/tests/test_envelope.py:118: error: Unused "type: ignore" comment  [unused-ignore]
+libs/gsb-core/tests/test_envelope.py:124: error: Missing named argument "eventType" for "EventDetails"  [call-arg]
+libs/gsb-core/tests/test_envelope.py:124: error: Missing named argument "eventSchemaVersion" for "EventDetails"  [call-arg]
+libs/gsb-core/tests/test_envelope.py:124: error: Missing named argument "sourceServiceId" for "EventDetails"  [call-arg]
+Found 5 errors in 1 file (checked 4 source files)
+That confirms a real, known pydantic/mypy limitation — the plugin doesn't understand populate_by_name=True for alternate constructor kwargs at all, and it also revealed two of my original type: ignore comments were unnecessary. Let me fix each based on what mypy is actually telling me:
+
+Read test_envelope.py (lines 21-30)
+Edit test_envelope.py
+Modified
+Read test_envelope.py (lines 114-130)
+Edit test_envelope.py
+Added 3 lines
+Bash Full re-verification after fixes
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== mypy ==="
+uv run --all-packages mypy libs 2>&1
+echo "=== ruff ==="
+uv run ruff check . 2>&1
+echo "=== pytest ==="
+uv run --all-packages pytest -q 2>&1 | tail -5
+
+OUT
+=== mypy ===
+Success: no issues found in 4 source files
+=== ruff ===
+All checks passed!
+=== pytest ===
+..........                                                               [100%]
+10 passed in 0.09s
+Let's also verify bandit and pip-audit, and run the full pre-commit suite once more against the new files:
+
+Bash Verify bandit, pip-audit, and full pre-commit suite
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== bandit ==="
+uv run bandit -q -r libs/gsb-core/gsb_core 2>&1
+echo "=== pip-audit ==="
+uv run pip-audit 2>&1 | tail -10
+echo "=== pre-commit (full) ==="
+git add -N libs/gsb-core/gsb_core/envelope.py libs/gsb-core/tests/test_envelope.py
+uv run --all-packages pre-commit run --all-files 2>&1
+git reset libs/gsb-core/gsb_core/envelope.py libs/gsb-core/tests/test_envelope.py >/dev/null 2>&1
+
+OUT
+=== bandit ===
+=== pip-audit ===
+No known vulnerabilities found
+Name     Skip Reason
+-------- -----------------------------------------------------------------------
+gsb-core Dependency not found on PyPI and could not be audited: gsb-core (0.1.0)
+=== pre-commit (full) ===
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+mypy.....................................................................Passed
+bandit...................................................................Passed
+Bash Find B2 checklist line
+IN
+grep -n "B2\.\|B3\." /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md
+
+OUT
+409:- [ ] **B2. `envelope.py`** — pydantic models for the event envelope (§5), with (de)serialization and round-trip unit tests. Pure logic — doesn't touch NATS or crypto.
+410:- [ ] **B3. `crypto.py`** — hybrid encryption (`pyrage`: encrypt-for-recipients / decrypt) and Ed25519 signing/verification (`nkeys`), unit tested against fixed test keys. Still no live bus needed.
+Edit Design.md
+Modified
+Now let's update Dependencies.md with the real pydantic/uuid6 versions:
+
+Bash Find pydantic and uuid6 rows to update
+IN
+grep -n "pydantic\|uuid6" /home/bherring/dev/clodhopper/GregorsServiceBus/Dependencies.md
+
+OUT
+20:| `pydantic` (v2) | [PyPI](https://pypi.org/project/pydantic/) | *pin at adoption* | *pin at adoption* | Event envelope, config, and adapter payload schema modeling/validation. | Extremely widely adopted (FastAPI's foundation); large maintainer team, active CVE monitoring history. | 2026-08-23 |
+21:| `pydantic-settings` | [PyPI](https://pypi.org/project/pydantic-settings/) | *pin at adoption* | *pin at adoption* | Env-var/`.env`-driven adapter configuration loading. | Maintained by the Pydantic org itself; same trust tier as `pydantic`. | 2026-08-23 |
+37:| `watchfiles` | [PyPI](https://pypi.org/project/watchfiles/) | *pin at adoption* | *pin at adoption* | Detects files created by outside processes so the File Storage Adapter can emit `FileCreateCompleted` without a preceding command (Decision #19). | Rust-backed, async-native; maintained by Samuel Colvin (also the `pydantic` author) — same trust tier as the rest of the Pydantic-ecosystem picks already in this ledger. | 2026-08-23 |
+38:| `uuid6` | [PyPI](https://pypi.org/project/uuid6/) | *pin at adoption* | *pin at adoption* | `uuid7()` for event IDs — stdlib `uuid` doesn't gain native support until Python 3.14 (project targets 3.12, Decision #8). | Small, single-purpose implementation of a published RFC (RFC 9562); low risk surface. | 2026-08-23 |
+Edit Dependencies.md
+Modified
+Edit Dependencies.md
+Modified
+Bash Final status and verification
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+git status --short
+echo "--- final full verification ---"
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest -q 2>&1 | tail -3
+
+OUT
+ M Dependencies.md
+ M Design.md
+ M libs/gsb-core/pyproject.toml
+ M pyproject.toml
+ M uv.lock
+?? libs/gsb-core/gsb_core/envelope.py
+?? libs/gsb-core/tests/test_envelope.py
+--- final full verification ---
+..........                                                               [100%]
+10 passed in 0.08s
+B2 done — verified for real, with two genuine findings along the way.
+
+What's built: envelope.py — pydantic v2 models matching §5's wire schema exactly (Event → EventEnvelope → EventDetails/EncryptionMetadata/RecipientKey), frozen, with to_wire()/from_wire() round-trip serialization and default factories for eventId (UUIDv7) and eventCreated so callers don't have to remember either. signature stays optional here on purpose — B3 is what actually signs.
+
+10 tests, all passing, covering round-trip fidelity, the exact key-set match against §5, UUIDv7 uniqueness/ordering, frozen-model immutability, and required-field validation.
+
+Two things only running it (not writing it) surfaced:
+
+Confirmed empirically — not assumed — that pydantic serializes an aware UTC datetime with a Z suffix (2026-08-24T22:09:17.515177Z), matching §5's documented example format rather than drifting to +00:00.
+pydantic's mypy plugin doesn't understand populate_by_name=True — even with the plugin enabled (pydantic.mypy, now in root pyproject.toml), it still expects camelCase aliases in the synthesized __init__. Confirmed by actually turning the plugin on and watching it still fail, not assumed from memory. Handled with one narrowly-scoped type: ignore[call-arg] at the single call site that exercises snake_case construction, with a comment explaining why — not a blanket suppression.
+Full toolchain clean: pytest, ruff, mypy, bandit, pip-audit, and the complete pre-commit chain. Dependencies.md updated with real resolved versions (pydantic 2.13.4, uuid6 2025.0.1).
+
+Ready for B3 (crypto.py — hybrid encryption via pyrage + Ed25519 signing via nkeys) whenever you want to continue.
+
+-------------- Step B2 Completed ----------------------
