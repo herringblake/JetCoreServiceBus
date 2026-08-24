@@ -7,7 +7,9 @@ set -euo pipefail
 # Idempotently, via nsc (containerized — natsio/nats-box, no native install
 # per Design.md §11 parameters):
 #   1. Creates the Operator representing this bus, if it doesn't exist.
-#   2. Creates the GSB Account, if it doesn't exist.
+#   2. Creates the GSB Account, if it doesn't exist, and grants it JetStream
+#      storage (disabled per-account by default under decentralized JWT
+#      auth — independent of nats-server.conf's global jetstream{} block).
 #   3. For each entry in adapter_identities.yaml (Step A2): creates the User
 #      (nkey + JWT) if it doesn't exist, then (re)applies its permissions —
 #      the manifest's publish/subscribe subjects, plus KV-write on its own
@@ -18,6 +20,8 @@ set -euo pipefail
 #   4. Generates a .creds file per user (JWT+nkey bundled — the idiomatic
 #      NATS client connection artifact; see Design.md §7.6, Decision #17-adjacent
 #      update) under operator/creds/.
+#   4b. Creates a dedicated gsb-admin identity (not an adapter) for
+#       provisioning shared JetStream infrastructure — used by Step A5.
 #   5. Generates the memory-resolver server config block (resolver.conf) —
 #      consumed by nats-server.conf in Step A4.
 #
@@ -46,6 +50,14 @@ YQ_IMAGE="mikefarah/yq:4.52.4"
 
 OPERATOR_NAME="GregorsServiceBus"
 ACCOUNT_NAME="GSB"
+ADMIN_ID="gsb-admin"   # infra-provisioning identity (Step A5), not an adapter
+
+# JetStream storage the GSB account is allowed to use — kept in step with
+# nats-server.conf's own jetstream{} caps (256M mem / 2G file), since a
+# single-account dev setup has no reason for the account limit to be lower
+# than the server-wide limit.
+JS_MEM_STORAGE="256M"
+JS_DISK_STORAGE="2G"
 
 # v1 baseline permissions, granted to every adapter identity in addition to
 # its manifest-declared subjects — needed for the JetStream client library
@@ -116,6 +128,16 @@ else
   nsc add account --name "$ACCOUNT_NAME"
 fi
 
+# JetStream is disabled per-account by default under decentralized JWT auth
+# — entirely independent of nats-server.conf's global jetstream{} block.
+# Confirmed via a real run: `nsc describe account --json` showed no
+# .nats.limits.jetstream at all until this was added, and stream creation
+# would fail against a freshly-added account without it. Re-run (idempotent
+# edit) every time so a manifest/limit change takes effect on rerun.
+nsc edit account --name "$ACCOUNT_NAME" \
+  --js-mem-storage "$JS_MEM_STORAGE" \
+  --js-disk-storage "$JS_DISK_STORAGE"
+
 echo "== Users (from $MANIFEST) =="
 
 # One compact JSON line per manifest entry, read via process substitution so
@@ -157,6 +179,24 @@ while IFS= read -r adapter; do
     >"$CREDS_DIR/$service_id.creds"
   echo "wrote $CREDS_DIR/$service_id.creds"
 done < <(yq -o=json -I=0 '.adapters[]' <"$MANIFEST")
+
+echo "== Admin identity: $ADMIN_ID =="
+# Creating/managing the EVENTS stream and service-directory KV bucket
+# (Step A5) isn't any particular adapter's job — a dedicated identity keeps
+# "who can provision shared infrastructure" separate from "who can act as
+# adapter X", rather than borrowing an arbitrary adapter's creds for it.
+if nsc_has "$ADMIN_ID" list users --account "$ACCOUNT_NAME"; then
+  echo "already exists, skipping add"
+else
+  nsc add user --account "$ACCOUNT_NAME" --name "$ADMIN_ID"
+fi
+
+nsc edit user --account "$ACCOUNT_NAME" --name "$ADMIN_ID" \
+  --allow-pubsub '$JS.API.>,$KV.service-directory.>,_INBOX.>'
+
+nsc generate creds --account "$ACCOUNT_NAME" --name "$ADMIN_ID" \
+  >"$CREDS_DIR/$ADMIN_ID.creds"
+echo "wrote $CREDS_DIR/$ADMIN_ID.creds"
 
 echo "== Memory resolver config =="
 nsc generate config --mem-resolver --force \

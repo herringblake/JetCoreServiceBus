@@ -58,6 +58,19 @@ docker run --rm -it \
 
 Further confirmed with real traffic, using the actual `.creds` files A3 generates: published successfully as `webhook-listener-01` on its allowed subject, and confirmed `webhook-sender-01` is hard-rejected ("Permissions Violation for Publish") publishing outside its allow-list — the per-adapter subject restrictions from A2/A3 are genuinely enforced by the server, not just declared in the manifest.
 
+## Step A5 — JetStream objects
+
+[`bootstrap_jetstream.sh`](bootstrap_jetstream.sh) creates the `EVENTS` stream and `service-directory` KV bucket against a running server, using the `gsb-admin` identity (added to `bootstrap_auth.sh` in this step — see below).
+
+**Executed and verified**, including two things that only running it (not reading docs) turned up:
+
+1. **JetStream is disabled per-account by default** under decentralized JWT auth — a *separate* gap from Step A4's system-account fix, and independent of the server's global `jetstream{}` block. Stream creation would otherwise fail against the `GSB` account as originally bootstrapped. Fixed by adding `nsc edit account --js-mem-storage 256M --js-disk-storage 2G` to `bootstrap_auth.sh`, kept in step with `nats-server.conf`'s own caps.
+2. **Provisioning shared infrastructure isn't any adapter's job.** Added a dedicated `gsb-admin` identity to `bootstrap_auth.sh` (`$JS.API.>` + `$KV.service-directory.>` + `_INBOX.>`) rather than reusing one adapter's `.creds` file for stream/bucket management.
+
+Beyond "did it create the objects," the actual **TTL/heartbeat mechanism** the registry design depends on (Design.md §4.5) was verified directly, not assumed: wrote two keys to the real bucket, refreshed only one at t=30s, checked both at t=65s — the refreshed key was still there (revision 3, confirming the write-refreshes-the-clock behavior), the unrefreshed one had genuinely expired (`key not found`, confirming keys really do age out on schedule). Test keys and containers were cleaned up afterward.
+
+One terminology note worth keeping in mind: `nats kv add --ttl` sets a bucket-wide max-age applied per key's own last-write time — not NATS's separate opt-in "Per-Key TTL" feature (`--marker-ttl`), which is for giving *different* keys *different* TTLs. Our design only ever needs one uniform TTL value, so the simpler mechanism is sufficient and is what's used.
+
 ## Not yet done
 
-Steps A1–A4 pin versions, bootstrap auth identities, and configure the server. Still outstanding: bootstrapping the `EVENTS` stream and `service-directory` KV bucket (A5), wiring everything into `docker-compose` (A6), and the manual smoke test (A7) — see [Design.md §11](../../Design.md#11-phase-1--detailed-breakdown).
+Steps A1–A5 pin versions, bootstrap auth identities, configure the server, and provision JetStream objects. Still outstanding: wiring everything into `docker-compose` (A6) and the manual smoke test (A7) — see [Design.md §11](../../Design.md#11-phase-1--detailed-breakdown).
