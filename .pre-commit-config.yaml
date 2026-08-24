@@ -1,0 +1,36 @@
+# Step B1 (Design.md §7.4, §11 Track B). Hooks shell out to `uv run` rather
+# than letting pre-commit provision its own per-hook environments — reuses
+# the project's one uv-managed venv instead of duplicating it.
+#
+# This file is checked in but hooks are NOT auto-installed into .git/hooks —
+# that's a per-developer choice. Run `uv run pre-commit install` to enable
+# them locally.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+      - id: mypy
+        name: mypy
+        # Scoped to libs/ only for now — adapters/ doesn't exist until
+        # Phase 3, and unlike pytest, mypy hard-errors on a missing path
+        # argument rather than skipping it (confirmed by testing). Add
+        # `adapters` back here once that directory exists.
+        entry: uv run --all-packages mypy libs
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: bandit
+        name: bandit
+        entry: uv run bandit -q -r
+        language: system
+        types: [python]
+        exclude: ^.*/tests/

@@ -4467,3 +4467,668 @@ Added 45 lines
 That section is now permanent reference material in infra/nats/README.md under Step A7, not just something you'd have to scroll back through chat to find again.
 
 ------------------ Step A7 Completed -----------------------
+
+Move on to step B1
+Let's check what's available first, then set up the workspace scaffold and actually verify it works — same rigor as Track A.
+
+Bash Check for uv and python3 availability
+IN
+uv --version 2>&1; python3 --version 2>&1; which uv python3 2>&1
+
+OUT
+Exit code 1
+/bin/bash: line 1: uv: command not found
+Python 3.12.3
+/usr/bin/python3
+uv isn't installed, but its official installer is user-space (no sudo needed) — I can install it myself. Let me pin a real version first, consistent with everything else pinned so far.
+
+Web Searchastral uv latest release version GitHub 2026
+OUT
+Web search results for query: "astral uv latest release version GitHub 2026"
+
+Links: [{"title":"astral-sh/uv on GitHub | Release Alert","url":"https://releasealert.dev/github/astral-sh/uv"},{"title":"Release 0.12.5 · astral-sh/uv","url":"https://github.com/astral-sh/uv/releases/tag/0.12.5"},{"title":"Release 0.11.26 · astral-sh/uv","url":"https://github.com/astral-sh/uv/releases/tag/0.11.26"},{"title":"Release 0.11.29 · astral-sh/uv","url":"https://github.com/astral-sh/uv/releases/tag/0.11.29"},{"title":"Release 0.11.22 · astral-sh/uv","url":"https://github.com/astral-sh/uv/releases/tag/0.11.22"},{"title":"Releases · astral-sh/uv","url":"https://github.com/astral-sh/uv/releases"},{"title":"Releases · astral-sh/uv · GitHub","url":"https://translate.google.com/translate?client=srp&hl=es&sl=en&tl=es&u=https%3A%2F%2Fgithub.com%2Fastral-sh%2Fuv%2Freleases"},{"title":"uv/CHANGELOG.md at main · astral-sh/uv","url":"https://github.com/astral-sh/uv/blob/main/CHANGELOG.md"},{"title":"Releases · astral-sh/setup-uv","url":"https://github.com/astral-sh/setup-uv/releases"}]
+
+Based on the search results, the latest version of astral-sh/uv is 0.12.5, last published on August 14, 2026. uv is an extremely fast Python package and project manager, written in Rust.
+
+
+REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.
+Bash Install uv 0.12.5 via the official user-space installer
+IN
+curl -LsSf https://astral.sh/uv/0.12.5/install.sh | sh 2>&1 | tail -20
+
+OUT
+downloading uv 0.12.5 x86_64-unknown-linux-gnu
+installing to /home/bherring/.local/bin
+  uv
+  uvx
+everything's installed!
+
+To add $HOME/.local/bin to your PATH, either restart your shell or run:
+
+    source $HOME/.local/bin/env (sh, bash, zsh)
+    source $HOME/.local/bin/env.fish (fish)
+Bash Verify pinned uv version installed correctly
+IN
+source $HOME/.local/bin/env && uv --version
+
+OUT
+uv 0.12.5 (x86_64-unknown-linux-gnu)
+Bash Check if uv is on PATH in a fresh shell invocation
+IN
+uv --version 2>&1
+
+OUT
+Exit code 127
+/bin/bash: line 1: uv: command not found
+Bash Confirm full-path invocation works reliably
+IN
+$HOME/.local/bin/uv --version
+
+OUT
+uv 0.12.5 (x86_64-unknown-linux-gnu)
+Web Searchuv workspace virtual root pyproject.toml tool.uv.workspace members example
+OUT
+Web search results for query: "uv workspace virtual root pyproject.toml tool.uv.workspace members example"
+
+Links: [{"title":"Using workspaces | uv - Astral Docs","url":"https://docs.astral.sh/uv/concepts/projects/workspaces/"},{"title":"GitHub - mvoss02/uv_workspaces_example: In uv, a workspace allows you to manage multiple Python projects (packages) under a single root directory while treating them as a cohesive unit. This is particularly useful for **monorepos** or scenarios where you are developing multiple interdependent packages together (e.g., libraries, microservices, or related modules). · GitHub","url":"https://github.com/mvoss02/uv_workspaces_example"},{"title":"Managing dependencies | uv","url":"https://docs.astral.sh/uv/concepts/projects/dependencies/"},{"title":"Using uv workspaces | madflex","url":"https://madflex.de/uv-workspaces/"},{"title":"Managing Python workspaces with uv","url":"https://blog.freidereikhs.dev/posts/2024/12/18/managing-python-workspaces-with-uv/"},{"title":"3 Things I Wish I Knew Before Setting Up a UV Workspace - DEV Community","url":"https://dev.to/aws/3-things-i-wish-i-knew-before-setting-up-a-uv-workspace-30j6"},{"title":"uv workspace: effective management of Python apps - Han's XYZ","url":"https://han8931.github.io/uv-packages/"},{"title":"Workspaces - uv","url":"https://mintlify.wiki/astral-sh/uv/concepts/workspaces"}]
+
+Based on the search results, here's information about uv workspace virtual root with `pyproject.toml` and `tool.uv.workspace` members:
+
+## Workspace Structure
+
+Every workspace needs a root, which is also a workspace member. To create a workspace, add a tool.uv.workspace table to a pyproject.toml, which will implicitly create a workspace rooted at that package.
+
+## Virtual Root Example
+
+A workspace can have a "virtual" root that only aggregates packages with empty dependencies. Here's a concrete example:
+
+```toml
+[project]
+name = "workspace-root"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv.workspace]
+members = ["packages/*"]
+```
+
+## Members Configuration
+
+In defining a workspace, you must specify the members (required) and exclude (optional) keys, which direct the workspace to include or exclude specific directories as members respectively, and accept lists of globs.
+
+A practical example from the search results shows:
+
+```toml
+[tool.uv.workspace]
+members = [
+    "packages/my_package_1",
+    "packages/my_package_2",
+    "services/data_ingestion",
+    "services/data_preprocessing"
+]
+```
+
+## Key Considerations
+
+Each package has its own pyproject.toml, but the workspace shares one lockfile, keeping dependencies consistent across apps and libraries. Additionally, every directory included by the members globs (and not excluded by the exclude globs) must contain a pyproject.toml file.
+
+
+REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.
+Now let's design the workspace. I'll write it, then actually run uv sync/pytest/ruff/mypy against it rather than assume the config is correct.
+
+Write .python-version
+2 lines
+3.12
+Write pyproject.toml
+49 lines
+# Gregor's Service Bus — uv workspace root (Decision #16, Design.md §7.5)
+#
+# This root is "virtual" (tool.uv.package = false) — it's not itself an
+# installable package, just the workspace container plus shared dev tooling
+# config and the shared dev dependency group. Real packages live under
+# libs/ (gsb-core) and adapters/ (populated starting Phase 3).
+
+[project]
+name = "gregors-service-bus"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["libs/*", "adapters/*"]
+
+[dependency-groups]
+# Shared across the whole workspace (Design.md §7.4). bandit/pip-audit/
+# pre-commit are here as CLI tools invoked via `uv run`, not as runtime deps
+# of any package.
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "bandit>=1.8",
+    "pip-audit>=2.7",
+    "pre-commit>=4",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+testpaths = ["libs", "adapters"]
+Now the gsb-core package itself:
+
+Write pyproject.toml
+19 lines
+# gsb-core — shared library used by every adapter (Design.md §7.1)
+#
+# Step B1 scaffold only: package structure + tooling wiring, no runtime
+# dependencies yet. pydantic/pyrage/nats-py/etc. get added in B2–B6 as each
+# module (envelope, crypto, bus_client, registry, config) is actually built.
+
+[project]
+name = "gsb-core"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["gsb_core"]
+Write __init__.py
+9 lines
+"""gsb-core — shared library for Gregor's Service Bus adapters.
+
+Step B1 scaffold. Real modules (envelope, crypto, bus_client, registry,
+config) land in Steps B2–B6 (Design.md §11 Track B) — this package is
+intentionally empty of application logic until then.
+"""
+
+__version__ = "0.1.0"
+Write test_scaffold.py
+9 lines
+"""Step B1 scaffold smoke test — proves the package installs and the
+pytest/ruff/mypy wiring actually works, before any real logic exists."""
+
+import gsb_core
+
+
+def test_package_imports_and_has_version() -> None:
+    assert gsb_core.__version__ == "0.1.0"
+Now let's actually run the whole toolchain against this and see what breaks:
+
+Bash Sync the uv workspace for real
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+$HOME/.local/bin/uv sync 2>&1
+
+OUT
+Using CPython 3.12.3 interpreter at: /usr/bin/python3.12
+Creating virtual environment at: .venv
+Resolved 54 packages in 2.02s
+Downloading ast-serialize (1.2MiB)
+Downloading ruff (9.8MiB)
+Downloading mypy (14.6MiB)
+Downloading virtualenv (5.1MiB)
+Downloading pygments (1.2MiB)
+Downloading pip (1.7MiB)
+ Downloaded pygments
+ Downloaded ast-serialize
+ Downloaded pip
+ Downloaded virtualenv
+ Downloaded ruff
+ Downloaded mypy
+Prepared 51 packages in 1.44s
+Installed 51 packages in 37ms
+ + ast-serialize==0.8.0
+ + bandit==1.9.4
+ + boolean-py==5.0
+ + cachecontrol==0.14.4
+ + certifi==2026.7.22
+ + cfgv==3.5.0
+ + charset-normalizer==3.5.1
+ + coverage==7.15.4
+ + cyclonedx-python-lib==11.12.0
+ + defusedxml==0.7.1
+ + distlib==0.4.3
+ + filelock==3.32.4
+ + identify==2.6.19
+ + idna==3.19
+ + iniconfig==2.3.0
+ + librt==0.15.0
+ + license-expression==30.4.4
+ + markdown-it-py==4.2.0
+ + mdurl==0.1.2
+ + msgpack==1.2.1
+ + mypy==2.3.1
+ + mypy-extensions==1.1.0
+ + nodeenv==1.10.0
+ + packageurl-python==0.17.6
+ + packaging==26.3
+ + pathspec==1.1.1
+ + pip==26.2.1
+ + pip-api==0.0.34
+ + pip-audit==2.10.1
+ + pip-requirements-parser==32.0.1
+ + platformdirs==4.11.4
+ + pluggy==1.6.0
+ + pre-commit==4.6.2
+ + py-serializable==2.1.0
+ + pygments==2.21.0
+ + pyparsing==3.3.2
+ + pytest==9.1.1
+ + pytest-asyncio==1.4.0
+ + pytest-cov==7.1.0
+ + python-discovery==1.5.3
+ + pyyaml==6.0.3
+ + requests==2.34.2
+ + rich==15.0.0
+ + ruff==0.16.4
+ + sortedcontainers==2.4.0
+ + stevedore==5.9.1
+ + tomli==2.4.1
+ + tomli-w==1.2.0
+ + typing-extensions==4.16.0
+ + urllib3==2.7.0
+ + virtualenv==21.7.4
+gsb-core itself doesn't appear in that install list — let me verify it's actually there as an editable workspace member before assuming success:
+
+Bash Verify gsb-core actually imports through the workspace venv
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+$HOME/.local/bin/uv run python -c "import gsb_core; print(gsb_core.__version__)" 2>&1
+
+OUT
+Exit code 1
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+ModuleNotFoundError: No module named 'gsb_core'
+Bash Try syncing with --all-packages to pull in all workspace members
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+$HOME/.local/bin/uv sync --all-packages 2>&1
+echo "---"
+$HOME/.local/bin/uv run python -c "import gsb_core; print(gsb_core.__version__)" 2>&1
+
+OUT
+Resolved 54 packages in 1ms
+   Building gsb-core @ file:///home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core
+      Built gsb-core @ file:///home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core
+Prepared 1 package in 612ms
+Installed 1 package in 0.83ms
+ + gsb-core==0.1.0 (from file:///home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core)
+---
+0.1.0
+Real finding: plain uv sync silently does not install workspace members nothing depends on — no error, just quietly resolves the dev group and reports success while gsb-core isn't actually there. --all-packages is the fix. This needs to be documented prominently, not left as a thing people have to discover the hard way. Let me check if a root README exists yet:
+
+Bash Check for existing root README
+IN
+ls /home/bherring/dev/clodhopper/GregorsServiceBus/README.md 2>&1
+
+OUT
+Exit code 2
+ls: cannot access '/home/bherring/dev/clodhopper/GregorsServiceBus/README.md': No such file or directory
+Let's finish verifying the toolchain — pytest, ruff, mypy — before writing it all up:
+
+Bash Run pytest, ruff, and mypy against the scaffold
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+echo "=== pytest ==="
+$HOME/.local/bin/uv run --all-packages pytest -v 2>&1
+echo "=== ruff check ==="
+$HOME/.local/bin/uv run --all-packages ruff check . 2>&1
+echo "=== mypy ==="
+$HOME/.local/bin/uv run --all-packages mypy libs/gsb-core 2>&1
+
+OUT
+=== pytest ===
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0 -- /home/bherring/dev/clodhopper/GregorsServiceBus/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/bherring/dev/clodhopper/GregorsServiceBus
+configfile: pyproject.toml
+testpaths: libs, adapters
+plugins: cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 1 item
+
+libs/gsb-core/tests/test_scaffold.py::test_package_imports_and_has_version PASSED [100%]
+
+============================== 1 passed in 0.01s ===============================
+=== ruff check ===
+All checks passed!
+=== mypy ===
+Success: no issues found in 2 source files
+Let's also confirm bandit and pip-audit (the security tooling half of §7.4) actually run cleanly:
+
+Bash Run bandit and pip-audit against the scaffold
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+echo "=== bandit ==="
+$HOME/.local/bin/uv run --all-packages bandit -r libs/gsb-core/gsb_core 2>&1 | tail -15
+echo "=== pip-audit ==="
+$HOME/.local/bin/uv run --all-packages pip-audit 2>&1 | tail -15
+
+OUT
+=== bandit ===
+	Total lines skipped (#nosec): 0
+	Total potential issues skipped due to specifically being disabled (e.g., #nosec BXXX): 0
+
+Run metrics:
+	Total issues (by severity):
+		Undefined: 0
+		Low: 0
+		Medium: 0
+		High: 0
+	Total issues (by confidence):
+		Undefined: 0
+		Low: 0
+		Medium: 0
+		High: 0
+Files skipped (0):
+=== pip-audit ===
+No known vulnerabilities found
+Name     Skip Reason
+-------- -----------------------------------------------------------------------
+gsb-core Dependency not found on PyPI and could not be audited: gsb-core (0.1.0)
+Let's also wire up pre-commit (the piece tying the others together) and verify it actually runs — without installing git hooks into the repo, since that's a workflow choice I'll leave to you:
+
+Write .pre-commit-config.yaml
+33 lines
+# Step B1 (Design.md §7.4, §11 Track B). Hooks shell out to `uv run` rather
+# than letting pre-commit provision its own per-hook environments — reuses
+# the project's one uv-managed venv instead of duplicating it.
+#
+# This file is checked in but hooks are NOT auto-installed into .git/hooks —
+# that's a per-developer choice. Run `uv run pre-commit install` to enable
+# them locally.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+      - id: mypy
+        name: mypy
+        entry: uv run --all-packages mypy libs adapters
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: bandit
+        name: bandit
+        entry: uv run bandit -q -r
+        language: system
+        types: [python]
+        exclude: ^.*/tests/
+Bash Test pre-commit hooks without installing them into .git/hooks
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+$HOME/.local/bin/uv run --all-packages pre-commit run --all-files 2>&1
+
+OUT
+ruff check...........................................(no files to check)Skipped
+ruff format..........................................(no files to check)Skipped
+mypy.................................................(no files to check)Skipped
+bandit...............................................(no files to check)Skipped
+That's expected pre-commit behavior worth noting (it discovers files via git tracking, not the filesystem) rather than a bug — but let me confirm the hooks actually work once files are tracked, using git add -N (marks paths as tracked without staging content, safe and reversible):
+
+Bash Verify pre-commit actually processes files once git-tracked, then revert the intent-to-add
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+git add -N libs/gsb-core/gsb_core/__init__.py libs/gsb-core/tests/test_scaffold.py
+$HOME/.local/bin/uv run --all-packages pre-commit run --all-files 2>&1
+git reset libs/gsb-core/gsb_core/__init__.py libs/gsb-core/tests/test_scaffold.py >/dev/null 2>&1
+echo "--- reverted to untracked ---"
+git status --short libs/
+
+OUT
+ruff check...............................................................Failed
+- hook id: ruff-check
+- exit code: 1
+
+Executable `uv` not found
+
+ruff format..............................................................Failed
+- hook id: ruff-format
+- exit code: 1
+
+Executable `uv` not found
+
+mypy.....................................................................Failed
+- hook id: mypy
+- exit code: 1
+
+Executable `uv` not found
+
+bandit...................................................................Failed
+- hook id: bandit
+- exit code: 1
+
+Executable `uv` not found
+
+--- reverted to untracked ---
+?? libs/
+A second real bug — language: system hooks can't find uv at all in this shell (PATH issue). Let me check whether that's just this sandboxed session or something the config itself needs to handle robustly:
+
+Bash Check whether the uv installer patched shell profile files
+IN
+grep -rn "local/bin" ~/.bashrc ~/.profile ~/.bash_profile 2>/dev/null
+echo "--- PATH in this shell ---"
+echo "$PATH"
+
+OUT
+/home/bherring/.profile:25:if [ -d "$HOME/.local/bin" ] ; then
+/home/bherring/.profile:26:    PATH="$HOME/.local/bin:$PATH"
+/home/bherring/.profile:29:. "$HOME/.local/bin/env"
+/home/bherring/.bashrc:127:. "$HOME/.local/bin/env"
+--- PATH in this shell ---
+/home/bherring/.sdkman/candidates/java/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/usr/local/go/bin:/home/bherring/go/bin:/usr/share/rvm/bin:/usr/local/go/bin:/home/bherring/go/bin:/usr/local/go/bin:/home/bherring/go/bin
+That confirms it — the installer correctly patched ~/.profile and ~/.bashrc; this is purely an artifact of the sandboxed tool's non-interactive shells not sourcing them (Ubuntu's .bashrc bails out early for non-interactive shells). Your real terminal will have uv on PATH fine. Let me confirm by testing with PATH set explicitly:
+
+Bash Re-verify pre-commit hooks with PATH correctly set
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+git add -N libs/gsb-core/gsb_core/__init__.py libs/gsb-core/tests/test_scaffold.py
+uv run --all-packages pre-commit run --all-files 2>&1
+git reset libs/gsb-core/gsb_core/__init__.py libs/gsb-core/tests/test_scaffold.py >/dev/null 2>&1
+git status --short libs/
+
+OUT
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+mypy.....................................................................Failed
+- hook id: mypy
+- exit code: 2
+
+mypy: error: Cannot read file 'adapters': No such file or directory
+Found 1 error in 1 file (errors prevented further checking)
+
+bandit...................................................................Passed
+?? libs/
+Real bug — adapters/ doesn't exist yet (nothing's built there until Phase 3), and mypy (unlike pytest) hard-errors on a missing path argument. Let me fix and retest:
+
+Edit .pre-commit-config.yaml
+Added 4 lines
+Bash Retest full pre-commit suite with the mypy fix
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+git add -N libs/gsb-core/gsb_core/__init__.py libs/gsb-core/tests/test_scaffold.py
+uv run --all-packages pre-commit run --all-files 2>&1
+git reset libs/gsb-core/gsb_core/__init__.py libs/gsb-core/tests/test_scaffold.py >/dev/null 2>&1
+git status --short
+
+OUT
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+mypy.....................................................................Passed
+bandit...................................................................Passed
+?? .pre-commit-config.yaml
+?? .python-version
+?? libs/
+?? pyproject.toml
+?? uv.lock
+Let's make sure uv.lock isn't accidentally excluded by .gitignore, and do a final full review:
+
+Bash Confirm .gitignore doesn't exclude uv.lock, final status check
+IN
+cat /home/bherring/dev/clodhopper/GregorsServiceBus/.gitignore
+echo "---"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+git status --short
+
+OUT
+# --- NATS auth material (Design.md §11 Track A parameters: never committed) ---
+# nsc's Operator/Account/User store (nkeys + JWTs) and everything derived
+# from it (generated .creds files, the memory-resolver config, the operator
+# JWT) are regenerated locally by infra/nats/bootstrap_auth.sh, not committed.
+infra/nats/operator/
+infra/nats/resolver.conf
+infra/nats/operator.jwt
+
+# --- Python (uv workspace — Design.md §7.5, Track B) ---
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- General ---
+.env
+.DS_Store
+---
+?? .pre-commit-config.yaml
+?? .python-version
+?? libs/
+?? pyproject.toml
+?? uv.lock
+Clean. Now let's write the root README (doesn't exist yet — natural home for dev setup docs) and update the tracking docs with real pinned versions from the actual lockfile.
+
+Write README.md
+47 lines
+# Gregor's Service Bus
+
+A NATS JetStream-based service bus with public-key-encrypted payloads. See [Design.md](Design.md) for the full architecture and decision log, [Design_Notes.md](Design_Notes.md) for the original design brief, and [Dependencies.md](Dependencies.md) for the dependency ledger. This README covers day-to-day dev environment setup.
+
+## Prerequisites
+
+- **Docker** (with your user in the `docker` group — see [infra/nats/README.md](infra/nats/README.md) if `docker ps` gives a permission error). Everything NATS-related (server, `nsc`, `nats` CLI, `yq`) runs containerized — no native install of any of that.
+- **[uv](https://docs.astral.sh/uv/)** — the project's Python packaging/dependency manager (Design.md Decision #16). Install (user-space, no sudo needed):
+  ```bash
+  curl -LsSf https://astral.sh/uv/0.12.5/install.sh | sh
+  ```
+  This adds `~/.local/bin` to `PATH` via your shell profile — restart your shell (or `source ~/.local/bin/env`) afterward. Pinned version tracked in [Dependencies.md](Dependencies.md).
+- Python itself is provisioned by `uv` automatically (pinned to 3.12 via [.python-version](.python-version)) — no separate install needed.
+
+## Setting up the Python workspace
+
+```bash
+uv sync --all-packages
+```
+
+**Use `--all-packages`, not plain `uv sync`.** This project's root `pyproject.toml` is a "virtual" workspace root (Design.md §7.5) — nothing in it depends on `gsb-core` or the future adapter packages, so a plain `uv sync` silently resolves only the shared dev-tool group and reports success *without installing any workspace member at all*. This was confirmed by actually testing it, not assumed: `uv sync` alone left `gsb_core` unimportable with no error or warning. `--all-packages` is the documented uv flag for "sync every workspace member," and is the only form that actually sets this project up correctly.
+
+## Running the checks
+
+```bash
+uv run --all-packages pytest            # tests
+uv run ruff check .                     # lint
+uv run ruff format .                    # format
+uv run --all-packages mypy libs         # type-check (adapters/ added here once Phase 3 creates it)
+uv run bandit -r libs/gsb-core/gsb_core # security static analysis
+uv run pip-audit                        # dependency vulnerability scan
+```
+
+Or all at once via `pre-commit` (config already checked in, hooks call `uv run` directly rather than letting `pre-commit` provision its own duplicate environments):
+
+```bash
+uv run --all-packages pre-commit run --all-files
+```
+
+Note: `pre-commit run --all-files` only considers files git already tracks (staged or committed) — a brand-new untracked file won't be checked until it's at least `git add`ed.
+
+To run these automatically on every commit: `uv run pre-commit install`. Not done by default — that's a per-developer choice.
+
+## Repository layout
+
+See [Design.md §7.1](Design.md#71-repository-layout) for the full intended layout. In short: `libs/gsb-core/` is the shared library every adapter depends on; `adapters/` (populated starting Phase 3) holds one package per adapter instance; `infra/` holds infrastructure config and bootstrap scripts (see [infra/nats/README.md](infra/nats/README.md) for the NATS setup, which is further along than the Python side as of this writing).
+Now let's update Dependencies.md with real pinned versions from the lockfile, and Design.md §11 to check off B1:
+
+Edit Dependencies.md
+Modified
+Now let's find and check off B1 in Design.md §11:
+
+Bash Find B1 checklist line
+IN
+grep -n "B1\.\|B2\." /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md
+
+OUT
+408:- [ ] **B1. Package scaffold** — `libs/gsb-core` `pyproject.toml` + package skeleton, wired into the repo-wide `ruff`/`mypy`/`pytest` tooling (§7.4). No NATS dependency yet.
+409:- [ ] **B2. `envelope.py`** — pydantic models for the event envelope (§5), with (de)serialization and round-trip unit tests. Pure logic — doesn't touch NATS or crypto.
+Edit Design.md
+Modified
+Bash Final git status and pytest sanity check
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+git status --short
+echo "---"
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest -q 2>&1 | tail -5
+
+OUT
+ M Dependencies.md
+ M Design.md
+?? .pre-commit-config.yaml
+?? .python-version
+?? README.md
+?? libs/
+?? pyproject.toml
+?? uv.lock
+---
+.                                                                        [100%]
+1 passed in 0.01s
+B1 done — fully scaffolded and verified, with two real gaps caught by actually running it.
+
+What's in place: a uv workspace (root pyproject.toml as a "virtual" root, .python-version pinned to 3.12, shared dev dependency group), the gsb-core package skeleton with a scaffold test, .pre-commit-config.yaml, and a new root README.md for day-to-day dev setup — since one didn't exist yet and this was the natural point to add it.
+
+Two real bugs, not just configuration guesses:
+
+Plain uv sync silently installs nothing from the workspace. Since the root has no dependency pointing at gsb-core, uv sync alone resolves only the dev group and reports success — gsb_core stays uninstalled with zero error or warning. I only caught this because I checked import gsb_core actually worked rather than trusting a clean uv sync output. --all-packages is the fix, and it's now the standardized command everywhere (README, this doc).
+mypy hard-errors on a missing path argument. The pre-commit config originally checked libs adapters, and adapters/ doesn't exist until Phase 3 — pytest tolerates that fine (its testpaths config just skips missing entries), mypy does not. Fixed by scoping mypy to libs for now.
+Verified for real: uv sync --all-packages, pytest, ruff check/format, mypy, bandit, pip-audit, and the full pre-commit run --all-files chain (including confirming uv resolves correctly once PATH includes ~/.local/bin — the installer patches .profile/.bashrc correctly, this sandbox's non-interactive shells just don't source them, which won't affect your real terminal).
+
+Real dependency versions now recorded in Dependencies.md (from the actual uv.lock, not placeholders): pytest 9.1.1, ruff 0.16.4, mypy 2.3.1, bandit 1.9.4, pip-audit 2.10.1, pre-commit 4.6.2, uv 0.12.5 itself.
+
+Ready for B2 (envelope.py — the pydantic event envelope models) whenever you want to continue.
+
+-------------- Step B1 Completed -----------------
+

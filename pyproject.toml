@@ -1,0 +1,48 @@
+# Gregor's Service Bus — uv workspace root (Decision #16, Design.md §7.5)
+#
+# This root is "virtual" (tool.uv.package = false) — it's not itself an
+# installable package, just the workspace container plus shared dev tooling
+# config and the shared dev dependency group. Real packages live under
+# libs/ (gsb-core) and adapters/ (populated starting Phase 3).
+
+[project]
+name = "gregors-service-bus"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["libs/*", "adapters/*"]
+
+[dependency-groups]
+# Shared across the whole workspace (Design.md §7.4). bandit/pip-audit/
+# pre-commit are here as CLI tools invoked via `uv run`, not as runtime deps
+# of any package.
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "bandit>=1.8",
+    "pip-audit>=2.7",
+    "pre-commit>=4",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+testpaths = ["libs", "adapters"]
