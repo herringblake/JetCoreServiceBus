@@ -49,22 +49,25 @@ class EventDetails(BaseModel):
     signature: str | None = Field(default=None, alias="signature")
 
 
-class RecipientKey(BaseModel):
-    """One recipient's wrapped Content Encryption Key (Design.md §4.3)."""
-
-    model_config = _MODEL_CONFIG
-
-    key_id: str = Field(alias="keyId")
-    wrapped_key: str = Field(alias="wrappedKey")
-
-
 class EncryptionMetadata(BaseModel):
-    """Design.md §4.3 / §5 — the hybrid-encryption envelope metadata."""
+    """Design.md §4.3 / §5 — the hybrid-encryption envelope metadata.
+
+    `recipients` is a flat list of recipient public-key strings (age
+    "recipient" strings, e.g. "age1..."), not `{keyId, wrappedKey}` pairs
+    as an earlier draft of this schema had it. Corrected during Step B3
+    once real encryption was implemented: age (via `pyrage`) bundles all
+    per-recipient key-wrapping *inside* its single ciphertext blob — there
+    is no separate "wrapped key" to expose per recipient at the application
+    level (confirmed by testing `pyrage.encrypt()`'s actual output, not
+    assumed from the format's docs). This list is therefore informational —
+    who this event was encrypted for, useful for matching against the
+    service-directory registry (§4.5) — not itself decryption material.
+    """
 
     model_config = _MODEL_CONFIG
 
     algorithm: str
-    recipients: list[RecipientKey]
+    recipients: list[str]
 
 
 class EventEnvelope(BaseModel):

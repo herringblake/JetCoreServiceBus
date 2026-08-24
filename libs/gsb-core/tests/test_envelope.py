@@ -13,7 +13,6 @@ from gsb_core.envelope import (
     Event,
     EventDetails,
     EventEnvelope,
-    RecipientKey,
     new_event_id,
 )
 from pydantic import ValidationError
@@ -30,7 +29,7 @@ def _sample_event(**details_overrides: object) -> Event:
         eventDetails=details,
         encryption=EncryptionMetadata(
             algorithm="age-v1 (X25519 + XChaCha20-Poly1305)",
-            recipients=[RecipientKey(keyId="fingerprint-abc", wrappedKey="d2VpcmQ=")],
+            recipients=["age1fjl83jrsqx8hznnpxrlh5g4vu9wjfg4gmkvhr6mwkyeufnzcaghqv0msgq"],
         ),
         eventPayload="Y2lwaGVydGV4dA==",
     )
@@ -66,7 +65,7 @@ def test_wire_shape_matches_design_doc_section_5() -> None:
     }
     encryption = parsed["event"]["encryption"]
     assert set(encryption.keys()) == {"algorithm", "recipients"}
-    assert set(encryption["recipients"][0].keys()) == {"keyId", "wrappedKey"}
+    assert isinstance(encryption["recipients"][0], str)
     assert "eventPayload" in parsed["event"]
 
 

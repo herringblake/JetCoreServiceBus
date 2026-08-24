@@ -47,3 +47,11 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["libs", "adapters"]
+
+# nkeys and pyrage ship no type stubs / py.typed marker (confirmed via
+# mypy, not assumed) — standard per-module opt-out rather than a project-
+# wide `ignore_missing_imports`, which would hide this for every future
+# untyped dependency too.
+[[tool.mypy.overrides]]
+module = ["nkeys", "pyrage", "pyrage.*"]
+ignore_missing_imports = true

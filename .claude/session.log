@@ -5672,3 +5672,1034 @@ Full toolchain clean: pytest, ruff, mypy, bandit, pip-audit, and the complete pr
 Ready for B3 (crypto.py — hybrid encryption via pyrage + Ed25519 signing via nkeys) whenever you want to continue.
 
 -------------- Step B2 Completed ----------------------
+
+continue on to Step B3
+Before writing this, I need to verify something real: pyrage (age format) inherently bundles the multi-recipient wrapping inside its ciphertext — it doesn't expose separate per-recipient "wrapped key" data the way my B2 schema's RecipientKey.wrappedKey field assumes. Let me confirm that empirically before deciding how to reconcile it, rather than guess.
+
+Bash Add pyrage and check its resolved version
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+cd libs/gsb-core
+uv add pyrage 2>&1 | tail -15
+
+OUT
+Resolved 60 packages in 1.97s
+   Building gsb-core @ file:///home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core
+      Built gsb-core @ file:///home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core
+Prepared 2 packages in 379ms
+Uninstalled 1 package in 0.86ms
+Installed 2 packages in 1ms
+ ~ gsb-core==0.1.0 (from file:///home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core)
+ + pyrage==1.4.0
+Bash Explore pyrage's actual module API
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import pyrage
+print(dir(pyrage))
+print('---x25519---')
+print(dir(pyrage.x25519))
+"
+
+OUT
+['DecryptError', 'EncryptError', 'IdentityError', 'RecipientError', '__all__', '__builtins__', '__cached__', '__doc__', '__file__', '__loader__', '__name__', '__package__', '__path__', '__spec__', 'decrypt', 'decrypt_file', 'decrypt_io', 'encrypt', 'encrypt_file', 'encrypt_io', 'passphrase', 'plugin', 'pyrage', 'ssh', 'tag', 'tagpq', 'x25519']
+---x25519---
+['Identity', 'Recipient', '__all__', '__doc__', '__loader__', '__name__', '__package__', '__spec__']
+Bash Test pyrage multi-recipient encrypt/decrypt end to end
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import pyrage
+from pyrage import x25519
+
+# Generate two recipient identities (private keys)
+id1 = x25519.Identity.generate()
+id2 = x25519.Identity.generate()
+print('identity1 str:', str(id1))
+print('recipient1:', id1.to_public())
+print('recipient1 str:', str(id1.to_public()))
+
+recipients = [id1.to_public(), id2.to_public()]
+plaintext = b'hello multi-recipient'
+ct = pyrage.encrypt(plaintext, recipients)
+print('ciphertext len:', len(ct))
+print('ciphertext[:50]:', ct[:50])
+
+# decrypt with each identity
+pt1 = pyrage.decrypt(ct, [id1])
+pt2 = pyrage.decrypt(ct, [id2])
+print('decrypted by id1:', pt1)
+print('decrypted by id2:', pt2)
+"
+
+OUT
+identity1 str: AGE-SECRET-KEY-12FFM8A67L6MLS78WR2658TVM8G89KQUWXCWDKLDS9759C7VPPSHQC7AZZH
+recipient1: age1fjl83jrsqx8hznnpxrlh5g4vu9wjfg4gmkvhr6mwkyeufnzcaghqv0msgq
+recipient1 str: age1fjl83jrsqx8hznnpxrlh5g4vu9wjfg4gmkvhr6mwkyeufnzcaghqv0msgq
+ciphertext len: 377
+ciphertext[:50]: b'age-encryption.org/v1\n-> X25519 EVX3AY+VO8424iUXAk'
+decrypted by id1: b'hello multi-recipient'
+decrypted by id2: b'hello multi-recipient'
+Confirmed — age bundles everything into one opaque ciphertext; there's no separate "wrapped key per recipient" to expose. This means my B2 schema's RecipientKey.wrappedKey field doesn't correspond to anything real. Let me check the signing side too before deciding how to fix this.
+
+Bash Add nats-py with the nkeys extra for signing
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core
+export PATH="$HOME/.local/bin:$PATH"
+uv add "nats-py[nkeys]" 2>&1 | tail -10
+
+OUT
+      Built nkeys==0.2.1
+Prepared 6 packages in 827ms
+Uninstalled 1 package in 0.65ms
+Installed 6 packages in 2ms
+ + cffi==2.1.1
+ ~ gsb-core==0.1.0 (from file:///home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core)
+ + nats-py==2.15.0
+ + nkeys==0.2.1
+ + pycparser==3.0
+ + pynacl==1.6.2
+Bash Explore nkeys module API
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import nkeys
+print([x for x in dir(nkeys) if not x.startswith('_')])
+kp = nkeys.from_seed(nkeys.create_user())
+print(type(kp))
+print([x for x in dir(kp) if not x.startswith('_')])
+"
+
+OUT
+Exit code 1
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+AttributeError: module 'nkeys' has no attribute 'create_user'
+['CRC16TAB', 'ErrCannotSign', 'ErrInvalidEncoding', 'ErrInvalidKey', 'ErrInvalidPrefixByte', 'ErrInvalidPublicKey', 'ErrInvalidSeed', 'ErrInvalidSeedLen', 'ErrInvalidSignature', 'ErrPublicKeyOnly', 'KeyPair', 'NkeysError', 'PREFIX_BYTE_ACCOUNT', 'PREFIX_BYTE_CLUSTER', 'PREFIX_BYTE_OPERATOR', 'PREFIX_BYTE_PRIVATE', 'PREFIX_BYTE_SEED', 'PREFIX_BYTE_SERVER', 'PREFIX_BYTE_USER', 'base64', 'binascii', 'crc16', 'crc16_checksum', 'decode_seed', 'encode_seed', 'from_seed', 'nacl', 'valid_prefix_byte', 'valid_public_prefix_byte']
+Bash Explore KeyPair class and helper function signatures
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import nkeys, inspect
+print([x for x in dir(nkeys.KeyPair) if not x.startswith('_')])
+print(inspect.signature(nkeys.KeyPair.__init__))
+print(inspect.signature(nkeys.from_seed))
+print(inspect.signature(nkeys.encode_seed))
+"
+
+OUT
+['private_key', 'public_key', 'seed', 'sign', 'verify', 'wipe']
+(self, seed=None, keys=None, public_key=None, private_key=None)
+(seed)
+(src, prefix)
+Bash Test nkeys keypair generation, signing, and verification
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import nkeys, os
+
+raw = os.urandom(32)
+seed = nkeys.encode_seed(raw, nkeys.PREFIX_BYTE_USER)
+print('seed:', seed)
+kp = nkeys.from_seed(seed)
+print('public_key:', kp.public_key)
+print('type pub:', type(kp.public_key))
+
+sig = kp.sign(b'hello world')
+print('sig:', sig, type(sig), len(sig))
+
+ok = kp.verify(b'hello world', sig)
+print('verify ok:', ok)
+
+# verify with only public key (simulating a recipient who only has the pubkey)
+pub_only = nkeys.KeyPair(public_key=kp.public_key)
+ok2 = pub_only.verify(b'hello world', sig)
+print('verify with pub-only kp:', ok2)
+
+try:
+    bad = kp.verify(b'tampered', sig)
+    print('tampered verify result:', bad)
+except Exception as e:
+    print('tampered verify raised:', type(e), e)
+"
+
+OUT
+Exit code 1
+Traceback (most recent call last):
+  File "<string>", line 19, in <module>
+  File "/home/bherring/dev/clodhopper/GregorsServiceBus/.venv/lib/python3.12/site-packages/nkeys/__init__.py", line 192, in verify
+    kp = self._keys.verify_key
+         ^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'verify_key'
+seed: b'SUAMHZRZN3LZDCOHN4OP3ZOT3STUFJMPGLONVF6EFUD5B4NW3Y454UHDSY'
+public_key: b'UDLGFQWOC3LWLEYRAVV5F7EMKTTSBRE37VASM54NUHRWI7NQWO33G2SS'
+type pub: <class 'bytes'>
+sig: b'?\xecjO\xda\xdf\\\x83N\x12~\xa2\x0c\x9c\x97\xbbl#\xd7\xd1\x90\xb6\xc1p&\x18@\x15-\xc4\xe4 \x842\xa8\x18\xf1.\x16\xdd\x9c\xbbn\xac`\xb1#\xbc\xdal\x9a`k3xxHgA\xac\x10\xed\x1d\x0b' <class 'bytes'> 64
+verify ok: True
+Real bug found — constructing a verify-only KeyPair(public_key=...) doesn't actually work; .verify() crashes. Let me look at the actual source rather than guess further:
+
+Bash Read nkeys.KeyPair source to understand correct construction
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+uv run --all-packages python3 -c "
+import nkeys, inspect
+print(inspect.getsource(nkeys.KeyPair))
+"
+
+OUT
+class KeyPair(object):
+
+    def __init__(
+        self,
+        seed=None,
+        keys=None,
+        public_key=None,
+        private_key=None,
+    ):
+        """
+        NKEYS KeyPair used to sign and verify data.
+
+        :param seed: The seed as a bytearray used to create the keypair.
+        :param keys: The keypair that can be used for signing.
+        :param public_key: The public key as a bytearray.
+
+        :rtype: nkeys.Keypair
+        :return: A KeyPair that can be used to sign and verify data.
+        """
+        self._seed = seed
+        self._keys: nacl.signing.SigningKey = keys
+        self._public_key: nacl.signing.VerifyKey = public_key
+        self._private_key = private_key
+
+    def sign(self, input):
+        """
+        NKEYS KeyPair used to sign and verify data.
+
+        :param input: The payload in bytes to sign.
+
+        :rtype bytes:
+        :return: The raw bytes representing the signed data.
+        """
+        return self._keys.sign(input).signature
+
+    def verify(self, input, sig):
+        """
+        :param input: The payload in bytes that was signed.
+        :param sig: The signature in bytes that will be verified.
+
+        :rtype bool:
+        :return: boolean expressing that the signature is valid.
+        """
+        kp = self._keys.verify_key
+
+        try:
+            kp.verify(input, sig)
+            return True
+        except nacl.exceptions.BadSignatureError:
+            raise ErrInvalidSignature()
+
+    @property
+    def public_key(self):
+        """
+        Return the encoded public key associated with the KeyPair.
+
+        :rtype bytes:
+        :return: public key associated with the key pair
+        """
+        # If already generated then just return.
+        if self._public_key is not None:
+            return self._public_key
+
+        # Get the public key from the seed to verify later.
+        prefix, _ = decode_seed(self._seed)
+
+        kp = self._keys.verify_key
+        src = bytearray(bytes(kp))
+        src.insert(0, prefix)
+
+        # Calculate and include crc16 checksum
+        crc = crc16(src)
+        crc_bytes = (crc).to_bytes(2, byteorder='little')
+        src.extend(crc_bytes)
+
+        # Encode to base32
+        base32_encoded = base64.b32encode(src)
+        del src
+        self._public_key = base32_encoded
+        return self._public_key
+
+    @property
+    def private_key(self):
+        if self._private_key is not None:
+            return self._private_key
+
+        src = bytearray(bytes(self._keys._signing_key))
+        src.insert(0, PREFIX_BYTE_PRIVATE)
+
+        # Calculate and include crc16 checksum
+        crc = crc16(src)
+        crc_bytes = (crc).to_bytes(2, byteorder='little')
+        src.extend(crc_bytes)
+
+        base32_encoded = base64.b32encode(src)
+        del src
+        self._private_key = base32_encoded[:(len(base32_encoded) - 4)]
+        return self._private_key
+
+    @property
+    def seed(self):
+        if not hasattr(self, "_seed"):
+            raise ErrInvalidSeed()
+        return self._seed
+
+    def wipe(self):
+        del self._seed
+        del self._keys
+        del self._public_key
+        del self._private_key
+This is a real, confirmed bug in nkeys.py 0.2.1 — KeyPair.verify() only works if you already hold the private signing key (it derives verify_key from self._keys, a SigningKey), which defeats the entire purpose of a third party verifying someone else's signature with just their public key. Let me check whether the module exposes a lower-level decode helper I can use to work around it correctly, rather than fight the broken API:
+
+Bash Check for a public-key decode helper in the nkeys module
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+uv run --all-packages python3 -c "
+import nkeys, inspect
+print(inspect.getsource(nkeys.decode_seed))
+print('---')
+import re
+src = inspect.getsource(nkeys)
+" 
+uv run --all-packages python3 -c "
+import nkeys, inspect
+src = inspect.getsource(nkeys)
+print(src[:3000])
+" | grep -n "^def \|^    def "
+
+OUT
+def decode_seed(src):
+    # Add missing padding if required.
+    padding = bytearray()
+    padding += b'=' * (-len(src) % 8)
+
+    try:
+        base32_decoded = base64.b32decode(src + padding)
+        raw = base32_decoded[:(len(base32_decoded) - 2)]
+    except binascii.Error:
+        raise ErrInvalidSeed()
+
+    if len(raw) < 32:
+        raise ErrInvalidSeed()
+
+    # 248 = 11111000
+    b1 = raw[0] & 248
+
+    # 7 = 00000111
+    b2 = (raw[0] & 7) << 5 | ((raw[1] & 248) >> 3)
+
+    if b1 != PREFIX_BYTE_SEED:
+        raise ErrInvalidSeed()
+    elif not valid_public_prefix_byte(b2):
+        raise ErrInvalidPrefixByte()
+
+    prefix = b2
+    result = raw[2:(len(raw))]
+    return (prefix, result)
+
+---
+45:def from_seed(seed):
+52:def decode_seed(src):
+82:def encode_seed(src, prefix):
+Bash Implement and test a custom nkey public-key decode + independent signature verification
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+uv run --all-packages python3 -c "
+import nkeys, base64, os
+import nacl.signing, nacl.exceptions
+
+def crc16(data: bytes) -> int:
+    crc = 0
+    for b in data:
+        crc ^= b << 8
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = (crc << 1) ^ 0x1021
+            else:
+                crc = crc << 1
+            crc &= 0xFFFF
+    return crc
+
+def decode_nkey_public(encoded: bytes) -> bytes:
+    padding = b'=' * (-len(encoded) % 8)
+    raw = base64.b32decode(encoded + padding)
+    prefix = raw[0]
+    key = raw[1:-2]
+    crc_given = int.from_bytes(raw[-2:], 'little')
+    crc_calc = crc16(raw[:-2])
+    if crc_given != crc_calc:
+        raise ValueError('bad crc')
+    if prefix != nkeys.PREFIX_BYTE_USER:
+        raise ValueError(f'unexpected prefix {prefix}')
+    return key
+
+# generate a real keypair the normal way
+raw_seed = os.urandom(32)
+seed = nkeys.encode_seed(raw_seed, nkeys.PREFIX_BYTE_USER)
+kp = nkeys.from_seed(seed)
+pub_str = kp.public_key
+print('pub_str:', pub_str)
+
+decoded = decode_nkey_public(pub_str)
+print('decoded len:', len(decoded))
+
+actual_verify_key_bytes = bytes(kp._keys.verify_key)
+print('match:', decoded == actual_verify_key_bytes)
+
+# now do a full sign + independent verify using ONLY the decoded public key
+msg = b'integration test payload'
+sig = kp.sign(msg)
+vk = nacl.signing.VerifyKey(decoded)
+try:
+    vk.verify(msg, sig)
+    print('verification with public-key-only: OK')
+except nacl.exceptions.BadSignatureError:
+    print('verification FAILED')
+
+try:
+    vk.verify(b'tampered', sig)
+    print('tampered verification: OK (BAD, should have failed)')
+except nacl.exceptions.BadSignatureError:
+    print('tampered verification correctly rejected')
+"
+
+OUT
+pub_str: b'UAOJMMJU7YFS6J2PVBXCG2NQ6ZXG3HJ5NJZM375VNMCVLRFEMARNIZYL'
+decoded len: 32
+match: True
+verification with public-key-only: OK
+tampered verification correctly rejected
+Good — that workaround is solid and tested. Now let me check the exact string/bytes types pyrage and nkeys return, so crypto.py's public API is consistently str (matching envelope.py's typing) rather than a mix of bytes and opaque objects:
+
+Bash Check pyrage identity/recipient string types and round-trip reload
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+uv run --all-packages python3 -c "
+from pyrage import x25519
+
+ident = x25519.Identity.generate()
+pub = ident.to_public()
+print('identity type:', type(ident), 'str:', str(ident)[:20])
+print('recipient type:', type(pub), 'str:', str(pub)[:20])
+
+# round trip via from_str
+ident2 = x25519.Identity.from_str(str(ident))
+pub2 = x25519.Recipient.from_str(str(pub))
+print('round-trip identity works:', str(ident2) == str(ident))
+print('round-trip recipient works:', str(pub2) == str(pub))
+"
+
+OUT
+identity type: <class 'pyrage.x25519.Identity'> str: AGE-SECRET-KEY-1J9GW
+recipient type: <class 'pyrage.x25519.Recipient'> str: age1an4wyj354gku9dm5
+round-trip identity works: True
+round-trip recipient works: True
+Now let's write crypto.py with these findings baked in — encryption via pyrage, signing via nkeys for the signer's side, but a hand-rolled decode + direct nacl.signing.VerifyKey for verification (working around the confirmed nkeys.py bug):
+
+Write crypto.py
+152 lines
+"""Payload encryption and event signing (Design.md §4.1, §4.3) — Step B3
+(Design.md §11 Track B). Pure crypto primitives; no NATS, no envelope
+awareness (that's bus_client.py, B6). Unit tested against fixed/freshly
+generated test keys, no live bus needed.
+
+Two independent mechanisms, per Design.md §4.1:
+  - Encryption keypair (X25519, via `pyrage`/age): confidentiality. Multiple
+    recipients' public keys can each decrypt the same ciphertext.
+  - Signing keypair (Ed25519, "nkey" format, via `nkeys`): authenticity —
+    lets a recipient verify who really sent an event, independent of
+    transport trust, per Decision #5.
+
+IMPORTANT — a real bug in nkeys.py 0.2.1, confirmed by reading its source
+and testing, not assumed: `KeyPair.verify()` only works if `self._keys` is
+already a full `nacl.signing.SigningKey` (it calls `self._keys.verify_key`
+internally) — there is no working way to construct a `KeyPair` from just a
+public key string and verify with it, even though that's the entire point
+of asymmetric signature verification. `_decode_nkey_public()` below
+reimplements nkey's public-key decoding (mirroring `KeyPair.public_key`'s
+encode logic in reverse — base32, 1-byte prefix, 2-byte CRC16 checksum) so
+verification can use `nacl.signing.VerifyKey` directly instead, bypassing
+the broken method entirely. Confirmed correct against nkeys.py's own
+encoding: the decoded bytes match `SigningKey.verify_key` exactly, and
+independent verification (no private key material at all) both accepts a
+genuine signature and rejects a tampered one.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+from typing import NamedTuple
+
+import nacl.exceptions
+import nacl.signing
+import nkeys
+import pyrage
+from pyrage import x25519
+
+
+class EncryptionKeyPair(NamedTuple):
+    """An X25519 encryption keypair (Design.md §4.3)."""
+
+    private_key: str
+    public_key: str
+
+
+class SigningKeyPair(NamedTuple):
+    """An Ed25519 "nkey" signing keypair (Design.md §4.1). For tests/
+    tooling — real adapters get theirs from `nsc` (Step A3), not this."""
+
+    seed: str
+    public_key: str
+
+
+# --- Payload encryption (age / pyrage, Design.md §4.3) ----------------------
+
+
+def generate_encryption_keypair() -> EncryptionKeyPair:
+    """A fresh X25519 keypair, for tests/tooling."""
+    identity = x25519.Identity.generate()
+    return EncryptionKeyPair(private_key=str(identity), public_key=str(identity.to_public()))
+
+
+def encrypt_for_recipients(plaintext: bytes, recipient_public_keys: list[str]) -> bytes:
+    """Encrypt `plaintext` so that ANY of `recipient_public_keys` can
+    decrypt it (age's native multi-recipient support — Design.md §4.3).
+
+    Note: unlike a hand-rolled envelope, age's ciphertext bundles all
+    per-recipient key-wrapping internally — there's no separate "wrapped
+    key per recipient" to inspect from the outside. The envelope's
+    `EncryptionMetadata.recipients` (envelope.py) is therefore just the
+    list of intended recipient key strings, informational metadata for
+    matching against the service-directory registry (§4.5) — not
+    functional decryption data in its own right.
+    """
+    recipients = [x25519.Recipient.from_str(k) for k in recipient_public_keys]
+    return bytes(pyrage.encrypt(plaintext, recipients))
+
+
+def decrypt(ciphertext: bytes, private_key: str) -> bytes:
+    """Decrypt `ciphertext` using one recipient's own private key. Raises
+    `pyrage.DecryptError` if this key isn't one of the intended recipients
+    (or the ciphertext is corrupt)."""
+    identity = x25519.Identity.from_str(private_key)
+    return bytes(pyrage.decrypt(ciphertext, [identity]))
+
+
+# --- Event signing (Ed25519 / nkeys, Design.md §4.1) -------------------------
+
+
+def generate_signing_keypair() -> SigningKeyPair:
+    """A fresh Ed25519 nkey keypair, for tests/tooling. Real adapters use
+    the nkey `nsc` (Step A3) already generated for their NATS identity —
+    the same keypair serves both connection auth and event signing
+    (Design.md §4.1's "two separate keypairs" note is about encryption vs.
+    signing keys being different purposes, not that signing needs its own
+    distinct nkey from the one used to connect)."""
+    import os
+
+    raw_seed = os.urandom(32)
+    seed = nkeys.encode_seed(raw_seed, nkeys.PREFIX_BYTE_USER).decode()
+    public_key = nkeys.from_seed(seed.encode()).public_key.decode()
+    return SigningKeyPair(seed=seed, public_key=public_key)
+
+
+def _digest(plaintext: bytes) -> bytes:
+    """SHA-256 digest of the plaintext payload — what actually gets signed,
+    per Design.md §4.1 ("the publisher signs a digest of the plaintext
+    payload with its nkey"). Centralized here so signing and verification
+    can never disagree about what "the digest" means."""
+    return hashlib.sha256(plaintext).digest()
+
+
+def sign(seed: str, plaintext: bytes) -> bytes:
+    """Sign `plaintext`'s digest with the nkey identified by `seed`.
+    Returns the raw 64-byte Ed25519 signature."""
+    keypair = nkeys.from_seed(seed.encode())
+    return bytes(keypair.sign(_digest(plaintext)))
+
+
+def _decode_nkey_public(public_key: str) -> bytes:
+    """Decode an nkey-encoded public key string to its raw 32-byte Ed25519
+    key — reimplemented here because nkeys.py doesn't expose this itself
+    (only `decode_seed`, for the longer seed encoding). Mirrors
+    `KeyPair.public_key`'s encode logic in reverse; validates the CRC16
+    checksum and prefix byte rather than trusting the input blindly."""
+    padding = b"=" * (-len(public_key.encode()) % 8)
+    raw = base64.b32decode(public_key.encode() + padding)
+    if len(raw) != 35:  # 1 prefix + 32 key + 2 crc
+        raise ValueError(f"malformed nkey public key: unexpected length {len(raw)}")
+    prefix, key, crc_given = raw[0], raw[1:-2], int.from_bytes(raw[-2:], "little")
+    if crc_given != nkeys.crc16(raw[:-2]):
+        raise ValueError("malformed nkey public key: checksum mismatch")
+    if prefix != nkeys.PREFIX_BYTE_USER:
+        raise ValueError(f"expected a user nkey (prefix {nkeys.PREFIX_BYTE_USER}), got {prefix}")
+    return key
+
+
+def verify(public_key: str, plaintext: bytes, signature: bytes) -> bool:
+    """Verify that `signature` is a valid signature over `plaintext`'s
+    digest, made by the private key corresponding to `public_key`. Returns
+    False for an invalid/mismatched signature; raises ValueError for a
+    malformed `public_key` string (a caller bug, not a verification
+    outcome)."""
+    verify_key = nacl.signing.VerifyKey(_decode_nkey_public(public_key))
+    try:
+        verify_key.verify(_digest(plaintext), signature)
+        return True
+    except nacl.exceptions.BadSignatureError:
+        return False
+Now let's fix the B2 schema mismatch this discovery revealed — EncryptionMetadata.recipients needs to become a flat list of key identifiers, not {keyId, wrappedKey} pairs, since age doesn't expose separable wrapped-key data:
+
+Read envelope.py (lines 58-75)
+Read envelope.py (lines 51-60)
+Edit envelope.py
+Added 3 lines
+Now update the import list at the top of envelope.py (remove RecipientKey reference if any) and fix the B2 test file to match:
+
+Bash Find all remaining RecipientKey references
+IN
+grep -n "RecipientKey" /home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core/gsb_core/envelope.py /home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core/tests/test_envelope.py
+
+OUT
+/home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core/tests/test_envelope.py:16:    RecipientKey,
+/home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core/tests/test_envelope.py:33:            recipients=[RecipientKey(keyId="fingerprint-abc", wrappedKey="d2VpcmQ=")],
+Read test_envelope.py (lines 2-71)
+Edit test_envelope.py
+Removed 1 line
+Edit test_envelope.py
+Modified
+Now let's write B3's tests, then run the full toolchain to verify everything (including the critical scenario: verifying with only a public key, no private key in scope at all):
+
+Write test_crypto.py
+114 lines
+"""Tests for crypto.py (Design.md §4.1, §4.3) — Step B3. Fixed/freshly
+generated test keys throughout; no live bus needed."""
+
+import pyrage
+import pytest
+
+from gsb_core.crypto import (
+    decrypt,
+    encrypt_for_recipients,
+    generate_encryption_keypair,
+    generate_signing_keypair,
+    sign,
+    verify,
+)
+
+# --- Encryption ---------------------------------------------------------
+
+
+def test_encrypt_decrypt_round_trip_single_recipient() -> None:
+    recipient = generate_encryption_keypair()
+    plaintext = b"a secret payload"
+
+    ciphertext = encrypt_for_recipients(plaintext, [recipient.public_key])
+
+    assert decrypt(ciphertext, recipient.private_key) == plaintext
+
+
+def test_encrypt_for_multiple_recipients_each_can_decrypt() -> None:
+    alice = generate_encryption_keypair()
+    bob = generate_encryption_keypair()
+    plaintext = b"shared secret"
+
+    ciphertext = encrypt_for_recipients(plaintext, [alice.public_key, bob.public_key])
+
+    assert decrypt(ciphertext, alice.private_key) == plaintext
+    assert decrypt(ciphertext, bob.private_key) == plaintext
+
+
+def test_non_recipient_cannot_decrypt() -> None:
+    intended = generate_encryption_keypair()
+    outsider = generate_encryption_keypair()
+    ciphertext = encrypt_for_recipients(b"not for you", [intended.public_key])
+
+    with pytest.raises(pyrage.DecryptError):
+        decrypt(ciphertext, outsider.private_key)
+
+
+def test_ciphertext_does_not_contain_plaintext() -> None:
+    """Sanity check that this is actually doing encryption, not passing
+    data through."""
+    recipient = generate_encryption_keypair()
+    plaintext = b"a very specific and searchable secret string"
+
+    ciphertext = encrypt_for_recipients(plaintext, [recipient.public_key])
+
+    assert plaintext not in ciphertext
+
+
+# --- Signing --------------------------------------------------------------
+
+
+def test_sign_verify_round_trip() -> None:
+    signer = generate_signing_keypair()
+    payload = b"an event payload"
+
+    signature = sign(signer.seed, payload)
+
+    assert verify(signer.public_key, payload, signature) is True
+
+
+def test_verify_works_with_only_the_public_key_no_private_material() -> None:
+    """The scenario Decision #5 actually depends on: a *recipient*, who
+    only ever has the sender's public key, verifying a signature they did
+    not create. This is the case that surfaced the real nkeys.py bug
+    (KeyPair.verify() secretly requires the private key) — kept as an
+    explicit, separate test from the round-trip above so a regression here
+    can't hide behind a test that happens to still have the seed in scope.
+    """
+    signer = generate_signing_keypair()
+    payload = b"an event payload"
+    signature = sign(signer.seed, payload)
+
+    # Only public_key crosses into this "verifier" logic — no `signer.seed`.
+    public_key_only = signer.public_key
+    assert verify(public_key_only, payload, signature) is True
+
+
+def test_verify_rejects_tampered_payload() -> None:
+    signer = generate_signing_keypair()
+    signature = sign(signer.seed, b"original payload")
+
+    assert verify(signer.public_key, b"tampered payload", signature) is False
+
+
+def test_verify_rejects_signature_from_a_different_key() -> None:
+    signer = generate_signing_keypair()
+    impostor = generate_signing_keypair()
+    payload = b"an event payload"
+    signature = sign(impostor.seed, payload)
+
+    assert verify(signer.public_key, payload, signature) is False
+
+
+def test_verify_raises_on_malformed_public_key() -> None:
+    with pytest.raises(ValueError, match="malformed nkey public key"):
+        verify("not-a-real-nkey", b"payload", b"\x00" * 64)
+
+
+def test_generate_signing_keypair_produces_distinct_keys_each_time() -> None:
+    a = generate_signing_keypair()
+    b = generate_signing_keypair()
+    assert a.seed != b.seed
+    assert a.public_key != b.public_key
+Now let's add nkeys/pyrage to the pyproject.toml dependencies (already added via uv add earlier, let me confirm) and run the full toolchain:
+
+Bash Confirm dependencies and run full test suite
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+cat libs/gsb-core/pyproject.toml
+echo "=== pytest ==="
+uv run --all-packages pytest -v 2>&1 | tail -35
+
+OUT
+# gsb-core — shared library used by every adapter (Design.md §7.1)
+#
+# Dependencies added incrementally as each module (Design.md §11 Track B) is
+# actually built: pydantic + uuid6 land in B2 (envelope.py). pyrage/nkeys
+# (B3), nats-py (B5/B6) etc. still pending.
+
+[project]
+name = "gsb-core"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "nats-py[nkeys]>=2.15.0",
+    "pydantic>=2.9",
+    "pyrage>=1.4.0",
+    "uuid6>=2024.7.10",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["gsb_core"]
+=== pytest ===
+
+libs/gsb-core/tests/test_crypto.py::test_encrypt_decrypt_round_trip_single_recipient PASSED [  5%]
+libs/gsb-core/tests/test_crypto.py::test_encrypt_for_multiple_recipients_each_can_decrypt PASSED [ 10%]
+libs/gsb-core/tests/test_crypto.py::test_non_recipient_cannot_decrypt PASSED [ 15%]
+libs/gsb-core/tests/test_crypto.py::test_ciphertext_does_not_contain_plaintext PASSED [ 20%]
+libs/gsb-core/tests/test_crypto.py::test_sign_verify_round_trip PASSED   [ 25%]
+libs/gsb-core/tests/test_crypto.py::test_verify_works_with_only_the_public_key_no_private_material PASSED [ 30%]
+libs/gsb-core/tests/test_crypto.py::test_verify_rejects_tampered_payload PASSED [ 35%]
+libs/gsb-core/tests/test_crypto.py::test_verify_rejects_signature_from_a_different_key PASSED [ 40%]
+libs/gsb-core/tests/test_crypto.py::test_verify_raises_on_malformed_public_key FAILED [ 45%]
+libs/gsb-core/tests/test_crypto.py::test_generate_signing_keypair_produces_distinct_keys_each_time PASSED [ 50%]
+libs/gsb-core/tests/test_envelope.py::test_round_trip_preserves_all_fields PASSED [ 55%]
+libs/gsb-core/tests/test_envelope.py::test_wire_shape_matches_design_doc_section_5 PASSED [ 60%]
+libs/gsb-core/tests/test_envelope.py::test_event_id_defaults_to_a_fresh_uuid7_when_not_supplied PASSED [ 65%]
+libs/gsb-core/tests/test_envelope.py::test_new_event_id_helper_produces_a_valid_uuid7_string PASSED [ 70%]
+libs/gsb-core/tests/test_envelope.py::test_event_created_defaults_to_now_utc_when_not_supplied PASSED [ 75%]
+libs/gsb-core/tests/test_envelope.py::test_correlation_id_and_signature_default_to_none PASSED [ 80%]
+libs/gsb-core/tests/test_envelope.py::test_missing_required_field_raises_validation_error PASSED [ 85%]
+libs/gsb-core/tests/test_envelope.py::test_envelope_is_frozen PASSED     [ 90%]
+libs/gsb-core/tests/test_envelope.py::test_can_construct_with_python_attribute_names_too PASSED [ 95%]
+libs/gsb-core/tests/test_scaffold.py::test_package_imports_and_has_version PASSED [100%]
+
+=================================== FAILURES ===================================
+__________________ test_verify_raises_on_malformed_public_key __________________
+
+    def test_verify_raises_on_malformed_public_key() -> None:
+>       with pytest.raises(ValueError, match="malformed nkey public key"):
+E       AssertionError: Regex pattern did not match.
+E         Expected regex: 'malformed nkey public key'
+E         Actual message: 'Non-base32 digit found'
+
+libs/gsb-core/tests/test_crypto.py:105: AssertionError
+=========================== short test summary info ============================
+FAILED libs/gsb-core/tests/test_crypto.py::test_verify_raises_on_malformed_public_key
+========================= 1 failed, 19 passed in 0.13s =========================
+A real edge case — base64.b32decode raises its own binascii.Error for non-base32 input before my length/CRC checks even run. Let me fix the decode function to normalize all malformed-input cases to a consistent error:
+
+Read crypto.py (lines 131-145)
+Read crypto.py (lines 122-130)
+Edit crypto.py
+Added 3 lines
+Now add the binascii import:
+
+Read crypto.py (lines 29-36)
+Edit crypto.py
+Added 1 line
+Now let's rerun the full toolchain — pytest, ruff, mypy, bandit, pip-audit:
+
+Bash Full re-verification after the binascii fix
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== pytest ==="
+uv run --all-packages pytest -q 2>&1 | tail -8
+echo "=== ruff ==="
+uv run ruff check . 2>&1
+echo "=== mypy ==="
+uv run --all-packages mypy libs 2>&1
+
+OUT
+Exit code 1
+=== pytest ===
+....................                                                     [100%]
+20 passed in 0.10s
+=== ruff ===
+I001 [*] Import block is un-sorted or un-formatted
+  --> libs/gsb-core/tests/test_crypto.py:4:1
+   |
+ 2 |   generated test keys throughout; no live bus needed."""
+ 3 |
+ 4 | / import pyrage
+ 5 | | import pytest
+ 6 | |
+ 7 | | from gsb_core.crypto import (
+ 8 | |     decrypt,
+ 9 | |     encrypt_for_recipients,
+10 | |     generate_encryption_keypair,
+11 | |     generate_signing_keypair,
+12 | |     sign,
+13 | |     verify,
+14 | | )
+   | |_^
+15 |
+16 |   # --- Encryption ---------------------------------------------------------
+   |
+help: Organize imports
+  |
+5 | import pytest
+  -
+6 | from gsb_core.crypto import (
+  |
+
+Found 1 error.
+[*] 1 fixable with the `--fix` option.
+=== mypy ===
+libs/gsb-core/gsb_core/crypto.py:37: error: Skipping analyzing "nkeys": module is installed, but missing library stubs or py.typed marker  [import-untyped]
+libs/gsb-core/gsb_core/crypto.py:37: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports
+libs/gsb-core/gsb_core/crypto.py:38: error: Skipping analyzing "pyrage": module is installed, but missing library stubs or py.typed marker  [import-untyped]
+libs/gsb-core/tests/test_crypto.py:4: error: Skipping analyzing "pyrage": module is installed, but missing library stubs or py.typed marker  [import-untyped]
+Found 3 errors in 2 files (checked 6 source files)
+Both expected/fixable — auto-fix the import order, and add standard mypy overrides for the two untyped third-party libraries (nkeys, pyrage ship no type stubs):
+
+Bash Auto-fix import order in test_crypto.py
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check --fix . 2>&1
+
+OUT
+Found 1 error (1 fixed, 0 remaining).
+[This command modified 1 file you've previously read: libs/gsb-core/tests/test_crypto.py. Call Read before editing.]
+Edit pyproject.toml
+Added 8 lines
+Bash Full re-verification of the entire toolchain
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== mypy ==="
+uv run --all-packages mypy libs 2>&1
+echo "=== ruff ==="
+uv run ruff check . 2>&1
+echo "=== pytest ==="
+uv run --all-packages pytest -q 2>&1 | tail -5
+echo "=== bandit ==="
+uv run bandit -q -r libs/gsb-core/gsb_core 2>&1
+echo "=== pip-audit ==="
+uv run pip-audit 2>&1 | tail -8
+
+OUT
+=== mypy ===
+Success: no issues found in 6 source files
+=== ruff ===
+All checks passed!
+=== pytest ===
+....................                                                     [100%]
+20 passed in 0.11s
+=== bandit ===
+=== pip-audit ===
+No known vulnerabilities found
+Name     Skip Reason
+-------- -----------------------------------------------------------------------
+gsb-core Dependency not found on PyPI and could not be audited: gsb-core (0.1.0)
+Let's also confirm pre-commit end to end, then finalize documentation:
+
+Bash Full pre-commit verification
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+git add -N libs/gsb-core/gsb_core/crypto.py libs/gsb-core/gsb_core/envelope.py libs/gsb-core/tests/test_crypto.py libs/gsb-core/tests/test_envelope.py
+uv run --all-packages pre-commit run --all-files 2>&1
+git reset libs/gsb-core/gsb_core/crypto.py libs/gsb-core/gsb_core/envelope.py libs/gsb-core/tests/test_crypto.py libs/gsb-core/tests/test_envelope.py >/dev/null 2>&1
+
+OUT
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+mypy.....................................................................Passed
+bandit...................................................................Passed
+Now let's update Design.md and Dependencies.md with everything found in this step:
+
+Bash Find B3 checklist line
+IN
+grep -n "B3\.\|B4\." /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md
+
+OUT
+410:- [ ] **B3. `crypto.py`** — hybrid encryption (`pyrage`: encrypt-for-recipients / decrypt) and Ed25519 signing/verification (`nkeys`), unit tested against fixed test keys. Still no live bus needed.
+411:- [ ] **B4. `config.py`** — `pydantic-settings` loader for adapter config (NATS creds file path — JWT+nkey bundled, per Step A3's `nsc generate creds` output — subject list, service ID).
+Edit Design.md
+Added 2 lines
+Now let's fix §5's example JSON to match the corrected schema — it still shows the old {keyId, wrappedKey} shape:
+
+Bash Find all references to the old recipients schema in Design.md
+IN
+grep -n "wrappedKey\|keyId\|recipients" /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md | head -20
+
+OUT
+16:- Payload confidentiality via public-key encryption, scoped to the specific recipients entitled to read a given event — independent of who else can technically subscribe to the subject.
+94:  adapters -. "look up recipients" .-> KV
+114:**Decision:** Yes — every event is signed. The publisher signs a digest of the plaintext payload with its nkey before encrypting; the signature travels in `eventDetails.signature` (§5), so any recipient can verify authenticity/integrity independent of transport trust, even though the payload itself is only readable by entitled recipients.
+137:This is exactly what the **[age](https://age-encryption.org)** format does natively (it's designed for "encrypt to multiple recipients"), so we don't need to implement the envelope construction ourselves — see §7.2.
+146:  Pub->>KV: Get/Watch recipients for subject events.orders.OrderCreated
+173:- **Read access:** all adapters can read/watch the bucket to discover current recipients for a subject.
+188:  Note over Ad,KV: Other adapters watch this bucket to discover recipients
+213:      "recipients": [
+214:        { "keyId": "<recipient pubkey fingerprint>", "wrappedKey": "<base64>" }
+257:        crypto.py               # encrypt_for_recipients(), decrypt(), signing helpers
+410:- [x] **B3. `crypto.py`** — [libs/gsb-core/gsb_core/crypto.py](libs/gsb-core/gsb_core/crypto.py): encryption via `pyrage` (`encrypt_for_recipients`/`decrypt`, plus a `generate_encryption_keypair` test/tooling helper) and Ed25519 signing via `nkeys` (`sign`/`verify`, `generate_signing_keypair`), both digest-based per Decision #5 (`_digest()` = SHA-256 of the plaintext, centralized so signing and verification can never disagree about what "the digest" means). **Executed and verified**: 20 tests total (10 new), all passing, plus clean `ruff`/`mypy`/`bandit`/`pip-audit`/`pre-commit`. Two significant findings, both from actually running the libraries against each other, not from their docs:
+411:  1. **Corrected the B2 envelope schema.** `age` (via `pyrage`) bundles all per-recipient key-wrapping *inside* its single ciphertext blob — confirmed by encrypting for two recipients and inspecting the output, there's no separate "wrapped key" exposed per recipient the way `EncryptionMetadata.recipients: list[{keyId, wrappedKey}]` assumed. Changed to `recipients: list[str]` (just the recipient key strings, informational metadata for registry-matching) — `envelope.py` and its tests updated accordingly. This is exactly the kind of mismatch pure schema design (B2) can't catch on its own; it only surfaced once real encryption (B3) had to conform to the schema.
+Read Design.md (lines 196-220)
+Edit Design.md
+Removed 2 lines
+Bash Check the notes section right after the envelope JSON example
+IN
+sed -n '219,235p' /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md
+
+OUT
+Notes / assumptions baked into this:
+- **`subject` = one unique subject per `eventType`** (not per message instance) — e.g. `events.orders.OrderCreated` is the permanent home for that event type, and its payload schema is documented once, referenced by that subject.
+- Subject naming convention: `events.<boundedContext>.<EventType>` — kept as a **placeholder pattern** for now (`orders` is a stand-in bounded context). Real bounded-context names will replace the placeholder once they're known; nothing else in the design depends on the specific names chosen.
+- Schemas for `eventPayload` (pre-encryption, logical shape) are documented as versioned JSON Schema files, one per subject, checked into `schemas/` in the repo (see §7). `eventSchemaVersion` lets consumers detect breaking changes.
+
+---
+
+## 6. NATS JetStream Layout
+
+- **Stream:** single stream `EVENTS`, subject filter `events.>` (one stream is simplest to operate; can be split by bounded context later if retention/ops needs diverge).
+- **Retention:** durable, limits-based retention — **7 days** age limit, plus a size cap as a backstop — not work-queue, since multiple adapters need independent delivery of the same message. Long enough to recover from adapter downtime/redeploys without replaying stale data; revisit if audit requirements later call for a longer window.
+- **Consumers:** one durable, filtered consumer per adapter (`filter_subject` scoped to what that adapter is permitted/configured to handle), so each adapter tracks its own delivery cursor independently and can restart without replaying everything.
+- **KV bucket:** `service-directory`, as above.
+
+---
+Edit Design.md
+Added 1 line
+Now let's update Dependencies.md with real resolved versions for pyrage, nkeys, nats-py, and PyNaCl (pulled in as a transitive dependency):
+
+Bash Find rows to update for crypto dependencies
+IN
+grep -n "pyrage\|nkeys\|nats-py\|PyNaCl" /home/bherring/dev/clodhopper/GregorsServiceBus/Dependencies.md
+
+OUT
+18:| `nats-py` | [PyPI](https://pypi.org/project/nats-py/) / [GitHub](https://github.com/nats-io/nats.py) | *pin at adoption* | *pin at adoption* | Official async NATS/JetStream client; also provides the `[nkeys]` extra used for signing. | Official `nats-io` org project (backed by Synadia); same trust tier as the NATS server itself. | 2026-08-23 |
+19:| `nkeys` | [PyPI](https://pypi.org/project/nkeys/) / [GitHub](https://github.com/nats-io/nkeys.py) | *pin at adoption* | *pin at adoption* | Ed25519 keypair generation/signing for both NATS connection auth and event signing (§4.1). Installed via `nats-py[nkeys]`. | Official `nats-io` org project. Implements NATS's own key format (not custom crypto). | 2026-08-23 |
+22:| `pyrage` | [PyPI](https://pypi.org/project/pyrage/) / [background](https://blog.yossarian.net/2022/07/25/age-encryption-in-python-with-pyrage) | *pin at adoption* (≈1.3.0 seen at review time) | *pin at adoption* | Python bindings (via PyO3) to `rage`, the Rust implementation of the [age](https://age-encryption.org) format — provides the multi-recipient hybrid encryption in §4.3. | The cryptography itself is implemented in vetted Rust (`rage`/`age` core), not reimplemented in Python — bindings only. PyPI releases use Trusted Publishing (supply-chain provenance signal). Smaller install base than mainstream crypto libs; **recommendation:** re-check for an independent security review of `rage` before production use, and keep `PyNaCl` (below) as a documented fallback. | 2026-08-23 |
+23:| `PyNaCl` *(fallback candidate, not adopted unless `pyrage` integration proves impractical)* | [PyPI](https://pypi.org/project/PyNaCl/) | — | — | libsodium bindings; would require hand-rolling the multi-recipient envelope construction described in §4.3. | Long-established, widely audited (wraps libsodium). Not currently in the dependency tree — listed here only as the documented fallback per §7.2. | 2026-08-23 |
+60:| `nats-box` (bundles `nsc` + `nats` CLI + `nkeys` + `nats-top`) | [GitHub](https://github.com/nats-io/nats-box) / [Docker Hub](https://hub.docker.com/r/natsio/nats-box/tags) | **0.19.7-nonroot**, via Docker image `natsio/nats-box:0.19.7-nonroot` — no native install | Issues Operator/Account/User JWTs for decentralized auth (§4.2, §11 Track A3), and provides the `nats` CLI for manual smoke testing (§11 Step A7). Persistent `nsc` state is a volume mount, not host-installed state. | Official `nats-io` utilities image. `-nonroot` variant used deliberately (least privilege). Bundled tool versions aren't independently pinned by us — see [infra/nats/README.md](infra/nats/README.md) for how to check them. | 2026-08-23 |
+Edit Dependencies.md
+Modified
+Edit Dependencies.md
+Modified
+Bash Final status and verification
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+git status --short
+echo "---"
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest -q 2>&1 | tail -3
+
+OUT
+ M Dependencies.md
+ M Design.md
+ M libs/gsb-core/gsb_core/envelope.py
+ M libs/gsb-core/pyproject.toml
+ M libs/gsb-core/tests/test_envelope.py
+ M pyproject.toml
+ M uv.lock
+?? libs/gsb-core/gsb_core/crypto.py
+?? libs/gsb-core/tests/test_crypto.py
+---
+....................                                                     [100%]
+20 passed in 0.09s
+B3 done — and it caught two real problems, one of which required going back and fixing B2.
+
+What's built: crypto.py — encryption via pyrage (encrypt_for_recipients/decrypt), Ed25519 signing via nkeys (sign/verify), both digest-based (SHA-256, centralized in one _digest() function so signer and verifier can never disagree about what gets signed).
+
+Two real findings, both from actually running the libraries, not from reading their docs:
+
+Had to go back and fix B2's schema. age bundles all per-recipient key-wrapping inside its single ciphertext — confirmed by actually encrypting for two recipients and inspecting the output (377 bytes of opaque age format, no separable per-recipient data). My B2 schema's recipients: list[{keyId, wrappedKey}] assumed a hand-rolled envelope structure that doesn't correspond to how age actually works. Fixed to recipients: list[str] — envelope.py, its tests, and Design.md §5's example JSON all updated to match. This is the kind of mismatch that pure schema design genuinely can't catch on its own; it only showed up once real crypto had to conform to it.
+
+Found and worked around a real bug in nkeys.py 0.2.1. KeyPair.verify() only works if you already hold the private key — confirmed by reading its source, not guessing. There's no working path to verify a signature with just someone's public key, which defeats the entire point of asymmetric signatures and is exactly the scenario Decision #5 depends on (a recipient verifying a sender they never had private key material from). Worked around with a small, independently-tested decode of nkey's public-key encoding feeding nacl.signing.VerifyKey directly — verified byte-for-byte correct against real generated keys, with a dedicated test that deliberately keeps only the public key in scope, so a regression here can't hide behind a test that still happens to have the private seed available.
+
+Verified: 20 tests total, all passing (10 new), plus clean ruff, mypy (needed a standard per-module override once nkeys/pyrage turned out to ship no type stubs), bandit, pip-audit, and the full pre-commit chain. Dependencies.md updated with real resolved versions, including PyNaCl — which turned out to already be in the tree transitively via nkeys, and is now doing real work in the verification workaround rather than sitting unused as the documented fallback.
+
+Ready for B4 (config.py — the pydantic-settings loader for adapter config) whenever you want to continue.
+
+----------------- Step B3 Completed -----------------------

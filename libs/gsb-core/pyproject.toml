@@ -9,7 +9,9 @@ name = "gsb-core"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "nats-py[nkeys]>=2.15.0",
     "pydantic>=2.9",
+    "pyrage>=1.4.0",
     "uuid6>=2024.7.10",
 ]
 
