@@ -723,6 +723,8 @@ Everything's still design-only, nothing built. When you're ready to start Phase 
 
 --------------------------
 
+======================== Phase 1 Start =================================
+
 Let's proceed with step A1.
 Let me pin these to real, current versions rather than guess.
 
@@ -10817,6 +10819,682 @@ All test state cleaned up; the stack is running fresh and healthy. Design.md's o
 
 ----------------- Step B6 Completed -----------------------
 
+continue on to Step B7
+Let me check whether a conftest.py exists, since a proper implementation of this should share fixtures with test_bus_client.py rather than duplicate them:
+
+Bash Check for existing conftest.py
+IN
+ls /home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core/tests/
+
+OUT
+__pycache__
+test_bus_client.py
+test_config.py
+test_crypto.py
+test_envelope.py
+test_registry.py
+test_scaffold.py
+This calls for a small refactor — extract shared fixtures/helpers into conftest.py/_helpers.py so test_bus_client.py and the new B7 test share one source of truth instead of duplicating. Let me view the current file fully first.
+
+Read test_bus_client.py (lines 2-106)
+Now let's create _helpers.py (plain support module) and conftest.py (fixtures), then update test_bus_client.py to use them:
+
+Write _helpers.py
+56 lines
+"""Shared test support for integration tests that need a live NATS
+connection (test_bus_client.py, Step B6; test_end_to_end.py, Step B7).
+
+Not a test module itself (doesn't match test_*.py, so pytest won't collect
+it) — a plain helper module, imported explicitly. Fixtures live in
+conftest.py instead, where pytest auto-discovers them.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING
+
+from gsb_core.bus_client import BusClient
+from gsb_core.config import AdapterSettings
+from gsb_core.crypto import generate_encryption_keypair, generate_signing_keypair
+
+if TYPE_CHECKING:
+    from gsb_core.registry import RecipientCache
+
+NATS_URL = "nats://localhost:4222"
+SUBJECT = "events.files.FileWriteRequested"
+CREDS_DIR = "infra/nats/operator/creds"
+
+
+def settings(service_id: str) -> AdapterSettings:
+    # AdapterSettings needs an env-driven load in production (Step B4), but
+    # constructing it directly is simpler and equally valid for tests —
+    # pydantic-settings models are just pydantic models with extra loading
+    # behavior bolted on.
+    return AdapterSettings(
+        service_id=service_id,
+        nats_url=NATS_URL,
+        nats_creds_path=f"{CREDS_DIR}/{service_id}.creds",
+    )
+
+
+async def connect(service_id: str) -> BusClient:
+    signing = generate_signing_keypair()
+    encryption = generate_encryption_keypair()
+    return await BusClient.connect(
+        settings(service_id),
+        adapter_type="test-adapter",
+        encryption_keypair=encryption,
+        signing_seed=signing.seed,
+        signing_public_key=signing.public_key,
+    )
+
+
+async def wait_until_cache_nonempty(cache: RecipientCache, *, timeout: float = 3.0) -> None:
+    async def _poll() -> None:
+        while not cache.current():
+            await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(_poll(), timeout=timeout)
+Write conftest.py
+52 lines
+"""Shared fixtures for gsb-core's live-NATS integration tests (Steps B5-B7).
+Auto-discovered by pytest for every test module in this directory."""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import AsyncGenerator
+
+import nats
+import pytest
+from nats.js.errors import NoKeysError
+
+from tests._helpers import CREDS_DIR, NATS_URL, SUBJECT
+
+
+@pytest.fixture(autouse=True)
+async def _clean_state() -> AsyncGenerator[None]:
+    """Purges the EVENTS stream AND any service-directory registrations
+    for SUBJECT before each test, via gsb-admin — real adapter identities
+    can't be given arbitrary unique test subjects (only their real, fixed
+    ones), so tests get clean state each time instead.
+
+    The KV half of this was added after a real, initially-confusing
+    failure in Step B6: a "no recipients" test failed intermittently
+    depending on what ran before it — `subscribe()` in an earlier test
+    starts a real heartbeat that `BusClient.close()` cancels but never
+    deregisters, so the KV entry lingers until its 60s TTL naturally
+    expires. Purging only the message stream (registry.py's own concern
+    is untouched by that) wasn't enough.
+
+    service-identity (Step B6's later addition) isn't purged here — its
+    entries have no TTL, but `BusClient.connect()` overwrites its own
+    entry every call, so there's no analogous staleness risk to guard
+    against.
+    """
+    nc = await nats.connect(NATS_URL, user_credentials=f"{CREDS_DIR}/gsb-admin.creds")
+    js = nc.jetstream()
+    await js.purge_stream("EVENTS")
+    kv = await js.key_value("service-directory")
+    try:
+        for key in await kv.keys(filters=[f"{SUBJECT}."]):
+            await kv.delete(key)
+    except NoKeysError:
+        pass
+    await nc.close()
+    yield
+
+
+@pytest.fixture
+def durable_name() -> str:
+    return f"test-{uuid.uuid4().hex[:8]}"
+Let me reconsider that import — tests may not be a proper importable package here. Let me test rather than guess:
+
+Edit conftest.py
+Modified
+Now let's update test_bus_client.py to use the shared helpers instead of its local duplicates:
+
+Edit test_bus_client.py
+Removed 75 lines
+Let's verify this refactor works before building on it:
+
+Bash Verify the conftest/helpers refactor works
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest libs/gsb-core/tests/test_bus_client.py -v 2>&1 | tail -20
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0 -- /home/bherring/dev/clodhopper/GregorsServiceBus/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/bherring/dev/clodhopper/GregorsServiceBus
+configfile: pyproject.toml
+plugins: cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 7 items
+
+libs/gsb-core/tests/test_bus_client.py::test_publish_and_fetch_round_trip PASSED [ 14%]
+libs/gsb-core/tests/test_bus_client.py::test_publish_with_no_recipients_does_not_crash PASSED [ 28%]
+libs/gsb-core/tests/test_bus_client.py::test_tampered_ciphertext_is_not_returned PASSED [ 42%]
+libs/gsb-core/tests/test_bus_client.py::test_signature_not_matching_claimed_key_is_rejected PASSED [ 57%]
+libs/gsb-core/tests/test_bus_client.py::test_impersonation_with_self_consistent_key_is_rejected PASSED [ 71%]
+libs/gsb-core/tests/test_bus_client.py::test_message_from_unregistered_sender_is_rejected PASSED [ 85%]
+libs/gsb-core/tests/test_bus_client.py::test_fetch_without_subscribe_raises PASSED [100%]
+
+============================== 7 passed in 0.19s ===============================
+The import pattern works. Now let's write the B7 test file itself — two adapter-shaped classes running concurrently, structured the way real Phase 2 adapters will be:
+
+Write test_end_to_end.py
+157 lines
+"""Step B7 — End-to-end proof (Design.md §11 Track B): two in-process
+"fake adapters" built on BusClient, exchanging one signed+encrypted event
+through the real bus. This is the concrete "Phase 1 is done" checkpoint —
+everything downstream (real adapters, Phase 2+) builds on this working.
+
+Scope note: Step B6's own integration tests (test_bus_client.py) already
+proved BusClient's correctness in detail — round-trip, tamper detection,
+signature verification, impersonation rejection, unregistered senders.
+This file doesn't re-prove those properties. What it proves instead, and
+what B6's tests didn't: that the whole thing holds together when
+structured as two independent, *concurrently running* adapter-shaped
+objects — the actual shape real adapters will take (connect once at
+startup, then run an ongoing loop) — rather than a single linear script
+issuing calls to two BusClient instances in sequence.
+
+Requires a live NATS server, bootstrapped per Steps A3-A6.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+from _helpers import SUBJECT, connect, wait_until_cache_nonempty
+from gsb_core.bus_client import BusClient, ReceivedEvent
+
+
+class FakePublisherAdapter:
+    """Mimics a real adapter's publish-side shape (e.g. the eventual
+    Webhook Listener, Design.md §8): connect once, publish, shut down.
+    Fire-and-forget from the caller's perspective — same as the real one."""
+
+    def __init__(self, service_id: str) -> None:
+        self._service_id = service_id
+
+    async def run(self, *, subject: str, payload: bytes, event_type: str) -> None:
+        client = await connect(self._service_id)
+        try:
+            # A real publisher doesn't necessarily wait for a recipient to
+            # exist (test_publish_with_no_recipients_does_not_crash, B6,
+            # covers that case) — this fake one does, deliberately, so the
+            # test is deterministic rather than racing the consumer's
+            # startup. In production this "wait" would more naturally be
+            # "the consumer adapter has already been running for a while."
+            cache = await client._cache_for(subject)
+            await wait_until_cache_nonempty(cache)
+            await client.publish(subject, payload, event_type=event_type)
+        finally:
+            await client.close()
+
+
+class FakeConsumerAdapter:
+    """Mimics a real adapter's consume-side shape (e.g. the eventual File
+    Storage Adapter, Design.md §8): connect + subscribe once at startup,
+    then run an ongoing fetch loop — collecting whatever arrives until
+    told to stop, the same structure a real long-running adapter process
+    would have."""
+
+    def __init__(self, service_id: str) -> None:
+        self._service_id = service_id
+        self.received: list[ReceivedEvent] = []
+        self._client: BusClient | None = None
+        self._durable_name: str | None = None
+
+    async def start(self, *, subject: str, durable_name: str) -> None:
+        """The startup half of a real adapter's lifecycle — must complete
+        before anyone can usefully publish to it (this is what registers
+        it as a recipient)."""
+        self._client = await connect(self._service_id)
+        self._durable_name = await self._client.subscribe(subject, durable_name=durable_name)
+
+    async def run_until(self, *, count: int, timeout: float) -> None:
+        """The ongoing half — a real adapter's main loop runs forever;
+        this one stops once it's collected `count` events or `timeout`
+        elapses, so the test can await it directly."""
+        assert self._client is not None and self._durable_name is not None, "call start() first"
+        deadline = asyncio.get_event_loop().time() + timeout
+        while len(self.received) < count and asyncio.get_event_loop().time() < deadline:
+            events = await self._client.fetch(self._durable_name, batch=count, timeout=1.0)
+            for event in events:
+                await event.ack()
+            self.received.extend(events)
+
+    async def stop(self) -> None:
+        if self._client is not None:
+            await self._client.close()
+
+
+async def test_two_fake_adapters_exchange_one_event_end_to_end(durable_name: str) -> None:
+    """The Phase 1 completion checkpoint: a publisher-shaped adapter and a
+    consumer-shaped adapter, each with an independent lifecycle, running
+    concurrently, exchange one signed+encrypted event through the real
+    bus — no shared state between them except the bus itself."""
+    publisher = FakePublisherAdapter("webhook-listener-01")
+    consumer = FakeConsumerAdapter("file-storage-01")
+
+    # Startup (subscribe) must complete before publishing has a recipient
+    # to encrypt for — the same ordering a real deployment would have
+    # ("the consumer adapter is already running before anyone publishes
+    # to it"), not a test-only synchronization trick.
+    await consumer.start(subject=SUBJECT, durable_name=durable_name)
+    try:
+        # The actual proof: both adapters' ongoing work happens
+        # concurrently via the event loop, not as sequential steps in one
+        # script.
+        await asyncio.gather(
+            consumer.run_until(count=1, timeout=5),
+            publisher.run(
+                subject=SUBJECT,
+                payload=b"end-to-end proof payload",
+                event_type="FileWriteRequested",
+            ),
+        )
+
+        assert len(consumer.received) == 1
+        received = consumer.received[0]
+        assert received.payload == b"end-to-end proof payload"
+        assert received.details.event_type == "FileWriteRequested"
+        assert received.details.source_service_id == "webhook-listener-01"
+        # The signature was verified against the trusted service-identity
+        # directory (Design.md §4.6, Decision #20) as part of fetch() —
+        # if it hadn't verified, `received` would be empty, not present
+        # with a bad signature silently accepted.
+    finally:
+        await consumer.stop()
+
+
+async def test_fake_adapters_exchange_a_sequence_of_events(durable_name: str) -> None:
+    """A closer-to-production shape than a single message: the consumer's
+    loop processes several events as they arrive, not just one."""
+    publisher = FakePublisherAdapter("webhook-listener-01")
+    consumer = FakeConsumerAdapter("file-storage-01")
+
+    await consumer.start(subject=SUBJECT, durable_name=durable_name)
+    try:
+
+        async def publish_three() -> None:
+            client = await connect("webhook-listener-01")
+            try:
+                cache = await client._cache_for(SUBJECT)
+                await wait_until_cache_nonempty(cache)
+                for i in range(3):
+                    await client.publish(
+                        SUBJECT, f"event-{i}".encode(), event_type="FileWriteRequested"
+                    )
+            finally:
+                await client.close()
+
+        await asyncio.gather(
+            consumer.run_until(count=3, timeout=5),
+            publish_three(),
+        )
+
+        assert len(consumer.received) == 3
+        assert {r.payload for r in consumer.received} == {b"event-0", b"event-1", b"event-2"}
+    finally:
+        await consumer.stop()
+Let me fix an inconsistency — the second test should reuse FakePublisherAdapter rather than defining an ad-hoc closure. Using three separate publisher instances is actually a nice variation (proving multiple independent publisher connections work too, not just one publishing multiple times):
+
+Edit test_end_to_end.py
+Removed 8 lines
+Now let's run this against the live stack:
+
+Bash Run the new B7 end-to-end tests
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest libs/gsb-core/tests/test_end_to_end.py -v 2>&1 | tail -40
+
+OUT
+            raise errors.Error("nats: next_msg cannot be used in async subscriptions")
+    
+        task_name = str(uuid4())
+        try:
+            future = asyncio.create_task(timed_get())
+            self._pending_next_msgs_calls[task_name] = future
+            msg = await future
+        except asyncio.TimeoutError:
+            if self._conn.is_closed:
+                raise errors.ConnectionClosedError
+>           raise errors.TimeoutError
+E           nats.errors.TimeoutError: nats: timeout
+
+.venv/lib/python3.12/site-packages/nats/aio/subscription.py:191: TimeoutError
+------------------------------ Captured log setup ------------------------------
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+------------------------------ Captured log call -------------------------------
+WARNING  gsb_core.bus_client:bus_client.py:269 event 01a0365b-9e14-738f-a6d3-28f6b94a8826 claims a sourcePublicKey that doesn't match the registered identity for webhook-listener-01
+ERROR    gsb_core.bus_client:bus_client.py:233 failed to process message on events.files.FileWriteRequested, leaving unacked for redelivery
+Traceback (most recent call last):
+  File "/home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core/gsb_core/bus_client.py", line 231, in fetch
+    received.append(await self._process(msg))
+                    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core/gsb_core/bus_client.py", line 278, in _process
+    raise SignatureVerificationError(
+gsb_core.bus_client.SignatureVerificationError: signature verification failed for 01a0365b-9e14-738f-a6d3-28f6b94a8826
+WARNING  gsb_core.bus_client:bus_client.py:269 event 01a0365b-9e15-7c13-99ef-0a2fd0243026 claims a sourcePublicKey that doesn't match the registered identity for webhook-listener-01
+ERROR    gsb_core.bus_client:bus_client.py:233 failed to process message on events.files.FileWriteRequested, leaving unacked for redelivery
+Traceback (most recent call last):
+  File "/home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core/gsb_core/bus_client.py", line 231, in fetch
+    received.append(await self._process(msg))
+                    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core/gsb_core/bus_client.py", line 278, in _process
+    raise SignatureVerificationError(
+gsb_core.bus_client.SignatureVerificationError: signature verification failed for 01a0365b-9e15-7c13-99ef-0a2fd0243026
+ERROR    nats.aio.client:client.py:239 nats: encountered error
+nats.errors.Error: nats: permissions violation for publish to "$js.ack.events.test-a2a904da.1.18.3.1787618369045920465.0"
+=========================== short test summary info ============================
+FAILED libs/gsb-core/tests/test_end_to_end.py::test_fake_adapters_exchange_a_sequence_of_events
+========================= 1 failed, 1 passed in 1.16s ==========================
+Found something real, but it's a test-fixture flaw, not a system bug: my three FakePublisherAdapter("webhook-listener-01") instances each independently generate a random signing key via the test helper's connect(), and since they share one serviceId, their concurrent identity registrations overwrite each other — messages signed by an now-overwritten key correctly fail verification. That's actually the identity mechanism working correctly; it's my test that modeled something unrealistic (real adapters use one fixed nkey per identity, not a fresh random key per connection). The design's real answer to horizontal scaling is distinct serviceIds per replica (Decision #18), not sharing one. Let me fix the test to be realistic — one publisher connection, multiple sequential publishes:
+
+Read test_end_to_end.py (lines 29-49)
+Edit test_end_to_end.py
+Added 25 lines
+Now let's update the second test to use run_many with one publisher instead of three:
+
+Read test_end_to_end.py (lines 141-162)
+Read test_end_to_end.py (lines 161-175)
+Edit test_end_to_end.py
+Added 1 line
+Now let's run both tests again:
+
+Bash Re-run B7 tests with the fix
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest libs/gsb-core/tests/test_end_to_end.py -v 2>&1 | tail -20
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0 -- /home/bherring/dev/clodhopper/GregorsServiceBus/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/bherring/dev/clodhopper/GregorsServiceBus
+configfile: pyproject.toml
+plugins: cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 2 items
+
+libs/gsb-core/tests/test_end_to_end.py::test_two_fake_adapters_exchange_one_event_end_to_end PASSED [ 50%]
+libs/gsb-core/tests/test_end_to_end.py::test_fake_adapters_exchange_a_sequence_of_events PASSED [100%]
+
+============================== 2 passed in 0.08s ===============================
+Both pass. Let's run the full toolchain now:
+
+Bash Full test suite three times for stability, plus ruff and mypy
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== full pytest (3x for stability) ==="
+uv run --all-packages pytest -q 2>&1 | tail -5
+uv run --all-packages pytest -q 2>&1 | tail -5
+uv run --all-packages pytest -q 2>&1 | tail -5
+echo "=== ruff ==="
+uv run ruff check . 2>&1
+echo "=== mypy ==="
+uv run --all-packages mypy libs 2>&1
+
+OUT
+=== full pytest (3x for stability) ===
+....................................................                     [100%]
+52 passed in 2.00s
+....................................................                     [100%]
+52 passed in 2.00s
+....................................................                     [100%]
+52 passed in 2.03s
+=== ruff ===
+I001 [*] Import block is un-sorted or un-formatted
+  --> libs/gsb-core/tests/conftest.py:4:1
+   |
+ 2 |   Auto-discovered by pytest for every test module in this directory."""
+ 3 |
+ 4 | / from __future__ import annotations
+ 5 | |
+ 6 | | import uuid
+ 7 | | from collections.abc import AsyncGenerator
+ 8 | |
+ 9 | | import nats
+10 | | import pytest
+11 | | from nats.js.errors import NoKeysError
+12 | |
+13 | | from _helpers import CREDS_DIR, NATS_URL, SUBJECT
+   | |_________________________________________________^
+help: Organize imports
+   |
+10 | import pytest
+   - from nats.js.errors import NoKeysError
+   -
+11 | from _helpers import CREDS_DIR, NATS_URL, SUBJECT
+12 + from nats.js.errors import NoKeysError
+13 |
+   |
+
+Found 1 error.
+[*] 1 fixable with the `--fix` option.
+=== mypy ===
+Success: no issues found in 15 source files
+52 tests, stable across 3 runs, mypy clean. Just an import order fixup needed:
+
+Bash Auto-fix import order and re-verify
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check --fix . 2>&1
+echo "=== re-verify ==="
+uv run ruff check . 2>&1
+uv run --all-packages pytest -q 2>&1 | tail -3
+
+OUT
+Found 1 error (1 fixed, 0 remaining).
+=== re-verify ===
+All checks passed!
+....................................................                     [100%]
+52 passed in 2.02s
+[This command modified 1 file you've previously read: libs/gsb-core/tests/conftest.py. Call Read before editing.]
+All clean. Now bandit, pip-audit, and the full pre-commit chain:
+
+Bash Bandit, pip-audit, full pre-commit
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== bandit ==="
+uv run bandit -q -r libs/gsb-core/gsb_core 2>&1
+echo "=== pip-audit ==="
+uv run pip-audit 2>&1 | tail -6
+echo "=== pre-commit ==="
+git add -N libs/gsb-core/tests/_helpers.py libs/gsb-core/tests/conftest.py libs/gsb-core/tests/test_end_to_end.py libs/gsb-core/tests/test_bus_client.py
+uv run --all-packages pre-commit run --all-files 2>&1
+git reset libs/gsb-core/tests/_helpers.py libs/gsb-core/tests/conftest.py libs/gsb-core/tests/test_end_to_end.py libs/gsb-core/tests/test_bus_client.py >/dev/null 2>&1
+
+OUT
+=== bandit ===
+=== pip-audit ===
+No known vulnerabilities found
+Name     Skip Reason
+-------- -----------------------------------------------------------------------
+gsb-core Dependency not found on PyPI and could not be audited: gsb-core (0.1.0)
+=== pre-commit ===
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+mypy.....................................................................Passed
+bandit...................................................................Passed
+Given B7 is explicitly the "Phase 1 is done" checkpoint, let's do one final full clean-slate verification — the whole pipeline, A1 through B7, from true scratch:
+
+Bash Full teardown for Phase 1 completion verification
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+sg docker -c "docker compose down -v" 2>&1
+rm -rf infra/nats/operator infra/nats/resolver.conf
+echo "torn down, ready for full rebuild"
+
+OUT
+ Container gsb-nats-1 Stopping 
+ Container gsb-nats-1 Stopped 
+ Container gsb-nats-1 Removing 
+ Container gsb-nats-1 Removed 
+ Volume gsb_nats-data Removing 
+ Network gsb_default Removing 
+ Volume gsb_nats-data Removed 
+ Network gsb_default Removed 
+torn down, ready for full rebuild
+Bash Full infra rebuild from scratch
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+sg docker -c "bash infra/nats/up.sh" 2>&1 | tail -10
+
+OUT
+            Maximum Age: unlimited
+       JetStream Stream: KV_service-identity
+                Storage: File
+
+Cluster Information:
+
+                   Name: 
+                 Leader: NBY32NFLG2KXHXBGMYPB63J5XTRBKDVBUBU33LWLA7FQULL26XQCC64R
+Done. Next: Step A6 wires everything into docker-compose.
+Done — infra is up. Try: docker compose logs -f nats
+Now the entire test suite against genuinely fresh infra — the full Phase 1 proof:
+
+Bash Full test suite against completely fresh infra — the Phase 1 proof
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest -v 2>&1 | tail -60
+
+OUT
+configfile: pyproject.toml
+testpaths: libs, adapters
+plugins: cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 52 items
+
+libs/gsb-core/tests/test_bus_client.py::test_publish_and_fetch_round_trip PASSED [  1%]
+libs/gsb-core/tests/test_bus_client.py::test_publish_with_no_recipients_does_not_crash PASSED [  3%]
+libs/gsb-core/tests/test_bus_client.py::test_tampered_ciphertext_is_not_returned PASSED [  5%]
+libs/gsb-core/tests/test_bus_client.py::test_signature_not_matching_claimed_key_is_rejected PASSED [  7%]
+libs/gsb-core/tests/test_bus_client.py::test_impersonation_with_self_consistent_key_is_rejected PASSED [  9%]
+libs/gsb-core/tests/test_bus_client.py::test_message_from_unregistered_sender_is_rejected PASSED [ 11%]
+libs/gsb-core/tests/test_bus_client.py::test_fetch_without_subscribe_raises PASSED [ 13%]
+libs/gsb-core/tests/test_config.py::test_loads_required_fields_from_env PASSED [ 15%]
+libs/gsb-core/tests/test_config.py::test_defaults PASSED                 [ 17%]
+libs/gsb-core/tests/test_config.py::test_subjects_comma_separated PASSED [ 19%]
+libs/gsb-core/tests/test_config.py::test_subjects_json_array PASSED      [ 21%]
+libs/gsb-core/tests/test_config.py::test_subjects_empty_string_means_empty_list PASSED [ 23%]
+libs/gsb-core/tests/test_config.py::test_missing_required_service_id_raises PASSED [ 25%]
+libs/gsb-core/tests/test_config.py::test_nonexistent_creds_path_raises PASSED [ 26%]
+libs/gsb-core/tests/test_config.py::test_invalid_log_level_raises PASSED [ 28%]
+libs/gsb-core/tests/test_config.py::test_subclassing_adds_adapter_specific_settings PASSED [ 30%]
+libs/gsb-core/tests/test_crypto.py::test_encrypt_decrypt_round_trip_single_recipient PASSED [ 32%]
+libs/gsb-core/tests/test_crypto.py::test_encrypt_for_multiple_recipients_each_can_decrypt PASSED [ 34%]
+libs/gsb-core/tests/test_crypto.py::test_non_recipient_cannot_decrypt PASSED [ 36%]
+libs/gsb-core/tests/test_crypto.py::test_ciphertext_does_not_contain_plaintext PASSED [ 38%]
+libs/gsb-core/tests/test_crypto.py::test_sign_verify_round_trip PASSED   [ 40%]
+libs/gsb-core/tests/test_crypto.py::test_verify_works_with_only_the_public_key_no_private_material PASSED [ 42%]
+libs/gsb-core/tests/test_crypto.py::test_verify_rejects_tampered_payload PASSED [ 44%]
+libs/gsb-core/tests/test_crypto.py::test_verify_rejects_signature_from_a_different_key PASSED [ 46%]
+libs/gsb-core/tests/test_crypto.py::test_verify_raises_on_malformed_public_key PASSED [ 48%]
+libs/gsb-core/tests/test_crypto.py::test_generate_signing_keypair_produces_distinct_keys_each_time PASSED [ 50%]
+libs/gsb-core/tests/test_end_to_end.py::test_two_fake_adapters_exchange_one_event_end_to_end PASSED [ 51%]
+libs/gsb-core/tests/test_end_to_end.py::test_fake_adapters_exchange_a_sequence_of_events PASSED [ 53%]
+libs/gsb-core/tests/test_envelope.py::test_round_trip_preserves_all_fields PASSED [ 55%]
+libs/gsb-core/tests/test_envelope.py::test_wire_shape_matches_design_doc_section_5 PASSED [ 57%]
+libs/gsb-core/tests/test_envelope.py::test_event_id_defaults_to_a_fresh_uuid7_when_not_supplied PASSED [ 59%]
+libs/gsb-core/tests/test_envelope.py::test_new_event_id_helper_produces_a_valid_uuid7_string PASSED [ 61%]
+libs/gsb-core/tests/test_envelope.py::test_event_created_defaults_to_now_utc_when_not_supplied PASSED [ 63%]
+libs/gsb-core/tests/test_envelope.py::test_correlation_id_and_signature_default_to_none PASSED [ 65%]
+libs/gsb-core/tests/test_envelope.py::test_missing_required_field_raises_validation_error PASSED [ 67%]
+libs/gsb-core/tests/test_envelope.py::test_envelope_is_frozen PASSED     [ 69%]
+libs/gsb-core/tests/test_envelope.py::test_can_construct_with_python_attribute_names_too PASSED [ 71%]
+libs/gsb-core/tests/test_registry.py::test_register_then_lookup PASSED   [ 73%]
+libs/gsb-core/tests/test_registry.py::test_lookup_empty_subject_returns_empty_list PASSED [ 75%]
+libs/gsb-core/tests/test_registry.py::test_lookup_does_not_include_other_subjects PASSED [ 76%]
+libs/gsb-core/tests/test_registry.py::test_multiple_recipients_for_same_subject PASSED [ 78%]
+libs/gsb-core/tests/test_registry.py::test_deregister_removes_from_lookup PASSED [ 80%]
+libs/gsb-core/tests/test_registry.py::test_heartbeat_registers_repeatedly PASSED [ 82%]
+libs/gsb-core/tests/test_registry.py::test_cache_sees_pre_existing_recipient_on_start PASSED [ 84%]
+libs/gsb-core/tests/test_registry.py::test_cache_picks_up_new_registration_after_start PASSED [ 86%]
+libs/gsb-core/tests/test_registry.py::test_cache_removes_entry_on_deregister PASSED [ 88%]
+libs/gsb-core/tests/test_registry.py::test_cache_ignores_unrelated_subjects PASSED [ 90%]
+libs/gsb-core/tests/test_registry.py::test_cache_stop_cancels_cleanly PASSED [ 92%]
+libs/gsb-core/tests/test_registry.py::test_register_identity_then_lookup PASSED [ 94%]
+libs/gsb-core/tests/test_registry.py::test_lookup_unknown_identity_returns_none PASSED [ 96%]
+libs/gsb-core/tests/test_registry.py::test_register_identity_overwrites_previous_key PASSED [ 98%]
+libs/gsb-core/tests/test_scaffold.py::test_package_imports_and_has_version PASSED [100%]
+
+============================== 52 passed in 2.04s ==============================
+All 52 tests pass from true scratch. Let's clean up test state and finalize documentation:
+
+Bash Clean up test state, confirm stack health
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import asyncio, nats
+async def main():
+    nc = await nats.connect('nats://localhost:4222', user_credentials='infra/nats/operator/creds/gsb-admin.creds')
+    js = nc.jetstream()
+    await js.purge_stream('EVENTS')
+    for bucket in ['service-directory', 'service-identity']:
+        kv = await js.key_value(bucket)
+        try:
+            for k in await kv.keys():
+                await kv.delete(k)
+        except Exception:
+            pass
+    await nc.close()
+asyncio.run(main())
+"
+sg docker -c "docker compose ps" 2>&1
+
+OUT
+NAME         IMAGE         COMMAND                  SERVICE   CREATED          STATUS          PORTS
+gsb-nats-1   nats:2.14.5   "/nats-server -c /et…"   nats      21 seconds ago   Up 20 seconds   0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+Now let's update Design.md to check off B7 and mark Phase 1 complete:
+
+Bash Find B7 checklist line
+IN
+grep -n "^\- \[ \] \*\*B7\." /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md
+
+OUT
+446:- [ ] **B7. End-to-end proof** — a test with two in-process fake adapters using `BusClient`: one publishes a signed+encrypted event, the other receives, verifies the signature, and decrypts it. This is the concrete "Phase 1 is done" checkpoint — everything downstream (real adapters) builds on this working. **Note: B6's own integration tests already do most of this** (real publish → real JetStream delivery → real decrypt+verify between two real BusClient instances) — B7 may end up light, more a confirmation/consolidation than new ground.
+447:- [ ] **B7. End-to-end proof** — a test with two in-process fake adapters using `BusClient`: one publishes a signed+encrypted event, the other receives, verifies the signature, and decrypts it. This is the concrete "Phase 1 is done" checkpoint — everything downstream (real adapters) builds on this working.
+Edit Design.md
+Added 5 lines
+Bash Final git status review
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+git status --short
+
+OUT
+ M Design.md
+ M libs/gsb-core/tests/test_bus_client.py
+?? libs/gsb-core/tests/_helpers.py
+?? libs/gsb-core/tests/conftest.py
+?? libs/gsb-core/tests/test_end_to_end.py
+B7 done — and with it, Phase 1 is complete.
+
+What's built: test_end_to_end.py — FakePublisherAdapter/FakeConsumerAdapter, small classes that model the actual shape real Phase 2 adapters will take (connect once at startup, then run an ongoing loop) rather than a linear test script calling BusClient directly. Two tests: a single event end-to-end, and a sequence of three, with the two adapters running concurrently via asyncio.gather — not sequential awaits — since that's what B6's tests hadn't specifically proven. Also refactored shared test setup out of test_bus_client.py into _helpers.py/conftest.py so both files share one source of truth.
+
+One more real finding along the way: an early version of the multi-event test used three separate FakePublisherAdapter instances sharing one serviceId, connecting concurrently — 2 of 3 messages failed signature verification. Not a bug in the system: the test helper generates a fresh random signing key per connection for convenience, and since identity registration is last-writer-wins per serviceId (§4.6), three concurrent connections kept overwriting each other's trusted key. A real adapter never does this — one serviceId means one persistent key from one .creds file, and horizontal scaling means separate serviceIds per replica (Decision #18), not sharing one. Fixed by using one publisher connection for the whole sequence — also just the more realistic shape.
+
+The actual completion checkpoint: full teardown (docker compose down -v, wiped all generated auth state) and rebuild via up.sh from absolute scratch, then all 52 tests across every Track A and B step run against that genuinely fresh infra — all passing. Not "the last step passed" but "the whole thing rebuilt from nothing still works."
+
+Phase 1 is done. Both tracks — A1–A7 (infra: toolchain, auth, server, JetStream objects, compose, smoke test) and B1–B7 (gsb-core: envelope, crypto, config, registry, bus client, end-to-end proof) — built and empirically verified against real infrastructure throughout, with every genuine bug and design gap found along the way fixed and documented rather than glossed over (the nkeys.py verification bug, the age/pyrage schema correction, several nats-py KV quirks, the sender-authentication gap and its resolution, and more).
+
+Design.md now reflects Phase 1 as complete, with a pointer to what's next: §10 Phase 2 — the Webhook Listener → File Storage Adapter vertical slice, the first real adapters built on this foundation. Want to continue there, or pause here now that Phase 1's a clean stopping point?
 
 ----------------- Step B7 Completed -----------------------
+
 ================= Phase 1 completed =======================
+
