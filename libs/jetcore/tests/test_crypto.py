@@ -3,7 +3,7 @@ generated test keys throughout; no live bus needed."""
 
 import pyrage
 import pytest
-from gsb_core.crypto import (
+from jetcore.crypto import (
     decrypt,
     encrypt_for_recipients,
     generate_encryption_keypair,

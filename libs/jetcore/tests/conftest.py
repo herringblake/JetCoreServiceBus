@@ -1,4 +1,4 @@
-"""Shared fixtures for gsb-core's live-NATS integration tests (Steps B5-B7).
+"""Shared fixtures for jetcore's live-NATS integration tests (Steps B5-B7).
 Auto-discovered by pytest for every test module in this directory."""
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from nats.js.errors import NoKeysError
 @pytest.fixture(autouse=True)
 async def _clean_state() -> AsyncGenerator[None]:
     """Purges the EVENTS stream AND any service-directory registrations
-    for SUBJECT before each test, via gsb-admin — real adapter identities
+    for SUBJECT before each test, via jetcore-admin — real adapter identities
     can't be given arbitrary unique test subjects (only their real, fixed
     ones), so tests get clean state each time instead.
 
@@ -32,7 +32,7 @@ async def _clean_state() -> AsyncGenerator[None]:
     entry every call, so there's no analogous staleness risk to guard
     against.
     """
-    nc = await nats.connect(NATS_URL, user_credentials=f"{CREDS_DIR}/gsb-admin.creds")
+    nc = await nats.connect(NATS_URL, user_credentials=f"{CREDS_DIR}/jetcore-admin.creds")
     js = nc.jetstream()
     await js.purge_stream("EVENTS")
     kv = await js.key_value("service-directory")

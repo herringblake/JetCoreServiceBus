@@ -1,12 +1,12 @@
-# Gregor's Service Bus — uv workspace root (Decision #16, Design.md §7.5)
+# Jet Core Service Bus — uv workspace root (Decision #16, Design.md §7.5)
 #
 # This root is "virtual" (tool.uv.package = false) — it's not itself an
 # installable package, just the workspace container plus shared dev tooling
 # config and the shared dev dependency group. Real packages live under
-# libs/ (gsb-core) and adapters/ (populated starting Phase 3).
+# libs/ (jetcore) and adapters/ (populated starting Phase 3).
 
 [project]
-name = "gregors-service-bus"
+name = "jet-core-service-bus"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = []

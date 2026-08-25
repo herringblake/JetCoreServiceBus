@@ -7,7 +7,7 @@ set -euo pipefail
 # Idempotently, via nsc (containerized — natsio/nats-box, no native install
 # per Design.md §11 parameters):
 #   1. Creates the Operator representing this bus, if it doesn't exist.
-#   2. Creates the GSB Account, if it doesn't exist, and grants it JetStream
+#   2. Creates the JETCORE Account, if it doesn't exist, and grants it JetStream
 #      storage (disabled per-account by default under decentralized JWT
 #      auth — independent of nats-server.conf's global jetstream{} block).
 #   3. For each entry in adapter_identities.yaml (Step A2): creates the User
@@ -20,7 +20,7 @@ set -euo pipefail
 #   4. Generates a .creds file per user (JWT+nkey bundled — the idiomatic
 #      NATS client connection artifact; see Design.md §7.6, Decision #17-adjacent
 #      update) under operator/creds/.
-#   4b. Creates a dedicated gsb-admin identity (not an adapter) for
+#   4b. Creates a dedicated jetcore-admin identity (not an adapter) for
 #       provisioning shared JetStream infrastructure — used by Step A5.
 #   5. Generates the memory-resolver server config block (resolver.conf) —
 #      consumed by nats-server.conf in Step A4.
@@ -48,11 +48,11 @@ RESOLVER_CONF_NAME="resolver.conf"          # generated; consumed by Step A4
 NATS_BOX_IMAGE="natsio/nats-box:0.19.7-nonroot"
 YQ_IMAGE="mikefarah/yq:4.52.4"
 
-OPERATOR_NAME="GregorsServiceBus"
-ACCOUNT_NAME="GSB"
-ADMIN_ID="gsb-admin"   # infra-provisioning identity (Step A5), not an adapter
+OPERATOR_NAME="JetCoreServiceBus"
+ACCOUNT_NAME="JETCORE"
+ADMIN_ID="jetcore-admin"   # infra-provisioning identity (Step A5), not an adapter
 
-# JetStream storage the GSB account is allowed to use — kept in step with
+# JetStream storage the JETCORE account is allowed to use — kept in step with
 # nats-server.conf's own jetstream{} caps (256M mem / 2G file), since a
 # single-account dev setup has no reason for the account limit to be lower
 # than the server-wide limit.

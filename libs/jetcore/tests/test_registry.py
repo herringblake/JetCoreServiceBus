@@ -2,7 +2,7 @@
 
 Requires a live NATS server, bootstrapped per Steps A3-A6: `bash
 infra/nats/up.sh` (or, if already up, just `docker compose up -d nats`).
-Connects as `gsb-admin` (full `$KV.service-directory.>` access — Step A3),
+Connects as `jetcore-admin` (full `$KV.service-directory.>` access — Step A3),
 so these tests can exercise both the "own namespace" and "other adapter's
 namespace" cases without hitting the per-adapter permission scoping tested
 separately in Step A7.
@@ -17,10 +17,10 @@ from collections.abc import AsyncGenerator
 
 import nats
 import pytest
-from gsb_core.registry import RecipientCache, RegistryClient
+from jetcore.registry import RecipientCache, RegistryClient
 from nats.js import JetStreamContext
 
-CREDS_PATH = "infra/nats/operator/creds/gsb-admin.creds"
+CREDS_PATH = "infra/nats/operator/creds/jetcore-admin.creds"
 NATS_URL = "nats://localhost:4222"
 
 

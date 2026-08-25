@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import pytest
-from gsb_core.config import AdapterSettings
+from jetcore.config import AdapterSettings
 from pydantic import ValidationError
 
 
@@ -18,8 +18,8 @@ def creds_file(tmp_path: Path) -> Path:
 
 
 def _env(monkeypatch: pytest.MonkeyPatch, creds_file: Path, **extra: str) -> None:
-    monkeypatch.setenv("GSB_SERVICE_ID", "file-storage-01")
-    monkeypatch.setenv("GSB_NATS_CREDS_PATH", str(creds_file))
+    monkeypatch.setenv("JETCORE_SERVICE_ID", "file-storage-01")
+    monkeypatch.setenv("JETCORE_NATS_CREDS_PATH", str(creds_file))
     for key, value in extra.items():
         monkeypatch.setenv(key, value)
 
@@ -47,7 +47,7 @@ def test_subjects_comma_separated(monkeypatch: pytest.MonkeyPatch, creds_file: P
     _env(
         monkeypatch,
         creds_file,
-        GSB_SUBJECTS="events.files.FileWriteRequested, events.files.FileReadRequested",
+        JETCORE_SUBJECTS="events.files.FileWriteRequested, events.files.FileReadRequested",
     )
 
     settings = AdapterSettings(_env_file=None)
@@ -59,7 +59,7 @@ def test_subjects_comma_separated(monkeypatch: pytest.MonkeyPatch, creds_file: P
 
 
 def test_subjects_json_array(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
-    _env(monkeypatch, creds_file, GSB_SUBJECTS='["events.a", "events.b"]')
+    _env(monkeypatch, creds_file, JETCORE_SUBJECTS='["events.a", "events.b"]')
 
     settings = AdapterSettings(_env_file=None)
 
@@ -69,7 +69,7 @@ def test_subjects_json_array(monkeypatch: pytest.MonkeyPatch, creds_file: Path) 
 def test_subjects_empty_string_means_empty_list(
     monkeypatch: pytest.MonkeyPatch, creds_file: Path
 ) -> None:
-    _env(monkeypatch, creds_file, GSB_SUBJECTS="")
+    _env(monkeypatch, creds_file, JETCORE_SUBJECTS="")
 
     settings = AdapterSettings(_env_file=None)
 
@@ -79,22 +79,22 @@ def test_subjects_empty_string_means_empty_list(
 def test_missing_required_service_id_raises(
     monkeypatch: pytest.MonkeyPatch, creds_file: Path
 ) -> None:
-    monkeypatch.setenv("GSB_NATS_CREDS_PATH", str(creds_file))
+    monkeypatch.setenv("JETCORE_NATS_CREDS_PATH", str(creds_file))
 
     with pytest.raises(ValidationError):
         AdapterSettings(_env_file=None)
 
 
 def test_nonexistent_creds_path_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("GSB_SERVICE_ID", "file-storage-01")
-    monkeypatch.setenv("GSB_NATS_CREDS_PATH", str(tmp_path / "does-not-exist.creds"))
+    monkeypatch.setenv("JETCORE_SERVICE_ID", "file-storage-01")
+    monkeypatch.setenv("JETCORE_NATS_CREDS_PATH", str(tmp_path / "does-not-exist.creds"))
 
     with pytest.raises(ValidationError):
         AdapterSettings(_env_file=None)
 
 
 def test_invalid_log_level_raises(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
-    _env(monkeypatch, creds_file, GSB_LOG_LEVEL="VERBOSE")
+    _env(monkeypatch, creds_file, JETCORE_LOG_LEVEL="VERBOSE")
 
     with pytest.raises(ValidationError):
         AdapterSettings(_env_file=None)
@@ -103,7 +103,7 @@ def test_invalid_log_level_raises(monkeypatch: pytest.MonkeyPatch, creds_file: P
 def test_subclassing_adds_adapter_specific_settings(
     monkeypatch: pytest.MonkeyPatch, creds_file: Path
 ) -> None:
-    _env(monkeypatch, creds_file, GSB_WATCH_DIR="/data/files")
+    _env(monkeypatch, creds_file, JETCORE_WATCH_DIR="/data/files")
 
     class FileStorageSettings(AdapterSettings):
         watch_dir: str

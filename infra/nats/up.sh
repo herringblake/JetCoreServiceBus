@@ -20,7 +20,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 NATS_BOX_IMAGE="natsio/nats-box:0.19.7-nonroot"
-COMPOSE_NETWORK="gsb_default"   # matches docker-compose.yml's `name: gsb`
+COMPOSE_NETWORK="jetcore_default"   # matches docker-compose.yml's `name: jetcore`
 CREDS_DIR="$SCRIPT_DIR/operator/creds"
 
 echo "== Step A3: auth bootstrap =="
@@ -35,7 +35,7 @@ for _ in $(seq 1 30); do
   if docker run --rm --network "$COMPOSE_NETWORK" \
     -v "$CREDS_DIR:/creds:ro" \
     "$NATS_BOX_IMAGE" \
-    nats --server nats://nats:4222 --creds /creds/gsb-admin.creds \
+    nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
     server check connection >/dev/null 2>&1; then
     ready=1
     break

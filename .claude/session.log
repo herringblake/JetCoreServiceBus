@@ -11498,3 +11498,1289 @@ Design.md now reflects Phase 1 as complete, with a pointer to what's next: §10 
 
 ================= Phase 1 completed =======================
 
+----------------- Rename Project --------------------------
+
+Let's rename this from "Gregors's Service Bus" to "Jet Core Service Bus" since we are using Jet Stream instead of Kafka.
+Bash Find all files referencing Gregor/GSB/gsb
+IN
+grep -rlI -e "Gregor" -e "GSB" -e "gsb" . --exclude-dir=.git --exclude-dir=.venv --exclude-dir=node_modules 2>/dev/null | sort
+
+OUT
+.claude/session.log
+Dependencies.md
+Design.md
+docker-compose.yml
+infra/nats/adapter_identities.yaml
+infra/nats/bootstrap_auth.sh
+infra/nats/bootstrap_jetstream.sh
+infra/nats/README.md
+infra/nats/up.sh
+libs/gsb-core/gsb_core/bus_client.py
+libs/gsb-core/gsb_core/config.py
+libs/gsb-core/gsb_core/__init__.py
+libs/gsb-core/gsb_core/registry.py
+libs/gsb-core/pyproject.toml
+libs/gsb-core/tests/conftest.py
+libs/gsb-core/tests/_helpers.py
+libs/gsb-core/tests/test_bus_client.py
+libs/gsb-core/tests/test_config.py
+libs/gsb-core/tests/test_crypto.py
+libs/gsb-core/tests/test_end_to_end.py
+libs/gsb-core/tests/test_envelope.py
+libs/gsb-core/tests/test_registry.py
+libs/gsb-core/tests/test_scaffold.py
+pyproject.toml
+README.md
+uv.lock
+Bash
+IN
+echo "=== root pyproject.toml ==="; cat pyproject.toml | head -30
+echo "=== libs/gsb-core/pyproject.toml ==="; cat libs/gsb-core/pyproject.toml
+echo "=== config.py env prefix ==="; grep -n "env_prefix\|GSB_" libs/gsb-core/gsb_core/config.py
+echo "=== gsb-admin refs ==="; grep -rn "gsb-admin" --include="*.sh" --include="*.md" --include="*.yaml" --include="*.yml" .
+echo "=== docker-compose ==="; cat docker-compose.yml
+echo "=== README title ==="; head -5 README.md
+echo "=== Design.md title ==="; head -5 Design.md
+
+OUT
+=== root pyproject.toml ===
+# Gregor's Service Bus — uv workspace root (Decision #16, Design.md §7.5)
+#
+# This root is "virtual" (tool.uv.package = false) — it's not itself an
+# installable package, just the workspace container plus shared dev tooling
+# config and the shared dev dependency group. Real packages live under
+# libs/ (gsb-core) and adapters/ (populated starting Phase 3).
+
+[project]
+name = "gregors-service-bus"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["libs/*", "adapters/*"]
+
+[dependency-groups]
+# Shared across the whole workspace (Design.md §7.4). bandit/pip-audit/
+# pre-commit are here as CLI tools invoked via `uv run`, not as runtime deps
+# of any package.
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "bandit>=1.8",
+=== libs/gsb-core/pyproject.toml ===
+# gsb-core — shared library used by every adapter (Design.md §7.1)
+#
+# Dependencies added incrementally as each module (Design.md §11 Track B) is
+# actually built: pydantic + uuid6 land in B2 (envelope.py). pyrage/nkeys
+# (B3), nats-py (B5/B6) etc. still pending.
+
+[project]
+name = "gsb-core"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "nats-py[nkeys]>=2.15.0",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.15.0",
+    "pyrage>=1.4.0",
+    "uuid6>=2024.7.10",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["gsb_core"]
+=== config.py env prefix ===
+4:Field <-> env var mapping (all `GSB_`-prefixed, per §7.6):
+5:  service_id       GSB_SERVICE_ID       — must match this instance's
+8:  nats_url         GSB_NATS_URL         — defaults to the docker-compose
+10:  nats_creds_path  GSB_NATS_CREDS_PATH  — the .creds file Step A3's
+13:  subjects         GSB_SUBJECTS         — subjects this instance subscribes
+23:  log_level        GSB_LOG_LEVEL        — defaults to INFO
+39:    settings (still `GSB_`-prefixed) — pydantic-settings merges them."""
+41:    model_config = SettingsConfigDict(env_prefix="GSB_", env_file=".env", extra="ignore")
+=== gsb-admin refs ===
+infra/nats/up.sh:38:    nats --server nats://nats:4222 --creds /creds/gsb-admin.creds \
+infra/nats/bootstrap_auth.sh:23:#   4b. Creates a dedicated gsb-admin identity (not an adapter) for
+infra/nats/bootstrap_auth.sh:53:ADMIN_ID="gsb-admin"   # infra-provisioning identity (Step A5), not an adapter
+Design.md:415:- [x] **A3. Bootstrap script (auth)** — [infra/nats/bootstrap_auth.sh](infra/nats/bootstrap_auth.sh): idempotent, containerized (`nsc` via `natsio/nats-box`, manifest parsed via `mikefarah/yq`), creates the Operator, `GSB` Account, and one User per A2 manifest entry, applies its permissions plus a derived KV-write grant and a v1 baseline (`$JS.API.>`, `_INBOX.>`, KV-read-all — not scoped down further in v1, a candidate for later tightening), generates a `.creds` file per adapter, and emits the memory-resolver config block. **Executed and verified end-to-end** (Docker access resolved — host user added to the `docker` group) across 3 consecutive runs, confirming true idempotency (no duplicate permission entries on repeat `edit user` calls). Four real bugs surfaced only by running it, not by reading docs — worth remembering: (1) `nsc list ... --json` writes to **stderr**, not stdout — a `2>/dev/null` silently broke every existence check; (2) `nsc`'s table output carries ANSI color codes even without a TTY, breaking `grep -w` matching — switched existence checks to `--json` throughout; (3) `jq` wasn't actually present on the host despite being assumed — dropped entirely in favor of `yq` alone; (4) JetStream refuses to start under decentralized JWT auth without a **System Account** — only surfaced when Step A4 actually started the server, fixed by adding `--sys` to the operator-creation call, after which `nsc generate config --mem-resolver` emits the needed `system_account:` directive automatically; (5) **JetStream is separately disabled per-account by default**, independent of both the system-account fix and the server's global `jetstream{}` block — surfaced while testing Step A5, fixed by adding `nsc edit account --js-mem-storage 256M --js-disk-storage 2G` (kept in step with `nats-server.conf`'s own caps). Also added a dedicated **`gsb-admin`** identity (`$JS.API.>` + `$KV.service-directory.>` + `_INBOX.>`, full pub+sub) — provisioning shared JetStream infrastructure isn't any particular adapter's job, so Step A5 uses this rather than repurposing one adapter's creds. Also settled: client connection uses a single `.creds` file (JWT+nkey bundled, `nsc generate creds`), not separate nkey-seed/JWT paths — §7.6 and B4 updated accordingly. **Updated post-B6** to grant every identity `$KV.service-identity.>` (broad read + own-namespace write) alongside the existing `service-directory` grant, resolving Decision #20/§4.6 — re-applied idempotently against the live stack with no server restart needed (permission changes live in each User's own JWT, not the server's static config).
+Design.md:416:- [x] **A5. Bootstrap script (JetStream objects)** — [infra/nats/bootstrap_jetstream.sh](infra/nats/bootstrap_jetstream.sh): idempotent, containerized, using the `gsb-admin` identity from A3. Creates the `EVENTS` stream (`events.>`, file storage, limits retention, discard-old, 7-day max-age, 1G max-bytes backstop) and the `service-directory` KV bucket (file storage, 60s max-age applied uniformly per key's last-write time — see terminology note below). **Executed and verified end-to-end**: both objects created successfully against the live A4 server; then empirically verified the actual TTL/heartbeat *mechanism* itself (not just that the bucket was created with some TTL value) by writing two keys, refreshing only one at t=30s, and checking both at t=65s — the refreshed key was still present (revision 3), the unrefreshed one had genuinely expired (`key not found`). This is the concrete behavior Decision #7's heartbeat/TTL design depends on, now confirmed rather than assumed. **Terminology note**: NATS's `nats kv add --ttl` sets a bucket-wide max-age applied per key's last-write timestamp — not the same mechanism as NATS's separate opt-in "Per-Key TTL" feature (`--marker-ttl`, for *different* TTL values per key). Since every registry entry uses the *same* fixed TTL in our design, the simpler bucket-wide setting is sufficient and was used; "per-key TTL" language elsewhere in this doc (§4.5) refers to the functional behavior (each key's own expiry clock resets on its own writes), not literally NATS's `--marker-ttl` feature. **Updated post-B6** to also create the `service-identity` bucket (§4.6, Decision #20) — no `--ttl` flag this time, deliberately (see §4.6 for why identity entries shouldn't expire the way liveness entries do).
+Design.md:419:- [x] **A7. Manual smoke test** — ran the full sequence against the live A6 stack: (1) published as `webhook-listener-01` to `events.files.FileWriteRequested`, confirmed it landed in the `EVENTS` stream; (2) created a **durable pull consumer** as `file-storage-01` (`--filter events.files.FileWriteRequested --ack explicit`) — the actual mechanism adapters use per §6, not yet exercised by any earlier step — and pulled the message through it, payload intact, acknowledged; (3) confirmed `webhook-sender-01` still hard-denied publishing outside its allow-list; (4) confirmed `file-storage-01` can KV-write its own registration key but is denied writing another adapter's; (5) confirmed the denial in (4) is real permissions enforcement, not a syntax slip, by successfully writing the identical key as `gsb-admin`. **New finding from this step**: KV write permission violations manifest as a **timeout** (`context deadline exceeded`), not an explicit rejection message the way plain pub/sub denials are — worth remembering when `gsb-core`'s `registry.py` (Track B, B5) handles KV writes, since a hang there is more likely a permissions problem than a network issue. All test messages/consumers/keys cleaned up afterward (stream purged back to 0 messages, test KV keys deleted) — the running stack itself was left up. **Track A (A1–A7) is now fully complete and empirically verified**, not just written.
+infra/nats/README.md:63:[`bootstrap_jetstream.sh`](bootstrap_jetstream.sh) creates the `EVENTS` stream and `service-directory` KV bucket against a running server, using the `gsb-admin` identity (added to `bootstrap_auth.sh` in this step — see below).
+infra/nats/README.md:68:2. **Provisioning shared infrastructure isn't any adapter's job.** Added a dedicated `gsb-admin` identity to `bootstrap_auth.sh` (`$JS.API.>` + `$KV.service-directory.>` + `_INBOX.>`) rather than reusing one adapter's `.creds` file for stream/bucket management.
+infra/nats/README.md:97:5. **Confirmed (4) is real enforcement, not a typo** — the identical key write succeeds for `gsb-admin` (which has broad KV access).
+infra/nats/README.md:121:as gsb-admin stream info EVENTS -j | grep '"messages"'
+infra/nats/README.md:139:as gsb-admin kv put service-directory events.files.FileWriteRequested.some-other-adapter should-succeed
+infra/nats/README.md:142:as gsb-admin consumer rm EVENTS file-storage-01-consumer -f
+infra/nats/README.md:143:as gsb-admin stream purge EVENTS -f
+infra/nats/README.md:144:as gsb-admin kv del service-directory events.files.FileWriteRequested.file-storage-01 -f
+infra/nats/README.md:145:as gsb-admin kv del service-directory events.files.FileWriteRequested.some-other-adapter -f
+infra/nats/bootstrap_jetstream.sh:7:# Idempotently creates, using the gsb-admin identity from Step A3 (a
+infra/nats/bootstrap_jetstream.sh:33:CREDS_FILE="$CREDS_DIR/gsb-admin.creds"
+infra/nats/bootstrap_jetstream.sh:66:    nats --server "$NATS_URL" --creds /creds/gsb-admin.creds "$@"
+=== docker-compose ===
+# Gregor's Service Bus — docker-compose
+# Phase 1, Step A6 (Design.md §11 Track A) — infra-only for now.
+#
+# Just the `nats` service. Adapters get added here in Phase 3 (Design.md §10).
+#
+# IMPORTANT — run order, not automated by this file:
+#   1. infra/nats/bootstrap_auth.sh   (Step A3 — generates resolver.conf and
+#      the .creds files this service's config depends on; must exist BEFORE
+#      `nats` can start, since nats-server.conf `include`s it)
+#   2. docker compose up -d nats
+#   3. infra/nats/bootstrap_jetstream.sh   (Step A5 — needs a running,
+#      authenticated server to create the EVENTS stream + service-directory
+#      KV bucket against)
+# infra/nats/up.sh runs all three in order. See infra/nats/README.md for why
+# this isn't wired into Compose's own dependency graph (`depends_on` +
+# service_completed_successfully/service_healthy): both bootstrap scripts
+# already shell out to `docker run` themselves (Design.md §11's "no native
+# install" decision — nsc/nats CLI/yq all run containerized); running them
+# as Compose services too would mean Docker-outside-of-Docker (mounting the
+# host's docker.sock into a container just to spawn sibling containers),
+# which is real added fragility for scripts that already work well as
+# host-level tooling. Revisit if that tradeoff stops being worth it.
+
+name: gsb   # fixes the Compose project/network name (gsb_default) regardless
+            # of the checkout directory's name — infra/nats/up.sh depends on it
+
+services:
+  nats:
+    image: nats:2.14.5
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    ports:
+      - "4222:4222"   # client connections
+      - "8222:8222"   # monitoring (/varz, /healthz, ...)
+    volumes:
+      - ./infra/nats/nats-server.conf:/etc/nats/nats-server.conf:ro
+      - ./infra/nats/resolver.conf:/etc/nats/resolver.conf:ro
+      - nats-data:/data/jetstream
+    restart: unless-stopped
+
+volumes:
+  nats-data:
+=== README title ===
+# Gregor's Service Bus
+
+A NATS JetStream-based service bus with public-key-encrypted payloads. See [Design.md](Design.md) for the full architecture and decision log, [Design_Notes.md](Design_Notes.md) for the original design brief, and [Dependencies.md](Dependencies.md) for the dependency ledger. This README covers day-to-day dev environment setup.
+
+## Prerequisites
+=== Design.md title ===
+# Title: Gregor's Service Bus — Design Document
+
+Status: Draft v0.2 — companion to [Design_Notes.md](Design_Notes.md)
+Date: 2026-08-22
+Scope: **Design only.** No implementation yet.
+Renaming this touches a lot more than the title — GSB_ env var prefix, the gsb-core package/directory, the NATS GSB account name, the gsb-admin identity, and the Compose project name all derive from the current initials. I need to know what abbreviation to use for those before doing a mechanical rename.
+
+AskUserQuestion
+OUT
+Your questions have been answered: "What short identifier/abbreviation should replace "gsb"/"GSB" throughout code (package name, env var prefix GSB_→?, NATS account name, gsb-admin identity, Compose project name)?"="jetcore". You can now continue with these answers in mind.
+Bash
+IN
+echo "=== bootstrap_auth.sh ==="; cat -n infra/nats/bootstrap_auth.sh
+
+OUT
+=== bootstrap_auth.sh ===
+     1	#!/usr/bin/env bash
+     2	set -euo pipefail
+     3	
+     4	# infra/nats/bootstrap_auth.sh
+     5	# Phase 1, Step A3 — Auth bootstrap (Design.md §11 Track A)
+     6	#
+     7	# Idempotently, via nsc (containerized — natsio/nats-box, no native install
+     8	# per Design.md §11 parameters):
+     9	#   1. Creates the Operator representing this bus, if it doesn't exist.
+    10	#   2. Creates the GSB Account, if it doesn't exist, and grants it JetStream
+    11	#      storage (disabled per-account by default under decentralized JWT
+    12	#      auth — independent of nats-server.conf's global jetstream{} block).
+    13	#   3. For each entry in adapter_identities.yaml (Step A2): creates the User
+    14	#      (nkey + JWT) if it doesn't exist, then (re)applies its permissions —
+    15	#      the manifest's publish/subscribe subjects, plus KV-write on its own
+    16	#      recipient-registration keys (derived per the manifest header), plus a
+    17	#      v1 baseline ($JS.API.>, _INBOX.>, KV-read-all) every JetStream client
+    18	#      needs. That baseline isn't scoped down further in v1 — a candidate
+    19	#      for tightening later, not a Phase 1 requirement.
+    20	#   4. Generates a .creds file per user (JWT+nkey bundled — the idiomatic
+    21	#      NATS client connection artifact; see Design.md §7.6, Decision #17-adjacent
+    22	#      update) under operator/creds/.
+    23	#   4b. Creates a dedicated gsb-admin identity (not an adapter) for
+    24	#       provisioning shared JetStream infrastructure — used by Step A5.
+    25	#   5. Generates the memory-resolver server config block (resolver.conf) —
+    26	#      consumed by nats-server.conf in Step A4.
+    27	#
+    28	# ============================================================================
+    29	# STATUS: executed and verified end-to-end against real Docker + nsc — 3
+    30	# consecutive runs confirmed idempotency (no duplicate permission entries
+    31	# accumulate on repeat `edit user` calls). See infra/nats/README.md's "Step
+    32	# A3" section for the 3 real bugs that surfaced only by running this, not by
+    33	# reading docs (stderr-vs-stdout on `--json`, ANSI codes breaking `grep -w`
+    34	# on table output, `jq` assumed-but-absent on the host) — all fixed below.
+    35	# ============================================================================
+    36	#
+    37	# Requires on the host: docker, bash. Everything else (nsc, nats CLI, YAML/
+    38	# JSON parsing) runs containerized — an earlier draft assumed `jq` would be
+    39	# present on the host; it wasn't, so this uses `yq` alone for both YAML and
+    40	# JSON querying instead of adding another native dependency.
+    41	
+    42	SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    43	MANIFEST="$SCRIPT_DIR/adapter_identities.yaml"
+    44	STORE_DIR="$SCRIPT_DIR/operator/nsc"        # git-ignored — nsc's JWT+nkey store
+    45	CREDS_DIR="$SCRIPT_DIR/operator/creds"      # git-ignored — generated .creds files
+    46	RESOLVER_CONF_NAME="resolver.conf"          # generated; consumed by Step A4
+    47	
+    48	NATS_BOX_IMAGE="natsio/nats-box:0.19.7-nonroot"
+    49	YQ_IMAGE="mikefarah/yq:4.52.4"
+    50	
+    51	OPERATOR_NAME="GregorsServiceBus"
+    52	ACCOUNT_NAME="GSB"
+    53	ADMIN_ID="gsb-admin"   # infra-provisioning identity (Step A5), not an adapter
+    54	
+    55	# JetStream storage the GSB account is allowed to use — kept in step with
+    56	# nats-server.conf's own jetstream{} caps (256M mem / 2G file), since a
+    57	# single-account dev setup has no reason for the account limit to be lower
+    58	# than the server-wide limit.
+    59	JS_MEM_STORAGE="256M"
+    60	JS_DISK_STORAGE="2G"
+    61	
+    62	# v1 baseline permissions, granted to every adapter identity in addition to
+    63	# its manifest-declared subjects — needed for the JetStream client library
+    64	# and NATS request-reply plumbing to function. See header note above.
+    65	BASELINE_PUB='$JS.API.>'
+    66	# $KV.service-identity.> read: every adapter needs to look up *any* other
+    67	# adapter's registered signing key to verify a received message's sender
+    68	# (Design.md §9 item #4 resolution) — read access is necessarily broad,
+    69	# same as service-directory's; only the per-adapter *write* scope (own
+    70	# namespace only, derived above) is what actually enforces least privilege.
+    71	BASELINE_SUB='$JS.API.>,_INBOX.>,$KV.service-directory.>,$KV.service-identity.>'
+    72	
+    73	mkdir -p "$STORE_DIR" "$CREDS_DIR"
+    74	
+    75	# Run nsc in nats-box, with the store persisted to $STORE_DIR and this
+    76	# directory writable at /workspace for file-producing commands (generate
+    77	# config, generate creds). -u matches the container's file ownership to the
+    78	# host user, avoiding the UID-1000 permission mismatch the nats-box README
+    79	# otherwise works around with a manual `chown`.
+    80	nsc() {
+    81	  docker run --rm \
+    82	    -v "$STORE_DIR:/nsc" \
+    83	    -v "$SCRIPT_DIR:/workspace" \
+    84	    -e NSC_HOME=/nsc \
+    85	    -e NKEYS_PATH=/nsc/keys \
+    86	    -u "$(id -u):$(id -g)" \
+    87	    -w /workspace \
+    88	    "$NATS_BOX_IMAGE" nsc "$@"
+    89	}
+    90	
+    91	yq() {
+    92	  docker run --rm -i "$YQ_IMAGE" "$@"
+    93	}
+    94	
+    95	# Query a single field out of a JSON blob passed on stdin, via yq (-p=json).
+    96	yqjson() {
+    97	  local expr="$1"
+    98	  yq -p=json "$expr" -
+    99	}
+   100	
+   101	# True if `nsc <list-subcommand...> --json` includes an entry whose .name
+   102	# equals $1. Two nsc quirks made this fiddlier than expected, both confirmed
+   103	# by actually running it (not guessed):
+   104	#   - Table output carries ANSI color codes even without a TTY, sitting
+   105	#     flush against the name with no word boundary, so a plain `grep -w` on
+   106	#     table output silently fails to match.
+   107	#   - --json output goes to STDERR, not stdout (confirmed for `list
+   108	#     operators`) — so this deliberately merges 2>&1 rather than discarding
+   109	#     stderr, which is what broke idempotency on the first version of this
+   110	#     script (every entity looked "not found" on every run).
+   111	# (. // []) guards against nsc printing bare `null` for an empty list
+   112	# (confirmed behavior of `nsc list users` on a freshly created account).
+   113	nsc_has() {
+   114	  local name="$1"; shift
+   115	  nsc "$@" --json 2>&1 | yqjson '(. // []) | .[].name' | grep -qx "$name"
+   116	}
+   117	
+   118	echo "== Operator: $OPERATOR_NAME =="
+   119	if nsc_has "$OPERATOR_NAME" list operators; then
+   120	  echo "already exists, skipping add"
+   121	else
+   122	  # --sys: generates a System Account alongside the operator. Confirmed via
+   123	  # a real run (not just the docs) that this isn't optional — nats-server
+   124	  # refuses to start JetStream under decentralized JWT auth without one
+   125	  # ("[FTL] Can't start JetStream: ... system account not setup").
+   126	  nsc add operator --name "$OPERATOR_NAME" --sys
+   127	fi
+   128	
+   129	echo "== Account: $ACCOUNT_NAME =="
+   130	if nsc_has "$ACCOUNT_NAME" list accounts; then
+   131	  echo "already exists, skipping add"
+   132	else
+   133	  nsc add account --name "$ACCOUNT_NAME"
+   134	fi
+   135	
+   136	# JetStream is disabled per-account by default under decentralized JWT auth
+   137	# — entirely independent of nats-server.conf's global jetstream{} block.
+   138	# Confirmed via a real run: `nsc describe account --json` showed no
+   139	# .nats.limits.jetstream at all until this was added, and stream creation
+   140	# would fail against a freshly-added account without it. Re-run (idempotent
+   141	# edit) every time so a manifest/limit change takes effect on rerun.
+   142	nsc edit account --name "$ACCOUNT_NAME" \
+   143	  --js-mem-storage "$JS_MEM_STORAGE" \
+   144	  --js-disk-storage "$JS_DISK_STORAGE"
+   145	
+   146	echo "== Users (from $MANIFEST) =="
+   147	
+   148	# One compact JSON line per manifest entry, read via process substitution so
+   149	# the loop body's `nsc`/variable assignments run in this shell, not a
+   150	# subshell (a plain `| while read` would lose them after the loop).
+   151	while IFS= read -r adapter; do
+   152	  service_id="$(echo "$adapter" | yqjson '.serviceId')"
+   153	  adapter_type="$(echo "$adapter" | yqjson '.adapterType')"
+   154	  pub_subjects="$(echo "$adapter" | yqjson '(.permissions.publish // []) | join(",")')"
+   155	  sub_subjects="$(echo "$adapter" | yqjson '(.permissions.subscribe // []) | join(",")')"
+   156	
+   157	  # Derived: KV write on this identity's own recipient-registration keys,
+   158	  # one per subscribed subject (Design.md §4.5 / adapter_identities.yaml
+   159	  # header comment). Built in bash, not a nested yq expression — keeps each
+   160	  # containerized yq call trivially simple to verify individually.
+   161	  kv_write=""
+   162	  if [ -n "$sub_subjects" ]; then
+   163	    IFS=',' read -ra _subs <<<"$sub_subjects"
+   164	    for s in "${_subs[@]}"; do
+   165	      kv_write="${kv_write:+$kv_write,}\$KV.service-directory.$s.$service_id"
+   166	    done
+   167	  fi
+   168	  # Every adapter — publisher or subscriber — registers its own signing
+   169	  # identity once at connect time (Design.md §9 item #4 resolution / §11
+   170	  # Step B6 follow-up), unlike service-directory registration, which only
+   171	  # happens for subjects actually subscribed to.
+   172	  kv_write="${kv_write:+$kv_write,}\$KV.service-identity.$service_id"
+   173	
+   174	  all_pub="$(printf '%s,%s,%s' "$pub_subjects" "$BASELINE_PUB" "$kv_write" | sed 's/,,*/,/g; s/^,//; s/,$//')"
+   175	  all_sub="$(printf '%s,%s' "$sub_subjects" "$BASELINE_SUB" | sed 's/,,*/,/g; s/^,//; s/,$//')"
+   176	
+   177	  echo "-- $service_id ($adapter_type) --"
+   178	  if nsc_has "$service_id" list users --account "$ACCOUNT_NAME"; then
+   179	    echo "already exists, skipping add"
+   180	  else
+   181	    nsc add user --account "$ACCOUNT_NAME" --name "$service_id"
+   182	  fi
+   183	
+   184	  nsc edit user --account "$ACCOUNT_NAME" --name "$service_id" \
+   185	    --allow-pub "$all_pub" \
+   186	    --allow-sub "$all_sub"
+   187	
+   188	  nsc generate creds --account "$ACCOUNT_NAME" --name "$service_id" \
+   189	    >"$CREDS_DIR/$service_id.creds"
+   190	  echo "wrote $CREDS_DIR/$service_id.creds"
+   191	done < <(yq -o=json -I=0 '.adapters[]' <"$MANIFEST")
+   192	
+   193	echo "== Admin identity: $ADMIN_ID =="
+   194	# Creating/managing the EVENTS stream and service-directory KV bucket
+   195	# (Step A5) isn't any particular adapter's job — a dedicated identity keeps
+   196	# "who can provision shared infrastructure" separate from "who can act as
+   197	# adapter X", rather than borrowing an arbitrary adapter's creds for it.
+   198	if nsc_has "$ADMIN_ID" list users --account "$ACCOUNT_NAME"; then
+   199	  echo "already exists, skipping add"
+   200	else
+   201	  nsc add user --account "$ACCOUNT_NAME" --name "$ADMIN_ID"
+   202	fi
+   203	
+   204	nsc edit user --account "$ACCOUNT_NAME" --name "$ADMIN_ID" \
+   205	  --allow-pubsub '$JS.API.>,$KV.service-directory.>,$KV.service-identity.>,_INBOX.>'
+   206	
+   207	nsc generate creds --account "$ACCOUNT_NAME" --name "$ADMIN_ID" \
+   208	  >"$CREDS_DIR/$ADMIN_ID.creds"
+   209	echo "wrote $CREDS_DIR/$ADMIN_ID.creds"
+   210	
+   211	echo "== Memory resolver config =="
+   212	nsc generate config --mem-resolver --force \
+   213	  --config-file "$RESOLVER_CONF_NAME"
+   214	echo "wrote $SCRIPT_DIR/$RESOLVER_CONF_NAME"
+   215	
+   216	echo "Done. Next: Step A4 wires $RESOLVER_CONF_NAME into nats-server.conf."
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+echo "=== all gsb/GSB occurrences with line context (non-Design.md/README.md) ==="
+grep -rn -e "gsb" -e "GSB" -e "Gregor" \
+  --include="*.py" --include="*.toml" --include="*.sh" --include="*.yaml" --include="*.yml" --include="*.lock" --include=".gitignore" \
+  . 2>/dev/null | grep -v "^./.git/"
+echo "=== .gitignore ==="
+cat .gitignore 2>/dev/null
+echo "=== adapter_identities.yaml gsb hits ==="
+grep -n "gsb\|GSB" infra/nats/adapter_identities.yaml
+echo "=== session.log size/type ==="
+wc -l .claude/session.log 2>/dev/null; file .claude/session.log 2>/dev/null
+
+OUT
+=== all gsb/GSB occurrences with line context (non-Design.md/README.md) ===
+libs/gsb-core/pyproject.toml:1:# gsb-core — shared library used by every adapter (Design.md §7.1)
+libs/gsb-core/pyproject.toml:8:name = "gsb-core"
+libs/gsb-core/pyproject.toml:24:packages = ["gsb_core"]
+libs/gsb-core/tests/conftest.py:1:"""Shared fixtures for gsb-core's live-NATS integration tests (Steps B5-B7).
+libs/gsb-core/tests/conftest.py:18:    for SUBJECT before each test, via gsb-admin — real adapter identities
+libs/gsb-core/tests/conftest.py:35:    nc = await nats.connect(NATS_URL, user_credentials=f"{CREDS_DIR}/gsb-admin.creds")
+libs/gsb-core/tests/test_scaffold.py:4:import gsb_core
+libs/gsb-core/tests/test_scaffold.py:8:    assert gsb_core.__version__ == "0.1.0"
+pyproject.toml:1:# Gregor's Service Bus — uv workspace root (Decision #16, Design.md §7.5)
+pyproject.toml:6:# libs/ (gsb-core) and adapters/ (populated starting Phase 3).
+infra/nats/bootstrap_auth.sh:10:#   2. Creates the GSB Account, if it doesn't exist, and grants it JetStream
+infra/nats/bootstrap_auth.sh:23:#   4b. Creates a dedicated gsb-admin identity (not an adapter) for
+infra/nats/bootstrap_auth.sh:51:OPERATOR_NAME="GregorsServiceBus"
+infra/nats/bootstrap_auth.sh:52:ACCOUNT_NAME="GSB"
+infra/nats/bootstrap_auth.sh:53:ADMIN_ID="gsb-admin"   # infra-provisioning identity (Step A5), not an adapter
+infra/nats/bootstrap_auth.sh:55:# JetStream storage the GSB account is allowed to use — kept in step with
+libs/gsb-core/tests/test_registry.py:5:Connects as `gsb-admin` (full `$KV.service-directory.>` access — Step A3),
+libs/gsb-core/tests/test_registry.py:20:from gsb_core.registry import RecipientCache, RegistryClient
+libs/gsb-core/tests/test_registry.py:23:CREDS_PATH = "infra/nats/operator/creds/gsb-admin.creds"
+libs/gsb-core/tests/_helpers.py:14:from gsb_core.bus_client import BusClient
+libs/gsb-core/tests/_helpers.py:15:from gsb_core.config import AdapterSettings
+libs/gsb-core/tests/_helpers.py:16:from gsb_core.crypto import generate_encryption_keypair, generate_signing_keypair
+libs/gsb-core/tests/_helpers.py:19:    from gsb_core.registry import RecipientCache
+libs/gsb-core/gsb_core/bus_client.py:37:from gsb_core.config import AdapterSettings
+libs/gsb-core/gsb_core/bus_client.py:38:from gsb_core.crypto import EncryptionKeyPair, decrypt, encrypt_for_recipients, sign, verify
+libs/gsb-core/gsb_core/bus_client.py:39:from gsb_core.envelope import EncryptionMetadata, Event, EventDetails, EventEnvelope
+libs/gsb-core/gsb_core/bus_client.py:40:from gsb_core.registry import RecipientCache, RegistryClient
+libs/gsb-core/tests/test_crypto.py:6:from gsb_core.crypto import (
+libs/gsb-core/tests/test_end_to_end.py:24:from gsb_core.bus_client import BusClient, ReceivedEvent
+infra/nats/up.sh:23:COMPOSE_NETWORK="gsb_default"   # matches docker-compose.yml's `name: gsb`
+infra/nats/up.sh:38:    nats --server nats://nats:4222 --creds /creds/gsb-admin.creds \
+infra/nats/adapter_identities.yaml:43:account: GSB
+libs/gsb-core/tests/test_config.py:6:from gsb_core.config import AdapterSettings
+libs/gsb-core/tests/test_config.py:21:    monkeypatch.setenv("GSB_SERVICE_ID", "file-storage-01")
+libs/gsb-core/tests/test_config.py:22:    monkeypatch.setenv("GSB_NATS_CREDS_PATH", str(creds_file))
+libs/gsb-core/tests/test_config.py:50:        GSB_SUBJECTS="events.files.FileWriteRequested, events.files.FileReadRequested",
+libs/gsb-core/tests/test_config.py:62:    _env(monkeypatch, creds_file, GSB_SUBJECTS='["events.a", "events.b"]')
+libs/gsb-core/tests/test_config.py:72:    _env(monkeypatch, creds_file, GSB_SUBJECTS="")
+libs/gsb-core/tests/test_config.py:82:    monkeypatch.setenv("GSB_NATS_CREDS_PATH", str(creds_file))
+libs/gsb-core/tests/test_config.py:89:    monkeypatch.setenv("GSB_SERVICE_ID", "file-storage-01")
+libs/gsb-core/tests/test_config.py:90:    monkeypatch.setenv("GSB_NATS_CREDS_PATH", str(tmp_path / "does-not-exist.creds"))
+libs/gsb-core/tests/test_config.py:97:    _env(monkeypatch, creds_file, GSB_LOG_LEVEL="VERBOSE")
+libs/gsb-core/tests/test_config.py:106:    _env(monkeypatch, creds_file, GSB_WATCH_DIR="/data/files")
+libs/gsb-core/gsb_core/__init__.py:1:"""gsb-core — shared library for Gregor's Service Bus adapters.
+infra/nats/bootstrap_jetstream.sh:7:# Idempotently creates, using the gsb-admin identity from Step A3 (a
+infra/nats/bootstrap_jetstream.sh:24:# per Steps A3/A4 — in particular, the GSB account needs JetStream storage
+infra/nats/bootstrap_jetstream.sh:33:CREDS_FILE="$CREDS_DIR/gsb-admin.creds"
+infra/nats/bootstrap_jetstream.sh:39:# DOCKER_NETWORK (up.sh does this automatically; e.g. `gsb_default`).
+infra/nats/bootstrap_jetstream.sh:46:STREAM_MAX_BYTES="1G"    # dev-sized backstop; comfortably under the GSB
+infra/nats/bootstrap_jetstream.sh:66:    nats --server "$NATS_URL" --creds /creds/gsb-admin.creds "$@"
+docker-compose.yml:1:# Gregor's Service Bus — docker-compose
+docker-compose.yml:24:name: gsb   # fixes the Compose project/network name (gsb_default) regardless
+libs/gsb-core/gsb_core/config.py:4:Field <-> env var mapping (all `GSB_`-prefixed, per §7.6):
+libs/gsb-core/gsb_core/config.py:5:  service_id       GSB_SERVICE_ID       — must match this instance's
+libs/gsb-core/gsb_core/config.py:8:  nats_url         GSB_NATS_URL         — defaults to the docker-compose
+libs/gsb-core/gsb_core/config.py:10:  nats_creds_path  GSB_NATS_CREDS_PATH  — the .creds file Step A3's
+libs/gsb-core/gsb_core/config.py:13:  subjects         GSB_SUBJECTS         — subjects this instance subscribes
+libs/gsb-core/gsb_core/config.py:23:  log_level        GSB_LOG_LEVEL        — defaults to INFO
+libs/gsb-core/gsb_core/config.py:39:    settings (still `GSB_`-prefixed) — pydantic-settings merges them."""
+libs/gsb-core/gsb_core/config.py:41:    model_config = SettingsConfigDict(env_prefix="GSB_", env_file=".env", extra="ignore")
+libs/gsb-core/tests/test_bus_client.py:21:from gsb_core.crypto import encrypt_for_recipients, generate_signing_keypair, sign
+libs/gsb-core/tests/test_bus_client.py:22:from gsb_core.envelope import EncryptionMetadata, Event, EventDetails, EventEnvelope
+libs/gsb-core/tests/test_bus_client.py:75:    caplog.set_level("WARNING", logger="gsb_core.bus_client")
+libs/gsb-core/gsb_core/registry.py:2:(Design.md §11 Track B). The first gsb-core module that needs a live NATS
+uv.lock:12:    "gsb-core",
+uv.lock:547:name = "gsb-core"
+uv.lock:549:source = { editable = "libs/gsb-core" }
+libs/gsb-core/tests/test_envelope.py:11:from gsb_core.envelope import (
+=== .gitignore ===
+# --- NATS auth material (Design.md §11 Track A parameters: never committed) ---
+# nsc's Operator/Account/User store (nkeys + JWTs) and everything derived
+# from it (generated .creds files, the memory-resolver config, the operator
+# JWT) are regenerated locally by infra/nats/bootstrap_auth.sh, not committed.
+infra/nats/operator/
+infra/nats/resolver.conf
+infra/nats/operator.jwt
+
+# --- Python (uv workspace — Design.md §7.5, Track B) ---
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- General ---
+.env
+.DS_Store
+=== adapter_identities.yaml gsb hits ===
+43:account: GSB
+=== session.log size/type ===
+10824 .claude/session.log
+.claude/session.log: Unicode text, UTF-8 text, with very long lines (1172)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+grep -n "Gregor\|GSB\|gsb" Design_Notes.md | head -20
+echo "---"
+wc -l Design_Notes.md
+
+OUT
+---
+68 Design_Notes.md
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+echo "Dependencies.md:"; grep -n "Gregor\|GSB\|gsb" Dependencies.md
+echo "---README.md count---"; grep -c "Gregor\|GSB\|gsb" README.md
+echo "---Design.md count---"; grep -c "Gregor\|GSB\|gsb" Design.md
+
+OUT
+Dependencies.md:
+14:## 1. Core Bus Library (`gsb-core`)
+18:| `nats-py` | [PyPI](https://pypi.org/project/nats-py/) / [GitHub](https://github.com/nats-io/nats.py) | **2.15.0** (resolved via `uv add "nats-py[nkeys]"`) | Official async NATS/JetStream client; also provides the `[nkeys]` extra used for signing. Added in Step B3 to get `nkeys`; the client itself is exercised starting [registry.py](libs/gsb-core/gsb_core/registry.py) (§11 Step B5). | Official `nats-io` org project (backed by Synadia); same trust tier as the NATS server itself. Ships a `py.typed` marker (unlike `nkeys`/`pyrage`), but not every method is annotated — `KeyWatcher.updates` needed a narrow `type: ignore[no-untyped-call]`. **KV API has real surprises, confirmed by testing, not guessable from the API shape**: `KeyValue.keys(filters=...)` looks like a NATS wildcard filter but is actually a client-side Python substring check on already-fetched keys — a literal `*`/`>` never matches anything there. `KeyValue.watch(keys=...)`, by contrast, genuinely does use its argument as a NATS subject with real server-side filtering. See §11 Step B5 for the full list (5 findings). | 2026-08-24 |
+19:| `nkeys` | [PyPI](https://pypi.org/project/nkeys/) / [GitHub](https://github.com/nats-io/nkeys.py) | **0.2.1** (resolved via `uv add`) | Ed25519 keypair generation/signing for both NATS connection auth and event signing (§4.1). Installed via `nats-py[nkeys]`. Used in [crypto.py](libs/gsb-core/gsb_core/crypto.py) (§11 Step B3). | Official `nats-io` org project. Implements NATS's own key format (not custom crypto). **Confirmed real bug** (not assumed): `KeyPair.verify()` only works with the private key already loaded — there's no working way to verify a signature from just a public key, defeating the actual point of asymmetric verification. Read the library's source to confirm, then worked around in `crypto.py` with a from-scratch, tested decode of the public-key encoding feeding `nacl.signing.VerifyKey` directly. Worth flagging upstream; not filed as of this writing. | 2026-08-24 |
+20:| `pydantic` (v2) | [PyPI](https://pypi.org/project/pydantic/) | **2.13.4** (resolved via `uv sync`) | Event envelope ([envelope.py](libs/gsb-core/gsb_core/envelope.py), §11 Step B2), config, and adapter payload schema modeling/validation. | Extremely widely adopted (FastAPI's foundation); large maintainer team, active CVE monitoring history. Verified: 10 tests pass including exact wire-shape fidelity to §5; note the mypy plugin (`pydantic.mypy`, now enabled in root `pyproject.toml`) doesn't understand `populate_by_name=True` — confirmed by testing, see Decision-adjacent note at Step B2. | 2026-08-24 |
+21:| `pydantic-settings` | [PyPI](https://pypi.org/project/pydantic-settings/) | **2.15.0** (resolved via `uv add`) | Env-var/`.env`-driven adapter configuration loading — [config.py](libs/gsb-core/gsb_core/config.py) (§11 Step B4). | Maintained by the Pydantic org itself; same trust tier as `pydantic`. **Confirmed real behavior** (not assumed): it attempts its own JSON-decode of list-typed env values *before* any `field_validator` runs, at the settings-source layer — a plain comma-separated value fails there outright. Worked around with `Annotated[list[str], NoDecode]`, deferring to a custom validator instead; see §11 Step B4. | 2026-08-24 |
+23:| `pyrage` | [PyPI](https://pypi.org/project/pyrage/) / [background](https://blog.yossarian.net/2022/07/25/age-encryption-in-python-with-pyrage) | **1.4.0** (resolved via `uv add`) | Python bindings (via PyO3) to `rage`, the Rust implementation of the [age](https://age-encryption.org) format — provides the multi-recipient hybrid encryption in §4.3. Used in [crypto.py](libs/gsb-core/gsb_core/crypto.py) (§11 Step B3). | The cryptography itself is implemented in vetted Rust (`rage`/`age` core), not reimplemented in Python — bindings only. PyPI releases use Trusted Publishing (supply-chain provenance signal). Smaller install base than mainstream crypto libs; **recommendation:** re-check for an independent security review of `rage` before production use. **Adoption confirmed working as designed**, with one real schema implication: age bundles all per-recipient key-wrapping inside its ciphertext (verified by inspecting real encrypt output), which is why `envelope.py`'s `recipients` field changed to a flat key-string list — see §11 Step B3. `pip-audit`: no known vulnerabilities. | 2026-08-24 |
+24:| `PyNaCl` | [PyPI](https://pypi.org/project/PyNaCl/) | **1.6.2** (pulled in transitively by `nkeys` — not directly declared) | libsodium bindings. Originally the documented fallback if `pyrage` integration proved impractical (§7.2) — turned out to be in the dependency tree anyway, just via `nkeys` rather than as gsb-core's own choice. Now doing real work in [crypto.py](libs/gsb-core/gsb_core/crypto.py): `nacl.signing.VerifyKey` is used directly to work around the `nkeys.py` verification bug noted above. | Long-established, widely audited (wraps libsodium). `pip-audit`: no known vulnerabilities. | 2026-08-24 |
+39:| `uuid6` | [PyPI](https://pypi.org/project/uuid6/) | **2025.0.1** (resolved via `uv sync`) | `uuid7()` for event IDs — stdlib `uuid` doesn't gain native support until Python 3.14 (project targets 3.12, Decision #8). Wrapped by `new_event_id()` in [envelope.py](libs/gsb-core/gsb_core/envelope.py) (§11 Step B2). | Small, single-purpose implementation of a published RFC (RFC 9562); low risk surface. Verified: generates genuinely unique, correctly time-ordered ids (tested). | 2026-08-24 |
+48:| `pytest`, `pytest-asyncio`, `pytest-cov` | [PyPI](https://pypi.org/project/pytest/) | **9.1.1 / 1.4.0 / 7.1.0** (resolved via `uv sync`, `uv.lock`) | Test framework + async support + coverage. | De facto standard Python test tooling. Verified: `libs/gsb-core`'s scaffold test passes. | 2026-08-24 |
+---README.md count---
+4
+---Design.md count---
+24
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+grep -o "Gregor.s Service Bus" README.md Design.md pyproject.toml docker-compose.yml | head -5 | cat -A | head -5
+
+OUT
+README.md:Gregor's Service Bus$
+pyproject.toml:Gregor's Service Bus$
+Design.md:Gregor's Service Bus$
+docker-compose.yml:Gregor's Service Bus$
+Straight ASCII apostrophe throughout. Now moving the directories and running the rename.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+mv libs/gsb-core libs/jetcore
+mv libs/jetcore/gsb_core libs/jetcore/jetcore
+find libs/jetcore -maxdepth 2 -type d
+echo "---"
+ls libs/jetcore/jetcore
+
+OUT
+libs/jetcore
+libs/jetcore/jetcore
+libs/jetcore/tests
+libs/jetcore/jetcore/__pycache__
+libs/jetcore/tests/__pycache__
+---
+bus_client.py
+config.py
+crypto.py
+envelope.py
+__init__.py
+__pycache__
+registry.py
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+rm -rf libs/jetcore/jetcore/__pycache__ libs/jetcore/tests/__pycache__
+
+FILES=(
+  README.md
+  Design.md
+  Dependencies.md
+  docker-compose.yml
+  pyproject.toml
+  infra/nats/adapter_identities.yaml
+  infra/nats/bootstrap_auth.sh
+  infra/nats/bootstrap_jetstream.sh
+  infra/nats/README.md
+  infra/nats/up.sh
+  libs/jetcore/pyproject.toml
+  libs/jetcore/jetcore/__init__.py
+  libs/jetcore/jetcore/bus_client.py
+  libs/jetcore/jetcore/config.py
+  libs/jetcore/jetcore/crypto.py
+  libs/jetcore/jetcore/envelope.py
+  libs/jetcore/jetcore/registry.py
+  libs/jetcore/tests/_helpers.py
+  libs/jetcore/tests/conftest.py
+  libs/jetcore/tests/test_bus_client.py
+  libs/jetcore/tests/test_config.py
+  libs/jetcore/tests/test_crypto.py
+  libs/jetcore/tests/test_end_to_end.py
+  libs/jetcore/tests/test_envelope.py
+  libs/jetcore/tests/test_registry.py
+  libs/jetcore/tests/test_scaffold.py
+)
+
+for f in "${FILES[@]}"; do
+  [ -f "$f" ] || { echo "MISSING: $f"; continue; }
+  sed -i \
+    -e "s/Gregor's Service Bus/Jet Core Service Bus/g" \
+    -e "s/GregorsServiceBus/JetCoreServiceBus/g" \
+    -e "s/gregors-service-bus/jet-core-service-bus/g" \
+    -e "s/gsb-admin/jetcore-admin/g" \
+    -e "s/gsb-core/jetcore/g" \
+    -e "s/gsb_core/jetcore/g" \
+    -e "s/GSB_/JETCORE_/g" \
+    -e "s/gsb_default/jetcore_default/g" \
+    -e "s/\bGSB\b/JETCORE/g" \
+    -e "s/\bgsb\b/jetcore/g" \
+    "$f"
+done
+
+echo "=== renamed test_scaffold.py import fix check ==="
+grep -n "jetcore\|gsb" libs/jetcore/tests/test_scaffold.py
+echo "=== remaining gsb/GSB/Gregor hits repo-wide (excluding .git, session.log, uv.lock, __pycache__) ==="
+grep -rniI -e "gsb" -e "gregor" . --exclude-dir=.git --exclude-dir=__pycache__ --exclude=session.log --exclude=uv.lock 2>/dev/null
+
+OUT
+=== renamed test_scaffold.py import fix check ===
+4:import jetcore
+8:    assert jetcore.__version__ == "0.1.0"
+=== remaining gsb/GSB/Gregor hits repo-wide (excluding .git, session.log, uv.lock, __pycache__) ===
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+echo "=== root pyproject.toml ==="; head -20 pyproject.toml
+echo "=== libs/jetcore/pyproject.toml ==="; cat libs/jetcore/pyproject.toml
+echo "=== docker-compose.yml ==="; cat docker-compose.yml
+echo "=== up.sh network line ==="; grep -n "jetcore_default\|COMPOSE_NETWORK" infra/nats/up.sh
+
+OUT
+=== root pyproject.toml ===
+# Jet Core Service Bus — uv workspace root (Decision #16, Design.md §7.5)
+#
+# This root is "virtual" (tool.uv.package = false) — it's not itself an
+# installable package, just the workspace container plus shared dev tooling
+# config and the shared dev dependency group. Real packages live under
+# libs/ (jetcore) and adapters/ (populated starting Phase 3).
+
+[project]
+name = "jet-core-service-bus"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["libs/*", "adapters/*"]
+
+[dependency-groups]
+=== libs/jetcore/pyproject.toml ===
+# jetcore — shared library used by every adapter (Design.md §7.1)
+#
+# Dependencies added incrementally as each module (Design.md §11 Track B) is
+# actually built: pydantic + uuid6 land in B2 (envelope.py). pyrage/nkeys
+# (B3), nats-py (B5/B6) etc. still pending.
+
+[project]
+name = "jetcore"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "nats-py[nkeys]>=2.15.0",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.15.0",
+    "pyrage>=1.4.0",
+    "uuid6>=2024.7.10",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["jetcore"]
+=== docker-compose.yml ===
+# Jet Core Service Bus — docker-compose
+# Phase 1, Step A6 (Design.md §11 Track A) — infra-only for now.
+#
+# Just the `nats` service. Adapters get added here in Phase 3 (Design.md §10).
+#
+# IMPORTANT — run order, not automated by this file:
+#   1. infra/nats/bootstrap_auth.sh   (Step A3 — generates resolver.conf and
+#      the .creds files this service's config depends on; must exist BEFORE
+#      `nats` can start, since nats-server.conf `include`s it)
+#   2. docker compose up -d nats
+#   3. infra/nats/bootstrap_jetstream.sh   (Step A5 — needs a running,
+#      authenticated server to create the EVENTS stream + service-directory
+#      KV bucket against)
+# infra/nats/up.sh runs all three in order. See infra/nats/README.md for why
+# this isn't wired into Compose's own dependency graph (`depends_on` +
+# service_completed_successfully/service_healthy): both bootstrap scripts
+# already shell out to `docker run` themselves (Design.md §11's "no native
+# install" decision — nsc/nats CLI/yq all run containerized); running them
+# as Compose services too would mean Docker-outside-of-Docker (mounting the
+# host's docker.sock into a container just to spawn sibling containers),
+# which is real added fragility for scripts that already work well as
+# host-level tooling. Revisit if that tradeoff stops being worth it.
+
+name: jetcore   # fixes the Compose project/network name (jetcore_default) regardless
+            # of the checkout directory's name — infra/nats/up.sh depends on it
+
+services:
+  nats:
+    image: nats:2.14.5
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    ports:
+      - "4222:4222"   # client connections
+      - "8222:8222"   # monitoring (/varz, /healthz, ...)
+    volumes:
+      - ./infra/nats/nats-server.conf:/etc/nats/nats-server.conf:ro
+      - ./infra/nats/resolver.conf:/etc/nats/resolver.conf:ro
+      - nats-data:/data/jetstream
+    restart: unless-stopped
+
+volumes:
+  nats-data:
+=== up.sh network line ===
+23:COMPOSE_NETWORK="jetcore_default"   # matches docker-compose.yml's `name: jetcore`
+35:  if docker run --rm --network "$COMPOSE_NETWORK" \
+52:NATS_URL="nats://nats:4222" DOCKER_NETWORK="$COMPOSE_NETWORK" bash "$SCRIPT_DIR/bootstrap_jetstream.sh"
+All the mechanical edits look correct. Now regenerate uv.lock and do a full teardown/rebuild of the infra + verification pass, consistent with how every prior step was verified.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+docker compose down -v 2>&1 | tail -5
+rm -rf infra/nats/operator infra/nats/resolver.conf infra/nats/operator.jwt
+echo "--- uv lock ---"
+uv lock 2>&1 | tail -20
+
+OUT
+permission denied while trying to connect to the docker API at unix:///var/run/docker.sock
+--- uv lock ---
+/bin/bash: line 9: uv: command not found
+Bash
+IN
+groups; echo "---"; which uv; echo "---"; ls ~/.local/bin 2>/dev/null | grep -i uv; echo "---"; find / -maxdepth 4 -iname "uv" -type f 2>/dev/null | head -5; echo "---docker---"; id; ls -la /var/run/docker.sock
+
+OUT
+bherring adm cdrom sudo dip plugdev users lpadmin sambashare rvm
+---
+---
+uv
+uvx
+---
+---docker---
+uid=1000(bherring) gid=1000(bherring) groups=1000(bherring),4(adm),24(cdrom),27(sudo),30(dip),46(plugdev),100(users),105(lpadmin),125(sambashare),1001(rvm)
+srw-rw---- 1 root docker 0 Aug 23 12:19 /var/run/docker.sock
+Bash
+IN
+echo "PATH=$PATH"
+echo "---"
+ls -la ~/.local/bin/uv
+echo "---try sg docker---"
+sg docker -c "docker ps" 2>&1 | head -5
+
+OUT
+PATH=/home/bherring/.sdkman/candidates/java/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/usr/local/go/bin:/home/bherring/go/bin:/usr/share/rvm/bin:/usr/local/go/bin:/home/bherring/go/bin:/usr/local/go/bin:/home/bherring/go/bin
+---
+-rwxr-xr-x 1 bherring bherring 59019440 Aug 14 12:29 /home/bherring/.local/bin/uv
+---try sg docker---
+CONTAINER ID   IMAGE         COMMAND                  CREATED          STATUS          PORTS                                                                                                NAMES
+046383fff29d   nats:2.14.5   "/nats-server -c /et…"   22 minutes ago   Up 22 minutes   0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp   gsb-nats-1
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+sg docker -c "docker compose down -v" 2>&1
+echo "--- uv lock ---"
+uv lock 2>&1 | tail -30
+
+OUT
+--- uv lock ---
+Resolved 67 packages in 357ms
+Removed gregors-service-bus v0.1.0
+Removed gsb-core v0.1.0
+Added jet-core-service-bus v0.1.0
+Added jetcore v0.1.0
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+sg docker -c "docker compose -p gsb down -v" 2>&1
+sg docker -c "docker ps -a" 2>&1
+sg docker -c "docker network ls" 2>&1
+sg docker -c "docker volume ls" 2>&1
+
+OUT
+ Container gsb-nats-1 Stopping 
+ Container gsb-nats-1 Stopped 
+ Container gsb-nats-1 Removing 
+ Container gsb-nats-1 Removed 
+ Volume gsb_nats-data Removing 
+ Network gsb_default Removing 
+ Volume gsb_nats-data Removed 
+ Network gsb_default Removed 
+CONTAINER ID   IMAGE         COMMAND    CREATED        STATUS                    PORTS     NAMES
+8326cdda465c   hello-world   "/hello"   30 hours ago   Exited (0) 30 hours ago             exciting_shamir
+NETWORK ID     NAME      DRIVER    SCOPE
+8a582f6367cf   bridge    bridge    local
+f9da20f2353c   host      host      local
+7fc7bb2723bb   none      null      local
+DRIVER    VOLUME NAME
+Clean slate confirmed — old gsb project fully removed. Now rebuild infra from scratch under the new naming and run the full verification suite.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+sg docker -c "bash infra/nats/up.sh" 2>&1 | tail -60
+
+OUT
+                Maximum Bytes: 1.0 GiB
+                  Maximum Age: 7d0h0m0s
+         Maximum Message Size: unlimited
+            Maximum Consumers: unlimited
+
+State:
+
+                 Host Version: 2.14.5
+           Required API Level: 0 hosted at level 4
+                     Messages: 0
+                        Bytes: 0 B
+               First Sequence: 0
+                Last Sequence: 0
+             Active Consumers: 0
+== KV bucket: service-directory ==
+Information for Key-Value Store Bucket service-directory created 2026-08-25 01:04:49
+
+Configuration:
+
+            Bucket Name: service-directory
+           History Kept: 1
+          Values Stored: 0
+             Compressed: false
+  Per-Key TTL Supported: false
+     Backing Store Kind: JetStream
+            Bucket Size: 0 B
+    Maximum Bucket Size: unlimited
+     Maximum Value Size: unlimited
+            Maximum Age: 1m0s
+       JetStream Stream: KV_service-directory
+                Storage: File
+
+Cluster Information:
+
+                   Name: 
+                 Leader: NCRXWDF7LQHYHBWHY2ZZH2P3CRL2MRUY7PRUGPD5QUL3KXCXNCQBCQ2R
+== KV bucket: service-identity ==
+Information for Key-Value Store Bucket service-identity created 2026-08-25 01:04:50
+
+Configuration:
+
+            Bucket Name: service-identity
+           History Kept: 1
+          Values Stored: 0
+             Compressed: false
+  Per-Key TTL Supported: false
+     Backing Store Kind: JetStream
+            Bucket Size: 0 B
+    Maximum Bucket Size: unlimited
+     Maximum Value Size: unlimited
+            Maximum Age: unlimited
+       JetStream Stream: KV_service-identity
+                Storage: File
+
+Cluster Information:
+
+                   Name: 
+                 Leader: NCRXWDF7LQHYHBWHY2ZZH2P3CRL2MRUY7PRUGPD5QUL3KXCXNCQBCQ2R
+Done. Next: Step A6 wires everything into docker-compose.
+Done — infra is up. Try: docker compose logs -f nats
+Full infra bootstrap succeeded under the new names. Now the library verification pass.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv sync --all-packages 2>&1 | tail -20
+
+OUT
+Resolved 67 packages in 1ms
+   Building jetcore @ file:///home/bherring/dev/clodhopper/GregorsServiceBus/libs/jetcore
+      Built jetcore @ file:///home/bherring/dev/clodhopper/GregorsServiceBus/libs/jetcore
+Prepared 1 package in 468ms
+Uninstalled 1 package in 0.42ms
+Installed 1 package in 1ms
+ - gsb-core==0.1.0 (from file:///home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core)
+ + jetcore==0.1.0 (from file:///home/bherring/dev/clodhopper/GregorsServiceBus/libs/jetcore)
+Package correctly swapped. Now run the full test/lint/type/security toolchain.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== pytest (run 1) ==="
+uv run pytest -q 2>&1 | tail -20
+
+OUT
+=== pytest (run 1) ===
+....................................................                     [100%]
+52 passed in 2.11s
+All 52 tests pass against the freshly-rebuilt, newly-named infra. Running it twice more for stability, plus the rest of the toolchain.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== pytest (run 2) ==="; uv run pytest -q 2>&1 | tail -5
+echo "=== pytest (run 3) ==="; uv run pytest -q 2>&1 | tail -5
+echo "=== ruff ==="; uv run ruff check . 2>&1 | tail -20
+echo "=== mypy ==="; uv run mypy libs 2>&1 | tail -30
+echo "=== bandit ==="; uv run bandit -q -r libs 2>&1 | tail -30
+echo "=== pip-audit ==="; uv run pip-audit 2>&1 | tail -20
+
+OUT
+=== pytest (run 2) ===
+....................................................                     [100%]
+52 passed in 2.02s
+=== pytest (run 3) ===
+....................................................                     [100%]
+52 passed in 2.03s
+=== ruff ===
+All checks passed!
+=== mypy ===
+Success: no issues found in 15 source files
+=== bandit ===
+258	    assert await registry.lookup_signing_key(service_id) == "new-key"
+
+--------------------------------------------------
+>> Issue: [B101:assert_used] Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.
+   Severity: Low   Confidence: High
+   CWE: CWE-703 (https://cwe.mitre.org/data/definitions/703.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html
+   Location: libs/jetcore/tests/test_scaffold.py:8:4
+7	def test_package_imports_and_has_version() -> None:
+8	    assert jetcore.__version__ == "0.1.0"
+
+--------------------------------------------------
+
+Code scanned:
+	Total lines of code: 1612
+	Total lines skipped (#nosec): 0
+	Total potential issues skipped due to specifically being disabled (e.g., #nosec BXXX): 0
+
+Run metrics:
+	Total issues (by severity):
+		Undefined: 0
+		Low: 68
+		Medium: 0
+		High: 0
+	Total issues (by confidence):
+		Undefined: 0
+		Low: 0
+		Medium: 0
+		High: 68
+Files skipped (0):
+=== pip-audit ===
+No known vulnerabilities found
+Name    Skip Reason
+------- ----------------------------------------------------------------------
+jetcore Dependency not found on PyPI and could not be audited: jetcore (0.1.0)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pre-commit run --all-files 2>&1 | tail -40
+
+OUT
+ruff check...........................................(no files to check)Skipped
+ruff format..........................................(no files to check)Skipped
+mypy.................................................(no files to check)Skipped
+bandit...............................................(no files to check)Skipped
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+cat .pre-commit-config.yaml 2>/dev/null
+echo "---git status---"
+git status --short | head -30
+
+OUT
+# Step B1 (Design.md §7.4, §11 Track B). Hooks shell out to `uv run` rather
+# than letting pre-commit provision its own per-hook environments — reuses
+# the project's one uv-managed venv instead of duplicating it.
+#
+# This file is checked in but hooks are NOT auto-installed into .git/hooks —
+# that's a per-developer choice. Run `uv run pre-commit install` to enable
+# them locally.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+      - id: mypy
+        name: mypy
+        # Scoped to libs/ only for now — adapters/ doesn't exist until
+        # Phase 3, and unlike pytest, mypy hard-errors on a missing path
+        # argument rather than skipping it (confirmed by testing). Add
+        # `adapters` back here once that directory exists.
+        entry: uv run --all-packages mypy libs
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: bandit
+        name: bandit
+        entry: uv run bandit -q -r
+        language: system
+        types: [python]
+        exclude: ^.*/tests/
+---git status---
+ M .claude/session.log
+ M Dependencies.md
+ M Design.md
+ M README.md
+ M docker-compose.yml
+ M infra/nats/README.md
+ M infra/nats/adapter_identities.yaml
+ M infra/nats/bootstrap_auth.sh
+ M infra/nats/bootstrap_jetstream.sh
+ M infra/nats/up.sh
+ D libs/gsb-core/gsb_core/__init__.py
+ D libs/gsb-core/gsb_core/bus_client.py
+ D libs/gsb-core/gsb_core/config.py
+ D libs/gsb-core/gsb_core/crypto.py
+ D libs/gsb-core/gsb_core/envelope.py
+ D libs/gsb-core/gsb_core/registry.py
+ D libs/gsb-core/pyproject.toml
+ D libs/gsb-core/tests/_helpers.py
+ D libs/gsb-core/tests/conftest.py
+ D libs/gsb-core/tests/test_bus_client.py
+ D libs/gsb-core/tests/test_config.py
+ D libs/gsb-core/tests/test_crypto.py
+ D libs/gsb-core/tests/test_end_to_end.py
+ D libs/gsb-core/tests/test_envelope.py
+ D libs/gsb-core/tests/test_registry.py
+ D libs/gsb-core/tests/test_scaffold.py
+ M pyproject.toml
+ M uv.lock
+?? libs/jetcore/
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+echo "=== container name/health ==="
+sg docker -c "docker compose ps" 2>&1
+echo "=== cleanup test state ==="
+sg docker -c "docker run --rm --network jetcore_default -v \$(pwd)/infra/nats/operator/creds:/creds natsio/nats-box:0.19.7-nonroot bash -c '
+nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds stream purge EVENTS -f
+nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds kv purge-deletes service-directory 2>&1 || true
+'" 2>&1 | tail -20
+
+OUT
+=== container name/health ===
+NAME             IMAGE         COMMAND                  SERVICE   CREATED          STATUS          PORTS
+jetcore-nats-1   nats:2.14.5   "/nats-server -c /et…"   nats      57 seconds ago   Up 56 seconds   0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+=== cleanup test state ===
+/entrypoint.sh: exec: line 8: bash: not found
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+sg docker -c "docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds stream purge EVENTS -f" 2>&1
+echo "--- kv keys check ---"
+sg docker -c "docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds kv ls service-directory" 2>&1
+sg docker -c "docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds kv ls service-identity" 2>&1
+
+OUT
+Purged 0 messages from EVENTS
+
+State for Stream EVENTS created 2026-08-25 01:04:48
+
+State:
+
+        Host Version: 2.14.5
+  Required API Level: 0 hosted at level 4
+            Messages: 0
+               Bytes: 0 B
+      First Sequence: 34
+       Last Sequence: 33 @ 2026-08-25 01:05:12
+    Active Consumers: 21
+--- kv keys check ---
+events.test.RegistryTest61eb0a40.svc-a
+events.test.RegistryTest09df0818-unrelated.svc-a
+events.test.RegistryTesta02a6960.svc-a
+events.test.RegistryTesta02a6960.svc-b
+events.test.RegistryTesta64fd3ce.svc-a
+events.test.RegistryTest06656b40.svc-a
+events.test.RegistryTest02eac6cb.svc-a
+events.test.RegistryTestba773969-unrelated.svc-a
+events.test.RegistryTest5b7857d5.svc-a
+events.test.RegistryTest34dbcb9e-unrelated.svc-a
+events.test.RegistryTestda878dcd.svc-a
+events.test.RegistryTestda878dcd.svc-b
+events.test.RegistryTest7c67ab30.svc-a
+events.test.RegistryTestd175c85f.svc-a
+events.test.RegistryTest3135acf5.svc-a
+events.test.RegistryTest48d02378-unrelated.svc-a
+events.test.RegistryTest019739e0.svc-a
+events.test.RegistryTesteea420af-unrelated.svc-a
+events.test.RegistryTestbbbed506.svc-a
+events.test.RegistryTestbbbed506.svc-b
+events.test.RegistryTestd13a5898.svc-a
+events.test.RegistryTestb6edb307.svc-a
+events.test.RegistryTest8ab9a7bd.svc-a
+events.test.RegistryTestc475b52e-unrelated.svc-a
+test-service-58b1392a
+test-service-74ef0f60
+test-service-9d64e2a9
+test-service-c9c8ec7b
+file-storage-01
+webhook-listener-01
+test-service-58d897f6
+test-service-40fbbbad
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+
+echo "--- purging service-directory ---"
+for key in $(sg docker -c "$NB kv ls service-directory" 2>&1); do
+  sg docker -c "$NB kv del service-directory '$key' -f" 2>&1 | tail -1
+done
+
+echo "--- purging service-identity ---"
+for key in $(sg docker -c "$NB kv ls service-identity" 2>&1); do
+  sg docker -c "$NB kv del service-identity '$key' -f" 2>&1 | tail -1
+done
+
+echo "--- verify empty ---"
+sg docker -c "$NB kv ls service-directory" 2>&1
+sg docker -c "$NB kv ls service-identity" 2>&1
+
+OUT
+--- purging service-directory ---
+--- purging service-identity ---
+--- verify empty ---
+No keys found in bucket
+No keys found in bucket
+Both KV buckets and the EVENTS stream are clean. Now let's confirm the final repo state and container health.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+sg docker -c "docker compose ps" 2>&1
+echo "--- final pytest run against clean state ---"
+uv run pytest -q 2>&1 | tail -5
+echo "--- git status ---"
+git status --short
+
+OUT
+NAME             IMAGE         COMMAND                  SERVICE   CREATED              STATUS              PORTS
+jetcore-nats-1   nats:2.14.5   "/nats-server -c /et…"   nats      About a minute ago   Up About a minute   0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+--- final pytest run against clean state ---
+....................................................                     [100%]
+52 passed in 2.04s
+--- git status ---
+ M .claude/session.log
+ M Dependencies.md
+ M Design.md
+ M README.md
+ M docker-compose.yml
+ M infra/nats/README.md
+ M infra/nats/adapter_identities.yaml
+ M infra/nats/bootstrap_auth.sh
+ M infra/nats/bootstrap_jetstream.sh
+ M infra/nats/up.sh
+ D libs/gsb-core/gsb_core/__init__.py
+ D libs/gsb-core/gsb_core/bus_client.py
+ D libs/gsb-core/gsb_core/config.py
+ D libs/gsb-core/gsb_core/crypto.py
+ D libs/gsb-core/gsb_core/envelope.py
+ D libs/gsb-core/gsb_core/registry.py
+ D libs/gsb-core/pyproject.toml
+ D libs/gsb-core/tests/_helpers.py
+ D libs/gsb-core/tests/conftest.py
+ D libs/gsb-core/tests/test_bus_client.py
+ D libs/gsb-core/tests/test_config.py
+ D libs/gsb-core/tests/test_crypto.py
+ D libs/gsb-core/tests/test_end_to_end.py
+ D libs/gsb-core/tests/test_envelope.py
+ D libs/gsb-core/tests/test_registry.py
+ D libs/gsb-core/tests/test_scaffold.py
+ M pyproject.toml
+ M uv.lock
+?? libs/jetcore/
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+grep -n "^- \*\*Decision #\|^\*\*Decision #" Design.md | tail -5
+echo "---"
+grep -n "jetcore\|JETCORE" Design.md | wc -l
+grep -n "^# Title" Design.md
+
+OUT
+---
+22
+1:# Title: Jet Core Service Bus — Design Document
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+grep -n "Decision #" Design.md | tail -8
+
+OUT
+415:- [x] **A3. Bootstrap script (auth)** — [infra/nats/bootstrap_auth.sh](infra/nats/bootstrap_auth.sh): idempotent, containerized (`nsc` via `natsio/nats-box`, manifest parsed via `mikefarah/yq`), creates the Operator, `JETCORE` Account, and one User per A2 manifest entry, applies its permissions plus a derived KV-write grant and a v1 baseline (`$JS.API.>`, `_INBOX.>`, KV-read-all — not scoped down further in v1, a candidate for later tightening), generates a `.creds` file per adapter, and emits the memory-resolver config block. **Executed and verified end-to-end** (Docker access resolved — host user added to the `docker` group) across 3 consecutive runs, confirming true idempotency (no duplicate permission entries on repeat `edit user` calls). Four real bugs surfaced only by running it, not by reading docs — worth remembering: (1) `nsc list ... --json` writes to **stderr**, not stdout — a `2>/dev/null` silently broke every existence check; (2) `nsc`'s table output carries ANSI color codes even without a TTY, breaking `grep -w` matching — switched existence checks to `--json` throughout; (3) `jq` wasn't actually present on the host despite being assumed — dropped entirely in favor of `yq` alone; (4) JetStream refuses to start under decentralized JWT auth without a **System Account** — only surfaced when Step A4 actually started the server, fixed by adding `--sys` to the operator-creation call, after which `nsc generate config --mem-resolver` emits the needed `system_account:` directive automatically; (5) **JetStream is separately disabled per-account by default**, independent of both the system-account fix and the server's global `jetstream{}` block — surfaced while testing Step A5, fixed by adding `nsc edit account --js-mem-storage 256M --js-disk-storage 2G` (kept in step with `nats-server.conf`'s own caps). Also added a dedicated **`jetcore-admin`** identity (`$JS.API.>` + `$KV.service-directory.>` + `_INBOX.>`, full pub+sub) — provisioning shared JetStream infrastructure isn't any particular adapter's job, so Step A5 uses this rather than repurposing one adapter's creds. Also settled: client connection uses a single `.creds` file (JWT+nkey bundled, `nsc generate creds`), not separate nkey-seed/JWT paths — §7.6 and B4 updated accordingly. **Updated post-B6** to grant every identity `$KV.service-identity.>` (broad read + own-namespace write) alongside the existing `service-directory` grant, resolving Decision #20/§4.6 — re-applied idempotently against the live stack with no server restart needed (permission changes live in each User's own JWT, not the server's static config).
+416:- [x] **A5. Bootstrap script (JetStream objects)** — [infra/nats/bootstrap_jetstream.sh](infra/nats/bootstrap_jetstream.sh): idempotent, containerized, using the `jetcore-admin` identity from A3. Creates the `EVENTS` stream (`events.>`, file storage, limits retention, discard-old, 7-day max-age, 1G max-bytes backstop) and the `service-directory` KV bucket (file storage, 60s max-age applied uniformly per key's last-write time — see terminology note below). **Executed and verified end-to-end**: both objects created successfully against the live A4 server; then empirically verified the actual TTL/heartbeat *mechanism* itself (not just that the bucket was created with some TTL value) by writing two keys, refreshing only one at t=30s, and checking both at t=65s — the refreshed key was still present (revision 3), the unrefreshed one had genuinely expired (`key not found`). This is the concrete behavior Decision #7's heartbeat/TTL design depends on, now confirmed rather than assumed. **Terminology note**: NATS's `nats kv add --ttl` sets a bucket-wide max-age applied per key's last-write timestamp — not the same mechanism as NATS's separate opt-in "Per-Key TTL" feature (`--marker-ttl`, for *different* TTL values per key). Since every registry entry uses the *same* fixed TTL in our design, the simpler bucket-wide setting is sufficient and was used; "per-key TTL" language elsewhere in this doc (§4.5) refers to the functional behavior (each key's own expiry clock resets on its own writes), not literally NATS's `--marker-ttl` feature. **Updated post-B6** to also create the `service-identity` bucket (§4.6, Decision #20) — no `--ttl` flag this time, deliberately (see §4.6 for why identity entries shouldn't expire the way liveness entries do).
+417:- [x] **A4. `nats-server.conf`** — [infra/nats/nats-server.conf](infra/nats/nats-server.conf): client listener (`0.0.0.0:4222`), monitoring (`8222`), `jetstream {}` block (dev-sized: 256M mem / 2G file, store dir matching Step A6's planned volume mount), and `include resolver.conf` for auth. **Executed and verified**: started the pinned `nats:2.14.5` image against this config — clean startup ("Server is ready", JetStream initialized, no warnings) after the A3 system-account fix. Further confirmed with real traffic: published successfully using `webhook-listener-01`'s `.creds` on its allowed subject, and confirmed `webhook-sender-01` is hard-rejected ("Permissions Violation for Publish") publishing outside its allow-list — the per-adapter subject restriction from Decision #4 is genuinely enforced by the server, not just declared.
+425:- [x] **B3. `crypto.py`** — [libs/jetcore/jetcore/crypto.py](libs/jetcore/jetcore/crypto.py): encryption via `pyrage` (`encrypt_for_recipients`/`decrypt`, plus a `generate_encryption_keypair` test/tooling helper) and Ed25519 signing via `nkeys` (`sign`/`verify`, `generate_signing_keypair`), both digest-based per Decision #5 (`_digest()` = SHA-256 of the plaintext, centralized so signing and verification can never disagree about what "the digest" means). **Executed and verified**: 20 tests total (10 new), all passing, plus clean `ruff`/`mypy`/`bandit`/`pip-audit`/`pre-commit`. Two significant findings, both from actually running the libraries against each other, not from their docs:
+427:  2. **Found and worked around a real bug in `nkeys.py` 0.2.1.** `KeyPair.verify()` only works if you already hold the *private* signing key (it internally derives `verify_key` from `self._keys`, a `SigningKey` — confirmed by reading the library's source, not guessing) — there's no working way to verify a signature using just someone else's public key, which is the entire point of asymmetric signatures and exactly the scenario Decision #5 depends on (a recipient verifying a sender they never held private key material for). Worked around with a small, tested, from-scratch decode of nkey's public-key encoding (base32 + 1-byte prefix + 2-byte CRC16, mirroring `KeyPair.public_key`'s encode logic in reverse, confirmed byte-for-byte against real generated keys) feeding a `nacl.signing.VerifyKey` directly, bypassing the broken method. A dedicated test (`test_verify_works_with_only_the_public_key_no_private_material`) keeps only the public key in scope, deliberately separate from the round-trip test, so a regression here can't hide behind a test that still happens to have the seed available.
+435:  5. **TTL-based expiry (the 60s bucket TTL from A5) arrives at a watcher as `operation == KV_PURGE`** (nats-server 2.11+'s `Nats-Marker-Reason: MaxAge`), distinct from an explicit `KV_DEL` from `deregister()` — both had to be handled as "remove from cache" for `RecipientCache` to self-heal when an adapter stops heartbeating, exactly the behavior Decision #7 depends on. Verified directly: registered a recipient, confirmed the cache picked it up, deregistered it, confirmed the cache emptied out again via the watch (not a re-poll).
+438:  **Follow-up, same step's scope in spirit:** the sender-authentication gap this step found (below) was closed immediately after, not left as a dangling TODO — `BusClient.connect()` now registers this adapter's identity once via the new `service-identity` directory (§4.6, Decision #20), and `_process()`'s verification looks up the *trusted* key for `sourceServiceId` instead of trusting the message's own embedded `sourcePublicKey`. Three new tests prove this concretely: `test_impersonation_with_self_consistent_key_is_rejected` reproduces the *exact* scenario that exposed the gap and confirms it's now rejected; `test_message_from_unregistered_sender_is_rejected` covers the "never registered" case; `test_signature_not_matching_claimed_key_is_rejected`'s docstring was updated to explain what changed. registry.py gained `register_identity`/`lookup_signing_key` plus 3 new tests; A3/A5 (bootstrap scripts) updated to provision the new bucket and permissions, re-applied against the live stack with no server restart needed. 50 tests total, all passing, run three times for stability; full toolchain clean.
+448:  **One more real finding, caught building the multi-event test**: an early version used three separate `FakePublisherAdapter("webhook-listener-01")` instances running concurrently, each connecting independently — 2 of 3 messages failed signature verification. Not a bug: the test helper's `connect()` generates a fresh *random* signing key every call for convenience, and since service-identity registration is last-writer-wins per `serviceId` (§4.6), three concurrent connections sharing one `serviceId` kept invalidating each other's registered key. A real adapter never does this — one `serviceId` means one persistent nkey loaded from one `.creds` file (Step A3), not a fresh key per connection — and the design's actual answer to horizontal scaling is giving each replica its own distinct `serviceId` (Decision #18), not sharing one. Fixed by having the test use one publisher connection for the whole sequence (also the more realistic shape anyway) — documented in `run_many()`'s docstring so the reasoning isn't lost.
+All updated correctly, decision numbering intact (highest is #20, untouched). The rename read through cleanly in context. No further doc edit needed — everything is consistent as-is. Done.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+grep -n "^# Title\|^Status:\|^Date:" Design.md | head -3
+head -1 README.md
+head -8 Dependencies.md | tail -3
+
+OUT
+1:# Title: Jet Core Service Bus — Design Document
+3:Status: Draft v0.2 — companion to [Design_Notes.md](Design_Notes.md)
+4:Date: 2026-08-22
+# Jet Core Service Bus
+
+**Ongoing security validation process:**
+- New dependency, at adoption time: check maintenance activity (recent releases/commits), check for known CVEs (PyPI advisory DB / OSV), check adoption/provenance signals (org-backed vs. single maintainer, download counts), check license compatibility.
+Renamed to Jet Core Service Bus, verified end to end.
+
+What changed, mechanically:
+
+Title/prose: "Gregor's Service Bus" → "Jet Core Service Bus" across README.md, Design.md, Dependencies.md, and every infra script's header comments.
+Package: libs/gsb-core → libs/jetcore, Python module gsb_core → jetcore (directory move + import rewrite across every .py file, tests included).
+Env var prefix: GSB_ → JETCORE_ in config.py and its tests.
+NATS identity layer (bootstrap_auth.sh): Operator GregorsServiceBus → JetCoreServiceBus, Account GSB → JETCORE, the gsb-admin provisioning identity → jetcore-admin (also updated in bootstrap_jetstream.sh, up.sh, adapter_identities.yaml).
+Compose project: name: gsb → name: jetcore in docker-compose.yml (container is now jetcore-nats-1, network jetcore_default).
+Root project name: gregors-service-bus → jet-core-service-bus; uv.lock regenerated to match both renamed packages.
+Since the Operator/Account names are baked into the generated JWT/nkey store, this wasn't just a text rename — I tore down the old gsb Compose project and its stale gsb-nats-1 container/volume/network, wiped the generated operator/ auth state, and ran infra/nats/up.sh fresh to rebootstrap everything under the new identity names. Then re-ran the full toolchain against it: uv sync --all-packages, 52 tests × 3 (all passing), ruff, mypy, bandit, pip-audit — all clean. Test artifacts (stream messages, both KV buckets) purged afterward; jetcore-nats-1 left running and healthy.
+
+One thing left as-is: the checkout directory itself is still named GregorsServiceBus — renaming that would move the folder out from under this session's cwd and your open editor, so I left it for you to do separately if you want it. Compose already pins its project/network name explicitly so it doesn't depend on the folder name either way.
+
+git status --short shows the diff as modified files plus D/?? for the gsb-core→jetcore directory move (git will read that as a rename once you git add) — nothing staged or committed, per your standing instruction.
+
+------------------ Rename Complete ----------------------

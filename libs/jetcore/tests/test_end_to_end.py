@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 
 from _helpers import SUBJECT, connect, wait_until_cache_nonempty
-from gsb_core.bus_client import BusClient, ReceivedEvent
+from jetcore.bus_client import BusClient, ReceivedEvent
 
 
 class FakePublisherAdapter:

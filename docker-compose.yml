@@ -1,4 +1,4 @@
-# Gregor's Service Bus — docker-compose
+# Jet Core Service Bus — docker-compose
 # Phase 1, Step A6 (Design.md §11 Track A) — infra-only for now.
 #
 # Just the `nats` service. Adapters get added here in Phase 3 (Design.md §10).
@@ -21,7 +21,7 @@
 # which is real added fragility for scripts that already work well as
 # host-level tooling. Revisit if that tradeoff stops being worth it.
 
-name: gsb   # fixes the Compose project/network name (gsb_default) regardless
+name: jetcore   # fixes the Compose project/network name (jetcore_default) regardless
             # of the checkout directory's name — infra/nats/up.sh depends on it
 
 services:

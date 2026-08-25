@@ -11,12 +11,12 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from gsb_core.bus_client import BusClient
-from gsb_core.config import AdapterSettings
-from gsb_core.crypto import generate_encryption_keypair, generate_signing_keypair
+from jetcore.bus_client import BusClient
+from jetcore.config import AdapterSettings
+from jetcore.crypto import generate_encryption_keypair, generate_signing_keypair
 
 if TYPE_CHECKING:
-    from gsb_core.registry import RecipientCache
+    from jetcore.registry import RecipientCache
 
 NATS_URL = "nats://localhost:4222"
 SUBJECT = "events.files.FileWriteRequested"

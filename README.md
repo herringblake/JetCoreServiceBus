@@ -1,4 +1,4 @@
-# Gregor's Service Bus
+# Jet Core Service Bus
 
 A NATS JetStream-based service bus with public-key-encrypted payloads. See [Design.md](Design.md) for the full architecture and decision log, [Design_Notes.md](Design_Notes.md) for the original design brief, and [Dependencies.md](Dependencies.md) for the dependency ledger. This README covers day-to-day dev environment setup.
 
@@ -18,7 +18,7 @@ A NATS JetStream-based service bus with public-key-encrypted payloads. See [Desi
 uv sync --all-packages
 ```
 
-**Use `--all-packages`, not plain `uv sync`.** This project's root `pyproject.toml` is a "virtual" workspace root (Design.md §7.5) — nothing in it depends on `gsb-core` or the future adapter packages, so a plain `uv sync` silently resolves only the shared dev-tool group and reports success *without installing any workspace member at all*. This was confirmed by actually testing it, not assumed: `uv sync` alone left `gsb_core` unimportable with no error or warning. `--all-packages` is the documented uv flag for "sync every workspace member," and is the only form that actually sets this project up correctly.
+**Use `--all-packages`, not plain `uv sync`.** This project's root `pyproject.toml` is a "virtual" workspace root (Design.md §7.5) — nothing in it depends on `jetcore` or the future adapter packages, so a plain `uv sync` silently resolves only the shared dev-tool group and reports success *without installing any workspace member at all*. This was confirmed by actually testing it, not assumed: `uv sync` alone left `jetcore` unimportable with no error or warning. `--all-packages` is the documented uv flag for "sync every workspace member," and is the only form that actually sets this project up correctly.
 
 ## Running the checks
 
@@ -27,7 +27,7 @@ uv run --all-packages pytest            # tests
 uv run ruff check .                     # lint
 uv run ruff format .                    # format
 uv run --all-packages mypy libs         # type-check (adapters/ added here once Phase 3 creates it)
-uv run bandit -r libs/gsb-core/gsb_core # security static analysis
+uv run bandit -r libs/jetcore/jetcore # security static analysis
 uv run pip-audit                        # dependency vulnerability scan
 ```
 
@@ -43,4 +43,4 @@ To run these automatically on every commit: `uv run pre-commit install`. Not don
 
 ## Repository layout
 
-See [Design.md §7.1](Design.md#71-repository-layout) for the full intended layout. In short: `libs/gsb-core/` is the shared library every adapter depends on; `adapters/` (populated starting Phase 3) holds one package per adapter instance; `infra/` holds infrastructure config and bootstrap scripts (see [infra/nats/README.md](infra/nats/README.md) for the NATS setup, which is further along than the Python side as of this writing).
+See [Design.md §7.1](Design.md#71-repository-layout) for the full intended layout. In short: `libs/jetcore/` is the shared library every adapter depends on; `adapters/` (populated starting Phase 3) holds one package per adapter instance; `infra/` holds infrastructure config and bootstrap scripts (see [infra/nats/README.md](infra/nats/README.md) for the NATS setup, which is further along than the Python side as of this writing).

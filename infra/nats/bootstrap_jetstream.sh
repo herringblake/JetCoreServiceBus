@@ -4,7 +4,7 @@ set -euo pipefail
 # infra/nats/bootstrap_jetstream.sh
 # Phase 1, Step A5 — JetStream objects (Design.md §11 Track A)
 #
-# Idempotently creates, using the gsb-admin identity from Step A3 (a
+# Idempotently creates, using the jetcore-admin identity from Step A3 (a
 # dedicated infra-provisioning user, not any particular adapter's creds):
 #   - the EVENTS stream (events.>, file storage, limits retention, 7-day
 #     max-age, 1G max-bytes backstop) — Design.md §6.
@@ -21,7 +21,7 @@ set -euo pipefail
 #     a repeating heartbeat.
 #
 # Requires a running nats-server reachable at $NATS_URL, already bootstrapped
-# per Steps A3/A4 — in particular, the GSB account needs JetStream storage
+# per Steps A3/A4 — in particular, the JETCORE account needs JetStream storage
 # granted (bootstrap_auth.sh does this; it's disabled per-account by default
 # under decentralized JWT auth, independent of the server's global
 # jetstream{} block — see that script's comments for how this was found).
@@ -30,20 +30,20 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CREDS_DIR="$SCRIPT_DIR/operator/creds"
-CREDS_FILE="$CREDS_DIR/gsb-admin.creds"
+CREDS_FILE="$CREDS_DIR/jetcore-admin.creds"
 NATS_BOX_IMAGE="natsio/nats-box:0.19.7-nonroot"
 
 # Overridable for local testing; defaults to the service name Step A6's
 # docker-compose uses. For that hostname to resolve, this script's
 # containerized `nats` calls need to join the compose network — set
-# DOCKER_NETWORK (up.sh does this automatically; e.g. `gsb_default`).
+# DOCKER_NETWORK (up.sh does this automatically; e.g. `jetcore_default`).
 NATS_URL="${NATS_URL:-nats://nats:4222}"
 DOCKER_NETWORK="${DOCKER_NETWORK:-}"
 
 STREAM_NAME="EVENTS"
 STREAM_SUBJECTS="events.>"
 STREAM_MAX_AGE="7d"      # Design.md §6, Decision #9
-STREAM_MAX_BYTES="1G"    # dev-sized backstop; comfortably under the GSB
+STREAM_MAX_BYTES="1G"    # dev-sized backstop; comfortably under the JETCORE
                           # account's 2G js-disk-storage cap (bootstrap_auth.sh)
                           # since the KV bucket below shares that same budget
 
@@ -63,7 +63,7 @@ nats() {
   docker run --rm "${net_args[@]}" \
     -v "$CREDS_DIR:/creds:ro" \
     "$NATS_BOX_IMAGE" \
-    nats --server "$NATS_URL" --creds /creds/gsb-admin.creds "$@"
+    nats --server "$NATS_URL" --creds /creds/jetcore-admin.creds "$@"
 }
 
 echo "== Stream: $STREAM_NAME =="

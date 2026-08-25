@@ -8,7 +8,7 @@ import json
 from datetime import UTC, datetime
 
 import pytest
-from gsb_core.envelope import (
+from jetcore.envelope import (
     EncryptionMetadata,
     Event,
     EventDetails,

@@ -1,16 +1,16 @@
 """Adapter configuration loading (Design.md §7.6) — Step B4 (Design.md §11
 Track B). Env-var/`.env`-driven, via `pydantic-settings`.
 
-Field <-> env var mapping (all `GSB_`-prefixed, per §7.6):
-  service_id       GSB_SERVICE_ID       — must match this instance's
+Field <-> env var mapping (all `JETCORE_`-prefixed, per §7.6):
+  service_id       JETCORE_SERVICE_ID       — must match this instance's
                                           serviceId in adapter_identities.yaml
                                           (Step A2)
-  nats_url         GSB_NATS_URL         — defaults to the docker-compose
+  nats_url         JETCORE_NATS_URL         — defaults to the docker-compose
                                           service name (Step A6)
-  nats_creds_path  GSB_NATS_CREDS_PATH  — the .creds file Step A3's
+  nats_creds_path  JETCORE_NATS_CREDS_PATH  — the .creds file Step A3's
                                           bootstrap_auth.sh generated for
                                           this service_id (JWT+nkey bundled)
-  subjects         GSB_SUBJECTS         — subjects this instance subscribes
+  subjects         JETCORE_SUBJECTS         — subjects this instance subscribes
                                           to / registers itself as a
                                           recipient for (Design.md §4.5).
                                           NOT publish subjects — what an
@@ -20,7 +20,7 @@ Field <-> env var mapping (all `GSB_`-prefixed, per §7.6):
                                           FileWriteCompleted"), not
                                           something you'd reconfigure
                                           without also changing code.
-  log_level        GSB_LOG_LEVEL        — defaults to INFO
+  log_level        JETCORE_LOG_LEVEL        — defaults to INFO
 """
 
 from __future__ import annotations
@@ -36,9 +36,9 @@ LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 class AdapterSettings(BaseSettings):
     """Base config every adapter loads. Subclass to add adapter-specific
-    settings (still `GSB_`-prefixed) — pydantic-settings merges them."""
+    settings (still `JETCORE_`-prefixed) — pydantic-settings merges them."""
 
-    model_config = SettingsConfigDict(env_prefix="GSB_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="JETCORE_", env_file=".env", extra="ignore")
 
     service_id: str
     nats_url: str = "nats://nats:4222"

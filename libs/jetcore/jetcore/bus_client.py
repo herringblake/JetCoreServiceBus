@@ -34,10 +34,10 @@ from typing import TYPE_CHECKING
 import nats
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 
-from gsb_core.config import AdapterSettings
-from gsb_core.crypto import EncryptionKeyPair, decrypt, encrypt_for_recipients, sign, verify
-from gsb_core.envelope import EncryptionMetadata, Event, EventDetails, EventEnvelope
-from gsb_core.registry import RecipientCache, RegistryClient
+from jetcore.config import AdapterSettings
+from jetcore.crypto import EncryptionKeyPair, decrypt, encrypt_for_recipients, sign, verify
+from jetcore.envelope import EncryptionMetadata, Event, EventDetails, EventEnvelope
+from jetcore.registry import RecipientCache, RegistryClient
 
 if TYPE_CHECKING:
     from nats.aio.client import Client as NATSClient

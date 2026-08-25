@@ -1,5 +1,5 @@
 """The service-directory KV registry client (Design.md §4.5) — Step B5
-(Design.md §11 Track B). The first gsb-core module that needs a live NATS
+(Design.md §11 Track B). The first jetcore module that needs a live NATS
 connection; built and tested against the real Track A stack (Step A6), not
 a mock.
 

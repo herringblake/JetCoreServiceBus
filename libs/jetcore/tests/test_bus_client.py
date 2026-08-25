@@ -18,8 +18,8 @@ import uuid
 
 import pytest
 from _helpers import SUBJECT, connect, wait_until_cache_nonempty
-from gsb_core.crypto import encrypt_for_recipients, generate_signing_keypair, sign
-from gsb_core.envelope import EncryptionMetadata, Event, EventDetails, EventEnvelope
+from jetcore.crypto import encrypt_for_recipients, generate_signing_keypair, sign
+from jetcore.envelope import EncryptionMetadata, Event, EventDetails, EventEnvelope
 
 # Kept as local aliases so the rest of this file (and its history/diffs)
 # doesn't need to change beyond the import — the shared implementations
@@ -72,7 +72,7 @@ async def test_publish_with_no_recipients_does_not_crash(
     was never the problem with an isolated probe once the real bug was
     understood — worth recording so no one "fixes" this again by
     reaching for a manual logging handler."""
-    caplog.set_level("WARNING", logger="gsb_core.bus_client")
+    caplog.set_level("WARNING", logger="jetcore.bus_client")
     publisher = await _connect("webhook-listener-01")
     try:
         await publisher.publish(

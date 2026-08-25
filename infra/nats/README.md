@@ -42,7 +42,7 @@ docker run --rm -it \
 
 ## Step A3 — Auth bootstrap
 
-[`bootstrap_auth.sh`](bootstrap_auth.sh) reads [adapter_identities.yaml](adapter_identities.yaml) (Step A2) and idempotently creates the Operator, the `GSB` Account, and one `nsc` User per manifest entry — applying that entry's subject permissions plus a derived KV-write grant and a v1 baseline (JetStream API + `_INBOX` + KV-read). It then generates a `.creds` file per adapter (JWT+nkey bundled — the standard NATS client connection artifact) and the memory-resolver config block consumed by `nats-server.conf` in Step A4.
+[`bootstrap_auth.sh`](bootstrap_auth.sh) reads [adapter_identities.yaml](adapter_identities.yaml) (Step A2) and idempotently creates the Operator, the `JETCORE` Account, and one `nsc` User per manifest entry — applying that entry's subject permissions plus a derived KV-write grant and a v1 baseline (JetStream API + `_INBOX` + KV-read). It then generates a `.creds` file per adapter (JWT+nkey bundled — the standard NATS client connection artifact) and the memory-resolver config block consumed by `nats-server.conf` in Step A4.
 
 **Executed and verified end-to-end** against real Docker + `nsc` — 3 consecutive runs confirmed the script is genuinely idempotent (no duplicate permission entries accumulate on repeat `edit user` calls). Three real bugs only surfaced by running it, not by reading docs, all now fixed in the script:
 
@@ -60,12 +60,12 @@ Further confirmed with real traffic, using the actual `.creds` files A3 generate
 
 ## Step A5 — JetStream objects
 
-[`bootstrap_jetstream.sh`](bootstrap_jetstream.sh) creates the `EVENTS` stream and `service-directory` KV bucket against a running server, using the `gsb-admin` identity (added to `bootstrap_auth.sh` in this step — see below).
+[`bootstrap_jetstream.sh`](bootstrap_jetstream.sh) creates the `EVENTS` stream and `service-directory` KV bucket against a running server, using the `jetcore-admin` identity (added to `bootstrap_auth.sh` in this step — see below).
 
 **Executed and verified**, including two things that only running it (not reading docs) turned up:
 
-1. **JetStream is disabled per-account by default** under decentralized JWT auth — a *separate* gap from Step A4's system-account fix, and independent of the server's global `jetstream{}` block. Stream creation would otherwise fail against the `GSB` account as originally bootstrapped. Fixed by adding `nsc edit account --js-mem-storage 256M --js-disk-storage 2G` to `bootstrap_auth.sh`, kept in step with `nats-server.conf`'s own caps.
-2. **Provisioning shared infrastructure isn't any adapter's job.** Added a dedicated `gsb-admin` identity to `bootstrap_auth.sh` (`$JS.API.>` + `$KV.service-directory.>` + `_INBOX.>`) rather than reusing one adapter's `.creds` file for stream/bucket management.
+1. **JetStream is disabled per-account by default** under decentralized JWT auth — a *separate* gap from Step A4's system-account fix, and independent of the server's global `jetstream{}` block. Stream creation would otherwise fail against the `JETCORE` account as originally bootstrapped. Fixed by adding `nsc edit account --js-mem-storage 256M --js-disk-storage 2G` to `bootstrap_auth.sh`, kept in step with `nats-server.conf`'s own caps.
+2. **Provisioning shared infrastructure isn't any adapter's job.** Added a dedicated `jetcore-admin` identity to `bootstrap_auth.sh` (`$JS.API.>` + `$KV.service-directory.>` + `_INBOX.>`) rather than reusing one adapter's `.creds` file for stream/bucket management.
 
 Beyond "did it create the objects," the actual **TTL/heartbeat mechanism** the registry design depends on (Design.md §4.5) was verified directly, not assumed: wrote two keys to the real bucket, refreshed only one at t=30s, checked both at t=65s — the refreshed key was still there (revision 3, confirming the write-refreshes-the-clock behavior), the unrefreshed one had genuinely expired (`key not found`, confirming keys really do age out on schedule). Test keys and containers were cleaned up afterward.
 
@@ -82,7 +82,7 @@ One terminology note worth keeping in mind: `nats kv add --ttl` sets a bucket-wi
 Two things confirmed only by running this, not by reading Compose docs:
 
 1. **The `nats:2.14.5` image has no shell at all** (`sh` isn't found) — a Compose-native `HEALTHCHECK` command can't run inside it. `up.sh` checks readiness externally instead, using the same nats-box tooling as the rest of Phase 1.
-2. **`bootstrap_jetstream.sh`'s default `nats://nats:4222` only resolves inside the Compose network** — its containerized `nats` calls need to join that network explicitly. Added a `DOCKER_NETWORK` override (`up.sh` sets it to `gsb_default`, pinned via `name: gsb` in the compose file so the network name doesn't depend on the checkout directory's name).
+2. **`bootstrap_jetstream.sh`'s default `nats://nats:4222` only resolves inside the Compose network** — its containerized `nats` calls need to join that network explicitly. Added a `DOCKER_NETWORK` override (`up.sh` sets it to `jetcore_default`, pinned via `name: jetcore` in the compose file so the network name doesn't depend on the checkout directory's name).
 
 **Executed and verified end-to-end, twice, from a fully clean state** — no operator, account, users, stream, bucket, or containers existing beforehand. First run: auth bootstrap → `nats` starts clean → readiness confirmed → `EVENTS` stream and `service-directory` bucket created. Second run: every step correctly reports "already exists, skipping add" while still confirming the server is up — genuine idempotency of the *entire* pipeline end to end, not just individual scripts tested in isolation. Left running afterward (this is the real deployment now, not a throwaway test container) — `docker compose down` to stop it, `docker compose down -v` to also drop the JetStream data volume.
 
@@ -94,21 +94,21 @@ Ran the full sequence from Design.md §11 against the live A6 stack:
 2. **Durable pull consumer** — created one as `file-storage-01` (`--filter events.files.FileWriteRequested --pull --ack explicit`), the actual delivery mechanism adapters use (Design.md §6), not exercised by any earlier step. Pulled the message through it — payload intact, acknowledged.
 3. **Denied publish** — `webhook-sender-01` still hard-rejected outside its allow-list (re-confirmed from A4).
 4. **KV write scoping** — `file-storage-01` can write its own registration key, denied writing another adapter's.
-5. **Confirmed (4) is real enforcement, not a typo** — the identical key write succeeds for `gsb-admin` (which has broad KV access).
+5. **Confirmed (4) is real enforcement, not a typo** — the identical key write succeeds for `jetcore-admin` (which has broad KV access).
 
-**New finding, worth remembering for `gsb-core`'s `registry.py` (Track B, Step B5):** a KV write permission violation manifests as a **timeout** (`context deadline exceeded`), not an explicit rejection the way plain pub/sub denials are (`Permissions Violation for Publish`, immediate). A hang on a KV write is more likely a permissions problem than a network one — don't assume otherwise when that code gets built.
+**New finding, worth remembering for `jetcore`'s `registry.py` (Track B, Step B5):** a KV write permission violation manifests as a **timeout** (`context deadline exceeded`), not an explicit rejection the way plain pub/sub denials are (`Permissions Violation for Publish`, immediate). A hang on a KV write is more likely a permissions problem than a network one — don't assume otherwise when that code gets built.
 
 All test messages/consumers/keys were cleaned up afterward (stream purged back to 0 messages, test KV keys deleted); the running stack itself stayed up.
 
 ### Reproducing this by hand
 
-Requires the stack up (`docker compose ps` shows `gsb-nats-1` running — `bash up.sh` if not) and a shell with real `docker` group access (no `sg docker -c` needed there). Run from the repo root:
+Requires the stack up (`docker compose ps` shows `jetcore-nats-1` running — `bash up.sh` if not) and a shell with real `docker` group access (no `sg docker -c` needed there). Run from the repo root:
 
 ```bash
 CREDS="infra/nats/operator/creds"
 as() {
   local who="$1"; shift
-  docker run --rm --network gsb_default \
+  docker run --rm --network jetcore_default \
     -v "$(pwd)/$CREDS:/creds:ro" \
     natsio/nats-box:0.19.7-nonroot \
     nats --server nats://nats:4222 --creds "/creds/$who.creds" "$@"
@@ -118,7 +118,7 @@ as() {
 as webhook-listener-01 pub events.files.FileWriteRequested '{"path":"manual-test.txt"}'
 
 # 2. Confirm the stream captured it
-as gsb-admin stream info EVENTS -j | grep '"messages"'
+as jetcore-admin stream info EVENTS -j | grep '"messages"'
 
 # 3. Durable pull consumer — the real delivery mechanism adapters use
 as file-storage-01 consumer add EVENTS file-storage-01-consumer \
@@ -136,17 +136,17 @@ as file-storage-01 kv put service-directory events.files.FileWriteRequested.file
 as file-storage-01 kv put service-directory events.files.FileWriteRequested.some-other-adapter should-be-denied
 
 # 6. Confirm #5 was a real permission denial, not a typo — same key, admin creds
-as gsb-admin kv put service-directory events.files.FileWriteRequested.some-other-adapter should-succeed
+as jetcore-admin kv put service-directory events.files.FileWriteRequested.some-other-adapter should-succeed
 
 # Cleanup
-as gsb-admin consumer rm EVENTS file-storage-01-consumer -f
-as gsb-admin stream purge EVENTS -f
-as gsb-admin kv del service-directory events.files.FileWriteRequested.file-storage-01 -f
-as gsb-admin kv del service-directory events.files.FileWriteRequested.some-other-adapter -f
+as jetcore-admin consumer rm EVENTS file-storage-01-consumer -f
+as jetcore-admin stream purge EVENTS -f
+as jetcore-admin kv del service-directory events.files.FileWriteRequested.file-storage-01 -f
+as jetcore-admin kv del service-directory events.files.FileWriteRequested.some-other-adapter -f
 ```
 
 ## Track A: complete
 
-Steps A1–A7 are done and empirically verified, not just written — versions pinned, auth bootstrapped, server configured, JetStream objects provisioned, everything wired into `docker-compose`, and the whole pipeline smoke-tested end to end including the actual durable-consumer delivery mechanism. See [Design.md §11](../../Design.md#11-phase-1--detailed-breakdown) for Track B (`gsb-core` library — B1–B7), which can now build against this real infrastructure instead of a hypothetical one.
+Steps A1–A7 are done and empirically verified, not just written — versions pinned, auth bootstrapped, server configured, JetStream objects provisioned, everything wired into `docker-compose`, and the whole pipeline smoke-tested end to end including the actual durable-consumer delivery mechanism. See [Design.md §11](../../Design.md#11-phase-1--detailed-breakdown) for Track B (`jetcore` library — B1–B7), which can now build against this real infrastructure instead of a hypothetical one.
 
 

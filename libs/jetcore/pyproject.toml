@@ -1,11 +1,11 @@
-# gsb-core — shared library used by every adapter (Design.md §7.1)
+# jetcore — shared library used by every adapter (Design.md §7.1)
 #
 # Dependencies added incrementally as each module (Design.md §11 Track B) is
 # actually built: pydantic + uuid6 land in B2 (envelope.py). pyrage/nkeys
 # (B3), nats-py (B5/B6) etc. still pending.
 
 [project]
-name = "gsb-core"
+name = "jetcore"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
@@ -21,4 +21,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["gsb_core"]
+packages = ["jetcore"]
