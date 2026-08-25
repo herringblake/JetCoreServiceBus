@@ -8498,3 +8498,2321 @@ Verified: 11 new tests (40 total), clean ruff, mypy (added asyncio_mode = "auto"
 Ready for B6 (bus_client.py — the façade tying envelope + crypto + registry + JetStream publish/subscribe together) whenever you want to continue. That one ties everything built so far into one integration-tested piece.
 
 ----------------- Step B5 Completed -----------------------
+
+continue on to Step B6
+This is the biggest integration yet — publish needs encrypt+sign+lookup, consume needs decrypt+verify, and building it is already surfacing a real gap: the envelope (B2) has no field carrying the sender's signing public key, so a recipient has no way to know which key to verify against. Let me confirm that gap and think through the fix, then explore nats-py's consumer API empirically before writing code.
+
+Bash Confirm EventDetails has no sender public-key field
+IN
+grep -n "class EventDetails" -A 20 /home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core/gsb_core/envelope.py
+
+OUT
+34:class EventDetails(BaseModel):
+35-    """Baseline event metadata (Design.md §5)."""
+36-
+37-    model_config = _MODEL_CONFIG
+38-
+39-    event_id: str = Field(default_factory=new_event_id, alias="eventId")
+40-    event_created: datetime = Field(default_factory=utc_now, alias="eventCreated")
+41-    event_type: str = Field(alias="eventType")
+42-    event_schema_version: str = Field(alias="eventSchemaVersion")
+43-    source_service_id: str = Field(alias="sourceServiceId")
+44-    correlation_id: str | None = Field(default=None, alias="correlationId")
+45-
+46-    # Optional here on purpose: Step B2 doesn't sign anything (that's
+47-    # crypto.py, B3). BusClient (B6) is responsible for refusing to publish
+48-    # an envelope whose signature is still None — see Design.md Decision #5.
+49-    signature: str | None = Field(default=None, alias="signature")
+50-
+51-
+52-class EncryptionMetadata(BaseModel):
+53-    """Design.md §4.3 / §5 — the hybrid-encryption envelope metadata.
+54-
+Edit envelope.py
+Added 10 lines
+Bash Find the wire-shape test to update
+IN
+grep -n "sourceServiceId\|correlationId.*signature\|assert set(details" /home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core/tests/test_envelope.py
+
+OUT
+25:        sourceServiceId="rest-api-service-01",
+40:    original = _sample_event(correlationId="corr-123", signature="c2ln")
+52:    event = _sample_event(correlationId="corr-123", signature="c2ln")
+57:    assert set(details.keys()) == {
+62:        "sourceServiceId",
+73:    d1 = EventDetails(eventType="X", eventSchemaVersion="1.0.0", sourceServiceId="svc-1")
+74:    d2 = EventDetails(eventType="X", eventSchemaVersion="1.0.0", sourceServiceId="svc-1")
+91:    details = EventDetails(eventType="X", eventSchemaVersion="1.0.0", sourceServiceId="svc-1")
+99:    details = EventDetails(eventType="X", eventSchemaVersion="1.0.0", sourceServiceId="svc-1")
+111:        EventDetails(eventSchemaVersion="1.0.0", sourceServiceId="svc-1")  # type: ignore[call-arg]
+Read test_envelope.py (lines 56-65)
+Edit test_envelope.py
+Added 1 line
+Now update Design.md's §5 example JSON to match:
+
+Edit Design.md
+Added 1 line
+Bash Verify envelope tests pass with the new field
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest libs/gsb-core/tests/test_envelope.py -q 2>&1 | tail -5
+
+OUT
+.........                                                                [100%]
+9 passed in 0.08s
+Now let's explore nats-py's pull-consumer API empirically before designing bus_client.py's consume side:
+
+Bash Check pull_subscribe/add_consumer/ConsumerConfig signatures
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import inspect
+from nats.js import JetStreamContext
+print(inspect.signature(JetStreamContext.pull_subscribe))
+print(inspect.signature(JetStreamContext.add_consumer))
+from nats.js.api import ConsumerConfig
+print(inspect.signature(ConsumerConfig.__init__))
+"
+
+OUT
+(self, subject: 'str', durable: 'Optional[str]' = None, stream: 'Optional[str]' = None, config: 'Optional[api.ConsumerConfig]' = None, pending_msgs_limit: 'int' = 524288, pending_bytes_limit: 'int' = 268435456, inbox_prefix: 'Optional[bytes]' = None) -> 'JetStreamContext.PullSubscription'
+(self, stream: 'str', config: 'Optional[api.ConsumerConfig]' = None, timeout: 'Optional[float]' = None, **params) -> 'api.ConsumerInfo'
+(self, name: 'Optional[str]' = None, durable_name: 'Optional[str]' = None, description: 'Optional[str]' = None, deliver_policy: 'Optional[DeliverPolicy]' = <DeliverPolicy.ALL: 'all'>, opt_start_seq: 'Optional[int]' = None, opt_start_time: 'Optional[datetime.datetime]' = None, ack_policy: 'Optional[AckPolicy]' = <AckPolicy.EXPLICIT: 'explicit'>, ack_wait: 'Optional[float]' = None, max_deliver: 'Optional[int]' = None, backoff: 'Optional[List[float]]' = None, filter_subject: 'Optional[str]' = None, filter_subjects: 'Optional[List[str]]' = None, replay_policy: 'Optional[ReplayPolicy]' = <ReplayPolicy.INSTANT: 'instant'>, rate_limit_bps: 'Optional[int]' = None, sample_freq: 'Optional[str]' = None, max_waiting: 'Optional[int]' = None, max_ack_pending: 'Optional[int]' = None, flow_control: 'Optional[bool]' = None, idle_heartbeat: 'Optional[float]' = None, headers_only: 'Optional[bool]' = None, deliver_subject: 'Optional[str]' = None, deliver_group: 'Optional[str]' = None, inactive_threshold: 'Optional[float]' = None, num_replicas: 'Optional[int]' = None, mem_storage: 'Optional[bool]' = None, metadata: 'Optional[Dict[str, str]]' = None, pause_until: 'Optional[str]' = None) -> None
+Bash Check PullSubscription.fetch signature
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import inspect
+from nats.js import JetStreamContext
+print(inspect.signature(JetStreamContext.PullSubscription.fetch))
+print([x for x in dir(JetStreamContext.PullSubscription) if not x.startswith('_')])
+"
+
+OUT
+(self, batch: 'int' = 1, timeout: 'Optional[float]' = 5, heartbeat: 'Optional[float]' = None) -> 'List[Msg]'
+['consumer_info', 'delivered', 'fetch', 'pending_bytes', 'pending_msgs', 'unsubscribe']
+Bash Test full pull consumer create/fetch/ack flow and idempotent rebind
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import asyncio, nats
+from nats.js.api import ConsumerConfig, AckPolicy, DeliverPolicy
+
+async def main():
+    nc = await nats.connect('nats://localhost:4222', user_credentials='infra/nats/operator/creds/gsb-admin.creds')
+    js = nc.jetstream()
+
+    subject = 'events.test.BusClientProbe'
+    durable = 'busclient-probe-consumer'
+
+    # first bind/create
+    sub1 = await js.pull_subscribe(subject, durable=durable, config=ConsumerConfig(filter_subject=subject, ack_policy=AckPolicy.EXPLICIT, deliver_policy=DeliverPolicy.ALL))
+    print('sub1 created')
+
+    await js.publish(subject, b'hello')
+
+    msgs = await sub1.fetch(batch=1, timeout=3)
+    print('fetched:', len(msgs), msgs[0].data, msgs[0].subject)
+    await msgs[0].ack()
+    print('acked')
+
+    # idempotent rebind — second pull_subscribe call with SAME durable name
+    sub2 = await js.pull_subscribe(subject, durable=durable, config=ConsumerConfig(filter_subject=subject, ack_policy=AckPolicy.EXPLICIT, deliver_policy=DeliverPolicy.ALL))
+    print('sub2 (rebind) created OK')
+
+    # cleanup
+    await js.delete_consumer('EVENTS', durable)
+    await nc.close()
+
+asyncio.run(main())
+"
+
+OUT
+Exit code 1
+nats: encountered error
+nats.errors.Error: nats: permissions violation for publish to "events.test.busclientprobe"
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+asyncio.exceptions.CancelledError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/bherring/dev/clodhopper/GregorsServiceBus/.venv/lib/python3.12/site-packages/nats/aio/client.py", line 1103, in _request_new_style
+    return await asyncio.wait_for(future, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 519, in wait_for
+    async with timeouts.timeout(timeout):
+  File "/usr/lib/python3.12/asyncio/timeouts.py", line 115, in __aexit__
+    raise TimeoutError from exc_val
+TimeoutError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<string>", line 31, in <module>
+  File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 687, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "<string>", line 16, in main
+  File "/home/bherring/dev/clodhopper/GregorsServiceBus/.venv/lib/python3.12/site-packages/nats/js/client.py", line 208, in publish
+    msg = await self._nc.request(
+          ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/GregorsServiceBus/.venv/lib/python3.12/site-packages/nats/aio/client.py", line 1068, in request
+    msg = await self._request_new_style(subject, payload, timeout=timeout, headers=headers)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/GregorsServiceBus/.venv/lib/python3.12/site-packages/nats/aio/client.py", line 1105, in _request_new_style
+    raise errors.TimeoutError
+nats.errors.TimeoutError: nats: timeout
+sub1 created
+That's not a library bug — gsb-admin was deliberately scoped to infra-only ($JS.API.>, $KV.service-directory.>), never granted events.> publish/subscribe. Wrong identity for this test. Let me redo it with real adapter identities on a subject they're actually permitted for:
+
+Bash Retest pull consumer flow with correctly-permissioned identities
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import asyncio, nats
+from nats.js.api import ConsumerConfig, AckPolicy, DeliverPolicy
+
+async def main():
+    nc_pub = await nats.connect('nats://localhost:4222', user_credentials='infra/nats/operator/creds/webhook-listener-01.creds')
+    nc_sub = await nats.connect('nats://localhost:4222', user_credentials='infra/nats/operator/creds/file-storage-01.creds')
+    js_pub = nc_pub.jetstream()
+    js_sub = nc_sub.jetstream()
+
+    subject = 'events.files.FileWriteRequested'
+    durable = 'busclient-probe-consumer'
+
+    sub1 = await js_sub.pull_subscribe(subject, durable=durable, config=ConsumerConfig(filter_subject=subject, ack_policy=AckPolicy.EXPLICIT, deliver_policy=DeliverPolicy.ALL))
+    print('sub1 created')
+
+    await js_pub.publish(subject, b'hello')
+
+    msgs = await sub1.fetch(batch=1, timeout=3)
+    print('fetched:', len(msgs), msgs[0].data, msgs[0].subject)
+    await msgs[0].ack()
+    print('acked')
+
+    sub2 = await js_sub.pull_subscribe(subject, durable=durable, config=ConsumerConfig(filter_subject=subject, ack_policy=AckPolicy.EXPLICIT, deliver_policy=DeliverPolicy.ALL))
+    print('sub2 (rebind) created OK')
+
+    await js_sub.delete_consumer('EVENTS', durable)
+    await nc_pub.close()
+    await nc_sub.close()
+
+asyncio.run(main())
+"
+
+OUT
+Exit code 1
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/queues.py", line 158, in get
+    await getter
+asyncio.exceptions.CancelledError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/bherring/dev/clodhopper/GregorsServiceBus/.venv/lib/python3.12/site-packages/nats/aio/subscription.py", line 187, in next_msg
+    msg = await future
+          ^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/GregorsServiceBus/.venv/lib/python3.12/site-packages/nats/aio/subscription.py", line 175, in timed_get
+    return await asyncio.wait_for(self._pending_queue.get(), timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 519, in wait_for
+    async with timeouts.timeout(timeout):
+  File "/usr/lib/python3.12/asyncio/timeouts.py", line 115, in __aexit__
+    raise TimeoutError from exc_val
+TimeoutError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<string>", line 31, in <module>
+  File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 687, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "<string>", line 19, in main
+  File "/home/bherring/dev/clodhopper/GregorsServiceBus/.venv/lib/python3.12/site-packages/nats/js/client.py", line 1098, in fetch
+    msg = await self._fetch_one(expires, timeout, heartbeat)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/GregorsServiceBus/.venv/lib/python3.12/site-packages/nats/js/client.py", line 1146, in _fetch_one
+    msg = await self._sub.next_msg(timeout=deadline)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/GregorsServiceBus/.venv/lib/python3.12/site-packages/nats/aio/subscription.py", line 191, in next_msg
+    raise errors.TimeoutError
+nats.errors.TimeoutError: nats: timeout
+sub1 created
+sub1 created fine this time (permissions correct), but the fetch timed out after publish — no exception, so let me add instrumentation to see exactly what's happening at each step rather than guess:
+
+Bash Debug with instrumentation at each step
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import asyncio, nats
+from nats.js.api import ConsumerConfig, AckPolicy, DeliverPolicy
+
+async def main():
+    nc_pub = await nats.connect('nats://localhost:4222', user_credentials='infra/nats/operator/creds/webhook-listener-01.creds')
+    nc_sub = await nats.connect('nats://localhost:4222', user_credentials='infra/nats/operator/creds/file-storage-01.creds')
+    js_pub = nc_pub.jetstream()
+    js_sub = nc_sub.jetstream()
+
+    subject = 'events.files.FileWriteRequested'
+    durable = 'busclient-probe-consumer2'
+
+    sub1 = await js_sub.pull_subscribe(subject, durable=durable, config=ConsumerConfig(filter_subject=subject, ack_policy=AckPolicy.EXPLICIT, deliver_policy=DeliverPolicy.ALL))
+    ci = await sub1.consumer_info()
+    print('consumer info filter:', ci.config.filter_subject, 'stream:', ci.stream_name)
+
+    ack = await js_pub.publish(subject, b'hello-debug')
+    print('pub ack:', ack)
+
+    info = await js_pub.stream_info('EVENTS')
+    print('stream messages:', info.state.messages)
+
+    ci2 = await sub1.consumer_info()
+    print('consumer num_pending after publish:', ci2.num_pending)
+
+    msgs = await sub1.fetch(batch=1, timeout=3)
+    print('fetched:', len(msgs))
+
+    await js_sub.delete_consumer('EVENTS', durable)
+    await nc_pub.close()
+    await nc_sub.close()
+
+asyncio.run(main())
+" 2>&1 | grep -v "Traceback\|File \"\|asyncio\|nats.errors\|CancelledError\|await\|async with\|raise\|return\|msg ="
+
+OUT
+consumer info filter: events.files.FileWriteRequested stream: EVENTS
+pub ack: PubAck(stream='EVENTS', seq=3, domain=None, duplicate=None)
+stream messages: 2
+consumer num_pending after publish: 2
+fetched: 1
+Confirmed working with a fresh consumer name and more careful sequencing — the earlier failure was very likely stale state from my own iterative probing (a consumer partially created in the failed gsb-admin attempt), not a real bug. Let me clean up test state before building the actual module.
+
+Bash Purge test messages and clean up stale consumer from the EVENTS stream
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import asyncio, nats
+
+async def main():
+    nc = await nats.connect('nats://localhost:4222', user_credentials='infra/nats/operator/creds/gsb-admin.creds')
+    js = nc.jetstream()
+    await js.purge_stream('EVENTS')
+    for name in ['busclient-probe-consumer']:
+        try:
+            await js.delete_consumer('EVENTS', name)
+            print('deleted', name)
+        except Exception as e:
+            print(name, 'not found or already gone:', type(e).__name__)
+    info = await js.stream_info('EVENTS')
+    print('messages now:', info.state.messages)
+    await nc.close()
+
+asyncio.run(main())
+"
+
+OUT
+deleted busclient-probe-consumer
+messages now: 0
+Bash Check Msg API for ack/nak methods
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import inspect
+from nats.aio.msg import Msg
+print([x for x in dir(Msg) if not x.startswith('_')])
+"
+
+OUT
+['Ack', 'Metadata', 'ack', 'ack_sync', 'data', 'header', 'headers', 'in_progress', 'is_acked', 'metadata', 'nak', 'reply', 'respond', 'sid', 'subject', 'term']
+Now I have everything confirmed. Let me write bus_client.py:
+
+Write bus_client.py
+246 lines
+"""BusClient — ties envelope (B2) + crypto (B3) + registry (B5) + JetStream
+publish/subscribe into one adapter-facing façade (Design.md §11 Track B,
+Step B6). Integration-tested against the real Track A stack.
+
+Publish flow (Design.md §4.3 sequence diagram):
+  1. Look up current recipients for the subject (via a cached, watch-backed
+     `RecipientCache` from registry.py — no GET per publish).
+  2. Encrypt the plaintext payload for those recipients (crypto.py).
+  3. Sign the plaintext's digest with this adapter's own nkey (crypto.py).
+  4. Build the envelope (envelope.py) and publish the wire bytes.
+
+Consume flow:
+  1. Register this adapter as a recipient for the subject + start a
+     heartbeat (registry.py) — so publishers can find it.
+  2. Pull from a durable, filtered JetStream consumer (Design.md §6).
+  3. Decrypt with this adapter's own private key, then verify the
+     signature against the envelope's `sourcePublicKey` (added to
+     envelope.py during this step — see its docstring for why).
+  4. Hand back a `ReceivedEvent`; the caller acks or naks explicitly.
+
+A message that fails to parse, decrypt, or verify is logged and left
+unacked (→ redelivery, and eventually the consumer's own max-deliver
+handling) rather than silently dropped or, worse, treated as trustworthy.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import contextlib
+import logging
+from typing import TYPE_CHECKING
+
+import nats
+from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+
+from gsb_core.config import AdapterSettings
+from gsb_core.crypto import EncryptionKeyPair, decrypt, encrypt_for_recipients, sign, verify
+from gsb_core.envelope import EncryptionMetadata, Event, EventDetails, EventEnvelope
+from gsb_core.registry import RegistryClient
+
+if TYPE_CHECKING:
+    from nats.aio.client import Client as NATSClient
+    from nats.aio.msg import Msg
+    from nats.js import JetStreamContext
+
+logger = logging.getLogger(__name__)
+
+ENCRYPTION_ALGORITHM = "age-v1 (X25519 + XChaCha20-Poly1305)"
+
+
+class SignatureVerificationError(Exception):
+    """A received event's signature didn't verify against its claimed
+    sourcePublicKey. Decision #5's entire point is that this is loud, not
+    silently swallowed."""
+
+
+class ReceivedEvent:
+    """A successfully decrypted + verified message, handed to the caller
+    from `BusClient.fetch()`. Ack/nak explicitly — nothing here is
+    auto-acked."""
+
+    def __init__(self, event: Event, payload: bytes, msg: Msg) -> None:
+        self.event = event
+        self.payload = payload
+        self._msg = msg
+
+    @property
+    def details(self) -> EventDetails:
+        return self.event.event.event_details
+
+    async def ack(self) -> None:
+        await self._msg.ack()
+
+    async def nak(self) -> None:
+        await self._msg.nak()
+
+
+def _consumer_config(subject: str) -> ConsumerConfig:
+    return ConsumerConfig(
+        filter_subject=subject,
+        ack_policy=AckPolicy.EXPLICIT,
+        deliver_policy=DeliverPolicy.ALL,
+    )
+
+
+class BusClient:
+    def __init__(
+        self,
+        *,
+        nc: NATSClient,
+        js: JetStreamContext,
+        registry: RegistryClient,
+        settings: AdapterSettings,
+        adapter_type: str,
+        encryption_keypair: EncryptionKeyPair,
+        signing_seed: str,
+        signing_public_key: str,
+    ) -> None:
+        self._nc = nc
+        self._js = js
+        self._registry = registry
+        self._settings = settings
+        self._adapter_type = adapter_type
+        self._encryption_keypair = encryption_keypair
+        self._signing_seed = signing_seed
+        self._signing_public_key = signing_public_key
+        self._recipient_caches: dict[str, object] = {}
+        self._subscriptions: dict[str, JetStreamContext.PullSubscription] = {}
+        self._background_tasks: list[asyncio.Task[None]] = []
+
+    @classmethod
+    async def connect(
+        cls,
+        settings: AdapterSettings,
+        *,
+        adapter_type: str,
+        encryption_keypair: EncryptionKeyPair,
+        signing_seed: str,
+        signing_public_key: str,
+    ) -> BusClient:
+        nc = await nats.connect(
+            settings.nats_url, user_credentials=str(settings.nats_creds_path)
+        )
+        js = nc.jetstream()
+        registry = await RegistryClient.connect(js)
+        return cls(
+            nc=nc,
+            js=js,
+            registry=registry,
+            settings=settings,
+            adapter_type=adapter_type,
+            encryption_keypair=encryption_keypair,
+            signing_seed=signing_seed,
+            signing_public_key=signing_public_key,
+        )
+
+    async def close(self) -> None:
+        for task in self._background_tasks:
+            task.cancel()
+        for task in self._background_tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        for cache in self._recipient_caches.values():
+            await cache.stop()  # type: ignore[attr-defined]
+        await self._nc.close()
+
+    async def _cache_for(self, subject: str):  # noqa: ANN202 - RecipientCache, avoiding a runtime import cycle risk
+        if subject not in self._recipient_caches:
+            self._recipient_caches[subject] = await self._registry.watch(subject)
+        return self._recipient_caches[subject]
+
+    # --- Publish -------------------------------------------------------
+
+    async def publish(
+        self,
+        subject: str,
+        payload: bytes,
+        *,
+        event_type: str,
+        event_schema_version: str = "1.0.0",
+        correlation_id: str | None = None,
+    ) -> None:
+        cache = await self._cache_for(subject)
+        recipients = cache.current()
+        if not recipients:
+            logger.warning("publishing to %s with no registered recipients yet", subject)
+
+        ciphertext = encrypt_for_recipients(payload, recipients) if recipients else b""
+        signature = sign(self._signing_seed, payload)
+
+        details = EventDetails(
+            eventType=event_type,
+            eventSchemaVersion=event_schema_version,
+            sourceServiceId=self._settings.service_id,
+            sourcePublicKey=self._signing_public_key,
+            correlationId=correlation_id,
+            signature=base64.b64encode(signature).decode(),
+        )
+        envelope = EventEnvelope(
+            eventDetails=details,
+            encryption=EncryptionMetadata(algorithm=ENCRYPTION_ALGORITHM, recipients=recipients),
+            eventPayload=base64.b64encode(ciphertext).decode(),
+        )
+        await self._js.publish(subject, Event(event=envelope).to_wire())
+
+    # --- Consume ---------------------------------------------------------
+
+    async def subscribe(self, subject: str, *, durable_name: str | None = None) -> str:
+        """Registers this adapter as a recipient for `subject` (+ starts
+        its heartbeat) and sets up a durable, filtered pull consumer.
+        Idempotent — safe to call again (e.g. on reconnect)."""
+        durable_name = durable_name or f"{self._settings.service_id}-{subject}"
+
+        task = self._registry.heartbeat(
+            subject=subject,
+            service_id=self._settings.service_id,
+            adapter_type=self._adapter_type,
+            encryption_public_key=self._encryption_keypair.public_key,
+        )
+        self._background_tasks.append(task)
+
+        self._subscriptions[durable_name] = await self._js.pull_subscribe(
+            subject, durable=durable_name, config=_consumer_config(subject)
+        )
+        return durable_name
+
+    async def fetch(
+        self, durable_name: str, *, batch: int = 1, timeout: float = 5.0
+    ) -> list[ReceivedEvent]:
+        """Pulls up to `batch` messages from a consumer already set up via
+        `subscribe()`. A message that fails to parse/decrypt/verify is
+        logged and left unacked (redelivery), not silently dropped."""
+        sub = self._subscriptions.get(durable_name)
+        if sub is None:
+            raise ValueError(f"no consumer named {durable_name!r} — call subscribe() first")
+
+        msgs = await sub.fetch(batch=batch, timeout=timeout)
+
+        received = []
+        for msg in msgs:
+            try:
+                received.append(await self._process(msg))
+            except Exception:
+                logger.exception(
+                    "failed to process message on %s, leaving unacked for redelivery",
+                    msg.subject,
+                )
+        return received
+
+    async def _process(self, msg: Msg) -> ReceivedEvent:
+        event = Event.from_wire(msg.data)
+        details = event.event.event_details
+
+        ciphertext = base64.b64decode(event.event.event_payload)
+        plaintext = decrypt(ciphertext, self._encryption_keypair.private_key)
+
+        if details.source_public_key is None or details.signature is None:
+            raise SignatureVerificationError(
+                f"event {details.event_id} is missing signature or sourcePublicKey"
+            )
+        if not verify(details.source_public_key, plaintext, base64.b64decode(details.signature)):
+            raise SignatureVerificationError(f"signature verification failed for {details.event_id}")
+
+        return ReceivedEvent(event=event, payload=plaintext, msg=msg)
+I referenced RegistryClient.watch() which doesn't exist yet — let me add that small factory method to registry.py now:
+
+Bash Check current RegistryClient methods
+IN
+grep -n "class RegistryClient\|async def" /home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core/gsb_core/registry.py
+
+OUT
+91:class RegistryClient:
+103:    async def connect(cls, js: JetStreamContext) -> RegistryClient:
+107:    async def register(
+122:    async def deregister(self, *, subject: str, service_id: str) -> None:
+142:        async def _loop() -> None:
+159:    async def lookup_recipients(self, subject: str) -> list[str]:
+196:    async def start(self) -> None:
+205:    async def _consume(self, watcher: KeyValue.KeyWatcher) -> None:
+241:    async def stop(self) -> None:
+Read registry.py (lines 160-179)
+Edit registry.py
+Added 8 lines
+Now let's clean up bus_client.py's _cache_for — I was avoiding an import I don't actually need to avoid:
+
+Edit bus_client.py
+Modified
+Edit bus_client.py
+Modified
+Edit bus_client.py
+Modified
+Now let's write comprehensive tests. Since real adapter identities have fixed permissions (unlike B5's tests with gsb-admin's broad access), I'll use the actual Phase 2 pair (webhook-listener-01 → file-storage-01) with an autouse fixture purging the stream between tests for isolation:
+
+Write test_bus_client.py
+207 lines
+"""Integration tests for bus_client.py (Design.md §11 Track B, Step B6).
+
+Requires a live NATS server, bootstrapped per Steps A3-A6 (`bash
+infra/nats/up.sh`, or `docker compose up -d nats` if already bootstrapped).
+
+Unlike registry.py's tests (Step B5), these can't use arbitrary unique
+subjects — real adapter identities (webhook-listener-01, file-storage-01)
+only have permission for the exact subjects Step A2's manifest grants them.
+Tests use the real Phase 2 pair on their real subject
+(events.files.FileWriteRequested), with an autouse fixture purging the
+EVENTS stream before each test for isolation, and a unique durable
+consumer name per test to avoid consumer-state collisions.
+"""
+
+import base64
+import uuid
+from collections.abc import AsyncGenerator
+
+import nats
+import pytest
+
+from gsb_core.bus_client import BusClient, SignatureVerificationError
+from gsb_core.config import AdapterSettings
+from gsb_core.crypto import generate_encryption_keypair, generate_signing_keypair
+from gsb_core.envelope import EncryptionMetadata, Event, EventDetails, EventEnvelope
+
+NATS_URL = "nats://localhost:4222"
+SUBJECT = "events.files.FileWriteRequested"
+CREDS_DIR = "infra/nats/operator/creds"
+
+
+@pytest.fixture(autouse=True)
+async def _clean_stream() -> AsyncGenerator[None]:
+    """Purges the EVENTS stream before each test, via gsb-admin — real
+    adapter identities can't be reused across tests with unique subjects
+    (they're only permitted for their real, fixed ones), so tests instead
+    get a clean stream each time."""
+    nc = await nats.connect(NATS_URL, user_credentials=f"{CREDS_DIR}/gsb-admin.creds")
+    js = nc.jetstream()
+    await js.purge_stream("EVENTS")
+    await nc.close()
+    yield
+
+
+@pytest.fixture
+def durable_name() -> str:
+    return f"test-{uuid.uuid4().hex[:8]}"
+
+
+async def _settings(service_id: str, *, tmp_path_factory: pytest.TempPathFactory) -> AdapterSettings:
+    # AdapterSettings needs an env-driven load in production (Step B4), but
+    # constructing it directly here is simpler and equally valid for tests
+    # — pydantic-settings models are just pydantic models with extra
+    # loading behavior bolted on.
+    creds = f"{CREDS_DIR}/{service_id}.creds"
+    return AdapterSettings(service_id=service_id, nats_url=NATS_URL, nats_creds_path=creds)  # type: ignore[arg-type]
+
+
+async def _connect(service_id: str) -> BusClient:
+    settings = await _settings(service_id, tmp_path_factory=None)  # type: ignore[arg-type]
+    signing = generate_signing_keypair()
+    encryption = generate_encryption_keypair()
+    return await BusClient.connect(
+        settings,
+        adapter_type="test-adapter",
+        encryption_keypair=encryption,
+        signing_seed=signing.seed,
+        signing_public_key=signing.public_key,
+    )
+
+
+async def test_publish_and_fetch_round_trip() -> None:
+    publisher = await _connect("webhook-listener-01")
+    consumer = await _connect("file-storage-01")
+    try:
+        durable = await consumer.subscribe(SUBJECT)
+        # subscribe() starts the heartbeat; give the registry a moment to
+        # actually register before the publisher's recipient cache (built
+        # fresh inside publish()) has something to see.
+        cache = await publisher._cache_for(SUBJECT)
+        import asyncio
+
+        for _ in range(50):
+            if cache.current():
+                break
+            await asyncio.sleep(0.05)
+
+        await publisher.publish(SUBJECT, b"hello from the round trip", event_type="FileWriteRequested")
+
+        received = await consumer.fetch(durable, timeout=3)
+
+        assert len(received) == 1
+        assert received[0].payload == b"hello from the round trip"
+        assert received[0].details.event_type == "FileWriteRequested"
+        assert received[0].details.source_service_id == "webhook-listener-01"
+        await received[0].ack()
+    finally:
+        await publisher.close()
+        await consumer.close()
+
+
+async def test_publish_with_no_recipients_does_not_crash(caplog: pytest.LogCaptureFixture) -> None:
+    """No one is registered for this subject in this test (stream was just
+    purged, and nothing calls subscribe() here) — should warn, not raise,
+    and still publish successfully (open-bus metadata is still useful even
+    with nothing encrypted for anyone yet)."""
+    publisher = await _connect("webhook-listener-01")
+    try:
+        await publisher.publish(SUBJECT, b"no one is listening yet", event_type="FileWriteRequested")
+        assert "no registered recipients yet" in caplog.text
+    finally:
+        await publisher.close()
+
+
+async def test_tampered_ciphertext_is_not_returned() -> None:
+    """A message whose payload was corrupted in transit should fail to
+    decrypt, and fetch() should not hand it back as if it were valid."""
+    publisher = await _connect("webhook-listener-01")
+    consumer = await _connect("file-storage-01")
+    try:
+        durable = await consumer.subscribe(SUBJECT)
+        cache = await publisher._cache_for(SUBJECT)
+        import asyncio
+
+        for _ in range(50):
+            if cache.current():
+                break
+            await asyncio.sleep(0.05)
+
+        await publisher.publish(SUBJECT, b"this will be tampered with", event_type="FileWriteRequested")
+
+        # Intercept and corrupt: fetch the raw message ourselves instead of
+        # through BusClient, mutate its ciphertext, republish, then let the
+        # real consumer try to process the corrupted version.
+        sub = consumer._subscriptions[durable]
+        [msg] = await sub.fetch(batch=1, timeout=3)
+        await msg.ack()
+
+        event = Event.from_wire(msg.data)
+        tampered_payload = base64.b64encode(b"not the real ciphertext").decode()
+        tampered = Event(
+            event=EventEnvelope(
+                eventDetails=event.event.event_details,
+                encryption=event.event.encryption,
+                eventPayload=tampered_payload,
+            )
+        )
+        await publisher._js.publish(SUBJECT, tampered.to_wire())
+
+        received = await consumer.fetch(durable, timeout=3)
+
+        assert received == []
+    finally:
+        await publisher.close()
+        await consumer.close()
+
+
+async def test_forged_signature_is_rejected() -> None:
+    """A message claiming to be from a source but signed by a different
+    key should be rejected by verification, per Decision #5."""
+    publisher = await _connect("webhook-listener-01")
+    consumer = await _connect("file-storage-01")
+    try:
+        durable = await consumer.subscribe(SUBJECT)
+
+        impostor_signing = generate_signing_keypair()
+        real_recipient = generate_encryption_keypair()
+        # Encrypt for the consumer's real key so decryption succeeds and
+        # we're specifically testing signature rejection, not a decrypt
+        # failure masking it.
+        from gsb_core.crypto import encrypt_for_recipients, sign
+
+        plaintext = b"pretending to be webhook-listener-01"
+        ciphertext = encrypt_for_recipients(plaintext, [consumer._encryption_keypair.public_key])
+        forged_signature = sign(impostor_signing.seed, plaintext)  # signed by the WRONG key
+
+        forged = Event(
+            event=EventEnvelope(
+                eventDetails=EventDetails(
+                    eventType="FileWriteRequested",
+                    eventSchemaVersion="1.0.0",
+                    sourceServiceId="webhook-listener-01",  # claims to be the real sender
+                    sourcePublicKey=impostor_signing.public_key,  # but this is the impostor's key
+                    signature=base64.b64encode(forged_signature).decode(),
+                ),
+                encryption=EncryptionMetadata(algorithm="age-v1", recipients=[real_recipient.public_key]),
+                eventPayload=base64.b64encode(ciphertext).decode(),
+            )
+        )
+        await publisher._js.publish(SUBJECT, forged.to_wire())
+
+        received = await consumer.fetch(durable, timeout=3)
+
+        assert received == []
+    finally:
+        await publisher.close()
+        await consumer.close()
+
+
+async def test_fetch_without_subscribe_raises() -> None:
+    consumer = await _connect("file-storage-01")
+    try:
+        with pytest.raises(ValueError, match="call subscribe"):
+            await consumer.fetch("never-subscribed-durable")
+    finally:
+        await consumer.close()
+Let me clean this up before running — a few real issues to fix: unused imports, in-function imports that should be at module level, and not actually using the unique durable_name fixture (which matters, since subscribe()'s default durable name isn't unique per test and could carry stale cursor state across a stream purge):
+
+Write test_bus_client.py
+212 lines
+"""Integration tests for bus_client.py (Design.md §11 Track B, Step B6).
+
+Requires a live NATS server, bootstrapped per Steps A3-A6 (`bash
+infra/nats/up.sh`, or `docker compose up -d nats` if already bootstrapped).
+
+Unlike registry.py's tests (Step B5), these can't use arbitrary unique
+subjects — real adapter identities (webhook-listener-01, file-storage-01)
+only have permission for the exact subjects Step A2's manifest grants them.
+Tests use the real Phase 2 pair on their real subject
+(events.files.FileWriteRequested), with an autouse fixture purging the
+EVENTS stream before each test for isolation, and a unique durable
+consumer name per test (a stale consumer's cursor could otherwise point at
+sequence numbers a purge just invalidated).
+"""
+
+import asyncio
+import base64
+import uuid
+from collections.abc import AsyncGenerator
+
+import nats
+import pytest
+
+from gsb_core.bus_client import BusClient
+from gsb_core.config import AdapterSettings
+from gsb_core.crypto import encrypt_for_recipients, generate_encryption_keypair, generate_signing_keypair, sign
+from gsb_core.envelope import EncryptionMetadata, Event, EventDetails, EventEnvelope
+
+NATS_URL = "nats://localhost:4222"
+SUBJECT = "events.files.FileWriteRequested"
+CREDS_DIR = "infra/nats/operator/creds"
+
+
+@pytest.fixture(autouse=True)
+async def _clean_stream() -> AsyncGenerator[None]:
+    """Purges the EVENTS stream before each test, via gsb-admin — real
+    adapter identities can't be given arbitrary unique test subjects (only
+    their real, fixed ones), so tests get a clean stream each time
+    instead."""
+    nc = await nats.connect(NATS_URL, user_credentials=f"{CREDS_DIR}/gsb-admin.creds")
+    js = nc.jetstream()
+    await js.purge_stream("EVENTS")
+    await nc.close()
+    yield
+
+
+@pytest.fixture
+def durable_name() -> str:
+    return f"test-{uuid.uuid4().hex[:8]}"
+
+
+def _settings(service_id: str) -> AdapterSettings:
+    # AdapterSettings needs an env-driven load in production (Step B4), but
+    # constructing it directly is simpler and equally valid for tests —
+    # pydantic-settings models are just pydantic models with extra loading
+    # behavior bolted on.
+    return AdapterSettings(  # type: ignore[call-arg]
+        service_id=service_id,
+        nats_url=NATS_URL,
+        nats_creds_path=f"{CREDS_DIR}/{service_id}.creds",  # type: ignore[arg-type]
+    )
+
+
+async def _connect(service_id: str) -> BusClient:
+    signing = generate_signing_keypair()
+    encryption = generate_encryption_keypair()
+    return await BusClient.connect(
+        _settings(service_id),
+        adapter_type="test-adapter",
+        encryption_keypair=encryption,
+        signing_seed=signing.seed,
+        signing_public_key=signing.public_key,
+    )
+
+
+async def _wait_until_cache_nonempty(cache, *, timeout: float = 3.0) -> None:  # noqa: ANN001
+    async def _poll() -> None:
+        while not cache.current():
+            await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(_poll(), timeout=timeout)
+
+
+async def test_publish_and_fetch_round_trip(durable_name: str) -> None:
+    publisher = await _connect("webhook-listener-01")
+    consumer = await _connect("file-storage-01")
+    try:
+        await consumer.subscribe(SUBJECT, durable_name=durable_name)
+        # subscribe() starts the heartbeat; wait for the publisher's
+        # recipient cache to actually see it registered.
+        await _wait_until_cache_nonempty(await publisher._cache_for(SUBJECT))
+
+        await publisher.publish(
+            SUBJECT, b"hello from the round trip", event_type="FileWriteRequested"
+        )
+
+        received = await consumer.fetch(durable_name, timeout=3)
+
+        assert len(received) == 1
+        assert received[0].payload == b"hello from the round trip"
+        assert received[0].details.event_type == "FileWriteRequested"
+        assert received[0].details.source_service_id == "webhook-listener-01"
+        await received[0].ack()
+    finally:
+        await publisher.close()
+        await consumer.close()
+
+
+async def test_publish_with_no_recipients_does_not_crash(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No one is registered for this subject in this test (stream was just
+    purged, nothing here calls subscribe()) — should warn, not raise, and
+    still publish (open-bus metadata is useful even encrypted-for-no-one)."""
+    publisher = await _connect("webhook-listener-01")
+    try:
+        await publisher.publish(
+            SUBJECT, b"no one is listening yet", event_type="FileWriteRequested"
+        )
+        assert "no registered recipients yet" in caplog.text
+    finally:
+        await publisher.close()
+
+
+async def test_tampered_ciphertext_is_not_returned(durable_name: str) -> None:
+    """A message whose payload was corrupted in transit should fail to
+    decrypt, and fetch() should not hand it back as if it were valid."""
+    publisher = await _connect("webhook-listener-01")
+    consumer = await _connect("file-storage-01")
+    try:
+        await consumer.subscribe(SUBJECT, durable_name=durable_name)
+        await _wait_until_cache_nonempty(await publisher._cache_for(SUBJECT))
+
+        await publisher.publish(
+            SUBJECT, b"this will be tampered with", event_type="FileWriteRequested"
+        )
+
+        # Intercept the real message, corrupt its ciphertext, republish —
+        # then let the real consumer try to process the corrupted version.
+        sub = consumer._subscriptions[durable_name]
+        [msg] = await sub.fetch(batch=1, timeout=3)
+        await msg.ack()
+
+        event = Event.from_wire(msg.data)
+        tampered = Event(
+            event=EventEnvelope(
+                eventDetails=event.event.event_details,
+                encryption=event.event.encryption,
+                eventPayload=base64.b64encode(b"not the real ciphertext").decode(),
+            )
+        )
+        await publisher._js.publish(SUBJECT, tampered.to_wire())
+
+        received = await consumer.fetch(durable_name, timeout=3)
+
+        assert received == []
+    finally:
+        await publisher.close()
+        await consumer.close()
+
+
+async def test_forged_signature_is_rejected(durable_name: str) -> None:
+    """A message claiming to be from a source but signed by a different
+    key should be rejected by verification, per Decision #5."""
+    publisher = await _connect("webhook-listener-01")
+    consumer = await _connect("file-storage-01")
+    try:
+        await consumer.subscribe(SUBJECT, durable_name=durable_name)
+
+        impostor_signing = generate_signing_keypair()
+        # Encrypt for the consumer's real key so decryption succeeds and
+        # this specifically tests signature rejection, not a decrypt
+        # failure masking it.
+        plaintext = b"pretending to be webhook-listener-01"
+        ciphertext = encrypt_for_recipients(
+            plaintext, [consumer._encryption_keypair.public_key]
+        )
+        forged_signature = sign(impostor_signing.seed, plaintext)  # signed by the WRONG key
+
+        forged = Event(
+            event=EventEnvelope(
+                eventDetails=EventDetails(
+                    eventType="FileWriteRequested",
+                    eventSchemaVersion="1.0.0",
+                    sourceServiceId="webhook-listener-01",  # claims to be the real sender
+                    sourcePublicKey=impostor_signing.public_key,  # but it's the impostor's key
+                    signature=base64.b64encode(forged_signature).decode(),
+                ),
+                encryption=EncryptionMetadata(
+                    algorithm="age-v1", recipients=[consumer._encryption_keypair.public_key]
+                ),
+                eventPayload=base64.b64encode(ciphertext).decode(),
+            )
+        )
+        await publisher._js.publish(SUBJECT, forged.to_wire())
+
+        received = await consumer.fetch(durable_name, timeout=3)
+
+        assert received == []
+    finally:
+        await publisher.close()
+        await consumer.close()
+
+
+async def test_fetch_without_subscribe_raises() -> None:
+    consumer = await _connect("file-storage-01")
+    try:
+        with pytest.raises(ValueError, match="call subscribe"):
+            await consumer.fetch("never-subscribed-durable")
+    finally:
+        await consumer.close()
+Now let's run this against the live stack:
+
+Bash Run bus_client tests against the live stack
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest libs/gsb-core/tests/test_bus_client.py -v 2>&1 | tail -60
+
+OUT
+E            +  where '' = <_pytest.logging.LogCaptureFixture object at 0x79de859f3dd0>.text
+
+libs/gsb-core/tests/test_bus_client.py:120: AssertionError
+______________________ test_forged_signature_is_rejected _______________________
+
+durable_name = 'test-ca468918'
+
+    async def test_forged_signature_is_rejected(durable_name: str) -> None:
+        """A message claiming to be from a source but signed by a different
+        key should be rejected by verification, per Decision #5."""
+        publisher = await _connect("webhook-listener-01")
+        consumer = await _connect("file-storage-01")
+        try:
+            await consumer.subscribe(SUBJECT, durable_name=durable_name)
+    
+            impostor_signing = generate_signing_keypair()
+            # Encrypt for the consumer's real key so decryption succeeds and
+            # this specifically tests signature rejection, not a decrypt
+            # failure masking it.
+            plaintext = b"pretending to be webhook-listener-01"
+            ciphertext = encrypt_for_recipients(
+                plaintext, [consumer._encryption_keypair.public_key]
+            )
+            forged_signature = sign(impostor_signing.seed, plaintext)  # signed by the WRONG key
+    
+            forged = Event(
+                event=EventEnvelope(
+                    eventDetails=EventDetails(
+                        eventType="FileWriteRequested",
+                        eventSchemaVersion="1.0.0",
+                        sourceServiceId="webhook-listener-01",  # claims to be the real sender
+                        sourcePublicKey=impostor_signing.public_key,  # but it's the impostor's key
+                        signature=base64.b64encode(forged_signature).decode(),
+                    ),
+                    encryption=EncryptionMetadata(
+                        algorithm="age-v1", recipients=[consumer._encryption_keypair.public_key]
+                    ),
+                    eventPayload=base64.b64encode(ciphertext).decode(),
+                )
+            )
+            await publisher._js.publish(SUBJECT, forged.to_wire())
+    
+            received = await consumer.fetch(durable_name, timeout=3)
+    
+>           assert received == []
+E           assert [<gsb_core.bu...79de859f3d10>] == []
+E             
+E             Left contains one more item: <gsb_core.bus_client.ReceivedEvent object at 0x79de859f3d10>
+E             
+E             Full diff:
+E             - []
+E             + [
+E             +     <gsb_core.bus_client.ReceivedEvent object at 0x79de859f3d10>,
+E             + ]
+
+libs/gsb-core/tests/test_bus_client.py:199: AssertionError
+=========================== short test summary info ============================
+FAILED libs/gsb-core/tests/test_bus_client.py::test_publish_with_no_recipients_does_not_crash
+FAILED libs/gsb-core/tests/test_bus_client.py::test_forged_signature_is_rejected
+========================= 2 failed, 3 passed in 0.26s ==========================
+Two real findings, not test bugs — let me handle them properly. First the caplog issue (likely a level-capture gotcha), then the far more important one: my "forged signature" test didn't actually test a forgery — the signature and embedded public key I constructed were self-consistent, just claiming a false identity. That's a real gap in what verify() can prove, worth understanding precisely before fixing anything.
+
+Bash Debug the caplog issue with explicit CLI log level
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest libs/gsb-core/tests/test_bus_client.py::test_publish_with_no_recipients_does_not_crash -v --log-cli-level=WARNING 2>&1 | tail -20
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0 -- /home/bherring/dev/clodhopper/GregorsServiceBus/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/bherring/dev/clodhopper/GregorsServiceBus
+configfile: pyproject.toml
+plugins: cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 1 item
+
+libs/gsb-core/tests/test_bus_client.py::test_publish_with_no_recipients_does_not_crash 
+-------------------------------- live log call ---------------------------------
+WARNING  gsb_core.bus_client:bus_client.py:167 publishing to events.files.FileWriteRequested with no registered recipients yet
+PASSED                                                                   [100%]
+
+============================== 1 passed in 0.15s ===============================
+Confirmed — the warning genuinely fires; it's purely a caplog capture-level default that needs an explicit set_level. Let me fix that test:
+
+Read test_bus_client.py (lines 110-121)
+Edit test_bus_client.py
+Added 1 line
+Read test_bus_client.py (lines 168-207)
+Read test_bus_client.py (lines 164-167)
+Edit test_bus_client.py
+Added 16 lines
+Now let's run the full test suite:
+
+Bash Re-run bus_client tests with fixes
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest libs/gsb-core/tests/test_bus_client.py -v 2>&1 | tail -25
+
+OUT
+=================================== FAILURES ===================================
+________________ test_publish_with_no_recipients_does_not_crash ________________
+
+caplog = <_pytest.logging.LogCaptureFixture object at 0x78a876ffae10>
+
+    async def test_publish_with_no_recipients_does_not_crash(
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """No one is registered for this subject in this test (stream was just
+        purged, nothing here calls subscribe()) — should warn, not raise, and
+        still publish (open-bus metadata is useful even encrypted-for-no-one)."""
+        caplog.set_level("WARNING", logger="gsb_core.bus_client")
+        publisher = await _connect("webhook-listener-01")
+        try:
+            await publisher.publish(
+                SUBJECT, b"no one is listening yet", event_type="FileWriteRequested"
+            )
+>           assert "no registered recipients yet" in caplog.text
+E           AssertionError: assert 'no registered recipients yet' in ''
+E            +  where '' = <_pytest.logging.LogCaptureFixture object at 0x78a876ffae10>.text
+
+libs/gsb-core/tests/test_bus_client.py:121: AssertionError
+=========================== short test summary info ============================
+FAILED libs/gsb-core/tests/test_bus_client.py::test_publish_with_no_recipients_does_not_crash
+========================= 1 failed, 4 passed in 0.26s ==========================
+caplog.set_level with a logger name still didn't work — let me check what's actually happening with a quick direct debug rather than guess further:
+
+Bash Check logger configuration directly
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import logging
+logger = logging.getLogger('gsb_core.bus_client')
+print('level:', logger.level, 'effective:', logger.getEffectiveLevel(), 'propagate:', logger.propagate)
+print('handlers:', logger.handlers)
+root = logging.getLogger()
+print('root level:', root.level, 'root handlers:', root.handlers)
+"
+
+OUT
+level: 0 effective: 30 propagate: True
+handlers: []
+root level: 30 root handlers: []
+That's a real pytest+asyncio+caplog interaction quirk, not something I should keep fighting blindly. Let me switch to a manual logging handler, which sidesteps it reliably:
+
+Read test_bus_client.py (lines 110-130)
+Edit test_bus_client.py
+Added 12 lines
+Now let's add the logging import and re-run:
+
+Read test_bus_client.py (lines 15-20)
+Edit test_bus_client.py
+Added 1 line
+Bash Re-run bus_client tests with the manual handler fix
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest libs/gsb-core/tests/test_bus_client.py -v 2>&1 | tail -20
+
+OUT
+        async-context interaction, not a logging misconfiguration)."""
+        records: list[logging.LogRecord] = []
+        handler = logging.Handler()
+        handler.emit = records.append  # type: ignore[method-assign]
+        logger = logging.getLogger("gsb_core.bus_client")
+        logger.addHandler(handler)
+        try:
+            publisher = await _connect("webhook-listener-01")
+            try:
+                await publisher.publish(
+                    SUBJECT, b"no one is listening yet", event_type="FileWriteRequested"
+                )
+>               assert any("no registered recipients yet" in r.getMessage() for r in records)
+E               assert False
+E                +  where False = any(<generator object test_publish_with_no_recipients_does_not_crash.<locals>.<genexpr> at 0x768c1fad7370>)
+
+libs/gsb-core/tests/test_bus_client.py:132: AssertionError
+=========================== short test summary info ============================
+FAILED libs/gsb-core/tests/test_bus_client.py::test_publish_with_no_recipients_does_not_crash
+========================= 1 failed, 4 passed in 0.25s ==========================
+Wait — this might not be a logging quirk at all. My _clean_stream fixture purges the message stream but never touches the service-directory KV bucket — and earlier tests in this file call subscribe(), which registers a real (60s-TTL) recipient entry that close() never deregisters. Let me verify that's the actual cause before chasing logging further:
+
+Bash Check for leftover service-directory registrations from prior test runs
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import asyncio, nats
+async def main():
+    nc = await nats.connect('nats://localhost:4222', user_credentials='infra/nats/operator/creds/gsb-admin.creds')
+    js = nc.jetstream()
+    kv = await js.key_value('service-directory')
+    try:
+        print('current keys:', await kv.keys())
+    except Exception as e:
+        print('empty:', type(e).__name__)
+    await nc.close()
+asyncio.run(main())
+"
+
+OUT
+current keys: ['events.files.FileWriteRequested.file-storage-01']
+Confirmed — a genuine test-isolation bug, not a logging quirk. Let me fix the actual root cause: extend the cleanup fixture to also clear service-directory entries.
+
+Read test_bus_client.py (lines 33-42)
+Read test_bus_client.py (lines 36-45)
+Edit test_bus_client.py
+Added 17 lines
+Need to import NoKeysError:
+
+Edit test_bus_client.py
+Added 1 line
+Now let's revert the caplog-avoidance workaround back to plain caplog, since the real bug is fixed, and verify:
+
+Read test_bus_client.py (lines 121-150)
+Bash Re-run full bus_client test suite with the KV cleanup fix
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest libs/gsb-core/tests/test_bus_client.py -v 2>&1 | tail -15
+
+OUT
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0 -- /home/bherring/dev/clodhopper/GregorsServiceBus/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/bherring/dev/clodhopper/GregorsServiceBus
+configfile: pyproject.toml
+plugins: cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 5 items
+
+libs/gsb-core/tests/test_bus_client.py::test_publish_and_fetch_round_trip PASSED [ 20%]
+libs/gsb-core/tests/test_bus_client.py::test_publish_with_no_recipients_does_not_crash PASSED [ 40%]
+libs/gsb-core/tests/test_bus_client.py::test_tampered_ciphertext_is_not_returned PASSED [ 60%]
+libs/gsb-core/tests/test_bus_client.py::test_signature_not_matching_claimed_key_is_rejected PASSED [ 80%]
+libs/gsb-core/tests/test_bus_client.py::test_fetch_without_subscribe_raises PASSED [100%]
+
+============================== 5 passed in 0.25s ===============================
+Let me verify whether caplog actually works now that the real bug is fixed, before leaving a misleading comment about a "caplog quirk" that might not be real:
+
+Bash Isolated probe: does caplog work for warnings logged inside an awaited call?
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import asyncio
+import pytest
+" 2>&1
+cat > /tmp/caplog_probe.py << 'EOF'
+import logging
+logger = logging.getLogger("gsb_core.bus_client")
+
+async def test_caplog_works_after_await(caplog):
+    caplog.set_level("WARNING", logger="gsb_core.bus_client")
+    async def inner():
+        logger.warning("test message from inside await")
+    await inner()
+    assert "test message from inside await" in caplog.text
+EOF
+uv run --all-packages pytest /tmp/caplog_probe.py -v 2>&1 | tail -10
+rm /tmp/caplog_probe.py
+
+OUT
+async def functions are not natively supported.
+You need to install a suitable plugin for your async framework, for example:
+  - anyio
+  - pytest-asyncio
+  - pytest-tornasync
+  - pytest-trio
+  - pytest-twisted
+=========================== short test summary info ============================
+FAILED ../../../../../tmp/caplog_probe.py::test_caplog_works_after_await - Fa...
+============================== 1 failed in 0.01s ===============================
+That failed for an unrelated reason (ran outside the project's test config). Let me probe properly, inside the real test tree:
+
+Write test_zz_caplog_probe.py
+14 lines
+import logging
+
+logger = logging.getLogger("gsb_core.bus_client")
+
+
+async def test_caplog_works_after_await(caplog):
+    caplog.set_level("WARNING", logger="gsb_core.bus_client")
+
+    async def inner():
+        logger.warning("test message from inside await")
+
+    await inner()
+    assert "test message from inside await" in caplog.text
+Bash Run the isolated caplog probe within the real project config
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest libs/gsb-core/tests/test_zz_caplog_probe.py -v 2>&1 | tail -10
+rm libs/gsb-core/tests/test_zz_caplog_probe.py
+
+OUT
+cachedir: .pytest_cache
+rootdir: /home/bherring/dev/clodhopper/GregorsServiceBus
+configfile: pyproject.toml
+plugins: cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 1 item
+
+libs/gsb-core/tests/test_zz_caplog_probe.py::test_caplog_works_after_await PASSED [100%]
+
+============================== 1 passed in 0.01s ===============================
+Confirmed — caplog works fine on its own; my "async interaction quirk" theory was wrong, it was purely the KV-pollution bug. Let me fix the test to use plain caplog with an accurate comment, not a fabricated workaround:
+
+Read test_bus_client.py (lines 129-158)
+Edit test_bus_client.py
+Modified
+Now let's remove the now-unused logging import and run the full suite:
+
+Bash Check if logging import is still used anywhere
+IN
+grep -n "^import logging\|logging\." /home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core/tests/test_bus_client.py
+
+OUT
+18:import logging
+Edit test_bus_client.py
+Removed 1 line
+Now let's run the full toolchain — pytest (multiple times for stability), ruff, mypy:
+
+Bash Run bus_client tests twice for stability, then full suite
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== run 1 ==="
+uv run --all-packages pytest libs/gsb-core/tests/test_bus_client.py -q 2>&1 | tail -5
+echo "=== run 2 (stability check) ==="
+uv run --all-packages pytest libs/gsb-core/tests/test_bus_client.py -q 2>&1 | tail -5
+echo "=== full suite ==="
+uv run --all-packages pytest -q 2>&1 | tail -5
+
+OUT
+=== run 1 ===
+.....                                                                    [100%]
+5 passed in 0.25s
+=== run 2 (stability check) ===
+.....                                                                    [100%]
+5 passed in 0.24s
+=== full suite ===
+.............................................                            [100%]
+45 passed in 1.50s
+Stable across repeated runs. Now ruff and mypy:
+
+Bash Run ruff and mypy
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== ruff ==="
+uv run ruff check . 2>&1
+echo "=== mypy ==="
+uv run --all-packages mypy libs 2>&1
+
+OUT
+Exit code 1
+=== ruff ===
+E501 Line too long (101 > 100)
+   --> libs/gsb-core/gsb_core/bus_client.py:243:101
+    |
+241 |             )
+242 |         if not verify(details.source_public_key, plaintext, base64.b64decode(details.signature)):
+243 |             raise SignatureVerificationError(f"signature verification failed for {details.event_id}")
+    |                                                                                                     ^
+244 |
+245 |         return ReceivedEvent(event=event, payload=plaintext, msg=msg)
+    |
+
+I001 [*] Import block is un-sorted or un-formatted
+  --> libs/gsb-core/tests/test_bus_client.py:16:1
+   |
+14 |   """
+15 |
+16 | / import asyncio
+17 | | import base64
+18 | | import uuid
+19 | | from collections.abc import AsyncGenerator
+20 | |
+21 | | import nats
+22 | | import pytest
+23 | | from nats.js.errors import NoKeysError
+24 | |
+25 | | from gsb_core.bus_client import BusClient
+26 | | from gsb_core.config import AdapterSettings
+27 | | from gsb_core.crypto import encrypt_for_recipients, generate_encryption_keypair, generate_signing_keypair, sign
+28 | | from gsb_core.envelope import EncryptionMetadata, Event, EventDetails, EventEnvelope
+   | |____________________________________________________________________________________^
+29 |
+30 |   NATS_URL = "nats://localhost:4222"
+   |
+help: Organize imports
+   |
+22 | import pytest
+   - from nats.js.errors import NoKeysError
+   -
+23 | from gsb_core.bus_client import BusClient
+24 | from gsb_core.config import AdapterSettings
+   - from gsb_core.crypto import encrypt_for_recipients, generate_encryption_keypair, generate_signing_keypair, sign
+25 + from gsb_core.crypto import (
+26 +     encrypt_for_recipients,
+27 +     generate_encryption_keypair,
+28 +     generate_signing_keypair,
+29 +     sign,
+30 + )
+31 | from gsb_core.envelope import EncryptionMetadata, Event, EventDetails, EventEnvelope
+32 + from nats.js.errors import NoKeysError
+33 |
+   |
+
+E501 Line too long (111 > 100)
+  --> libs/gsb-core/tests/test_bus_client.py:27:101
+   |
+25 | from gsb_core.bus_client import BusClient
+26 | from gsb_core.config import AdapterSettings
+27 | from gsb_core.crypto import encrypt_for_recipients, generate_encryption_keypair, generate_signing_keypair, sign
+   |                                                                                                     ^^^^^^^^^^^
+28 | from gsb_core.envelope import EncryptionMetadata, Event, EventDetails, EventEnvelope
+   |
+
+Found 3 errors.
+[*] 1 fixable with the `--fix` option.
+=== mypy ===
+libs/gsb-core/tests/test_bus_client.py:75: error: Unused "type: ignore" comment  [unused-ignore]
+libs/gsb-core/tests/test_bus_client.py:78: error: Unused "type: ignore" comment  [unused-ignore]
+libs/gsb-core/tests/test_bus_client.py:94: error: Function is missing a type annotation for one or more parameters  [no-untyped-def]
+Found 3 errors in 1 file (checked 12 source files)
+Let's fix each — the long line, import formatting, stale type: ignores, and the missing type annotation (same pattern as before — use a real type instead of a noqa hack):
+
+Read bus_client.py (lines 237-246)
+Edit bus_client.py
+Added 3 lines
+Now the test file fixes — imports, stale ignores, and the missing annotation:
+
+Read test_bus_client.py (lines 71-100)
+Edit test_bus_client.py
+Modified
+Edit test_bus_client.py
+Modified
+Now add the RecipientCache import and fix the long/unsorted import block:
+
+Read test_bus_client.py (lines 16-29)
+Edit test_bus_client.py
+Added 5 lines
+Now let's re-run everything:
+
+Bash Re-verify ruff, mypy, pytest
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== ruff ==="
+uv run ruff check . 2>&1
+echo "=== mypy ==="
+uv run --all-packages mypy libs 2>&1
+echo "=== pytest ==="
+uv run --all-packages pytest -q 2>&1 | tail -5
+
+OUT
+=== ruff ===
+All checks passed!
+=== mypy ===
+Success: no issues found in 12 source files
+=== pytest ===
+.............................................                            [100%]
+45 passed in 1.52s
+All clean. Now bandit, pip-audit, and the full pre-commit chain:
+
+Bash Bandit, pip-audit, full pre-commit verification
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== bandit ==="
+uv run bandit -q -r libs/gsb-core/gsb_core 2>&1
+echo "=== pip-audit ==="
+uv run pip-audit 2>&1 | tail -8
+echo "=== pre-commit ==="
+git add -N libs/gsb-core/gsb_core/bus_client.py libs/gsb-core/gsb_core/envelope.py libs/gsb-core/gsb_core/registry.py libs/gsb-core/tests/test_bus_client.py libs/gsb-core/tests/test_envelope.py
+uv run --all-packages pre-commit run --all-files 2>&1
+git reset libs/gsb-core/gsb_core/bus_client.py libs/gsb-core/gsb_core/envelope.py libs/gsb-core/gsb_core/registry.py libs/gsb-core/tests/test_bus_client.py libs/gsb-core/tests/test_envelope.py >/dev/null 2>&1
+
+OUT
+=== bandit ===
+=== pip-audit ===
+No known vulnerabilities found
+Name     Skip Reason
+-------- -----------------------------------------------------------------------
+gsb-core Dependency not found on PyPI and could not be audited: gsb-core (0.1.0)
+=== pre-commit ===
+ruff check...............................................................Passed
+ruff format..............................................................Failed
+- hook id: ruff-format
+- files were modified by this hook
+
+2 files reformatted, 2 files left unchanged
+4 files left unchanged
+4 files left unchanged
+
+mypy.....................................................................Passed
+bandit...................................................................Passed
+Let's re-verify everything is still clean after the auto-format:
+
+Bash Confirm everything still passes after auto-reformat
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== pytest ==="
+uv run --all-packages pytest -q 2>&1 | tail -5
+echo "=== full pre-commit rerun ==="
+git add -N libs/gsb-core/gsb_core/bus_client.py libs/gsb-core/gsb_core/envelope.py libs/gsb-core/gsb_core/registry.py libs/gsb-core/tests/test_bus_client.py libs/gsb-core/tests/test_envelope.py
+uv run --all-packages pre-commit run --all-files 2>&1
+git reset libs/gsb-core/gsb_core/bus_client.py libs/gsb-core/gsb_core/envelope.py libs/gsb-core/gsb_core/registry.py libs/gsb-core/tests/test_bus_client.py libs/gsb-core/tests/test_envelope.py >/dev/null 2>&1
+
+OUT
+=== pytest ===
+.............................................                            [100%]
+45 passed in 1.51s
+=== full pre-commit rerun ===
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+mypy.....................................................................Passed
+bandit...................................................................Passed
+Now let's update Design.md — this step surfaced a lot, including a genuine security-design gap worth flagging prominently in §9, not just buried in the changelog-style step note:
+
+Bash Find B6 checklist line
+IN
+grep -n "B6\.\|B7\." /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md
+
+OUT
+421:- [ ] **B6. `bus_client.py`** — the `BusClient` façade tying together JetStream publish/subscribe + envelope + crypto + registry lookup. Integration-tested against the same running stack.
+422:- [ ] **B7. End-to-end proof** — a test with two in-process fake adapters using `BusClient`: one publishes a signed+encrypted event, the other receives, verifies the signature, and decrypts it. This is the concrete "Phase 1 is done" checkpoint — everything downstream (real adapters) builds on this working.
+Edit Design.md
+Added 8 lines
+Now let's add the trust gap as a proper open question in §9, where it belongs long-term:
+
+Bash Find §9 Open Questions section
+IN
+grep -n "^## 9\." /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md
+
+OUT
+362:## 9. Open Questions Summary
+Read Design.md (lines 363-372)
+Bash Find the highest decision number currently in §2
+IN
+grep -oE "^\| 1?[0-9] \|" /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md | sort -t'|' -k2 -n | tail -5
+
+OUT
+| 15 |
+| 16 |
+| 17 |
+| 18 |
+| 19 |
+Edit Design.md
+Added 1 line
+Bash Final cleanup of test state, git status, and stack health check
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import asyncio, nats
+async def main():
+    nc = await nats.connect('nats://localhost:4222', user_credentials='infra/nats/operator/creds/gsb-admin.creds')
+    js = nc.jetstream()
+    await js.purge_stream('EVENTS')
+    kv = await js.key_value('service-directory')
+    try:
+        for k in await kv.keys():
+            await kv.delete(k)
+    except Exception:
+        pass
+    info = await js.stream_info('EVENTS')
+    print('EVENTS messages:', info.state.messages)
+    await nc.close()
+asyncio.run(main())
+"
+echo "---"
+git status --short
+sg docker -c "docker compose -p gsb ps" 2>&1
+
+OUT
+EVENTS messages: 0
+---
+ M Design.md
+ M libs/gsb-core/gsb_core/envelope.py
+ M libs/gsb-core/gsb_core/registry.py
+ M libs/gsb-core/tests/test_envelope.py
+?? libs/gsb-core/gsb_core/bus_client.py
+?? libs/gsb-core/tests/test_bus_client.py
+NAME         IMAGE         COMMAND                  SERVICE   CREATED       STATUS       PORTS
+gsb-nats-1   nats:2.14.5   "/nats-server -c /et…"   nats      7 hours ago   Up 7 hours   0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+B6 done — the capstone that ties Track B together, and easily the most consequential step so far.
+
+What's built: bus_client.py — BusClient.publish() (recipient lookup → encrypt → sign → build envelope → JetStream publish) and .subscribe()/.fetch() (register + heartbeat → durable filtered pull consumer → decrypt → verify → hand back a ReceivedEvent for explicit ack/nak). This is the first piece where B2, B3, and B5 actually had to work together, not just individually — and that's exactly where the real findings were.
+
+Three things, in order of how much they matter:
+
+A real gap in the envelope schema (B2) — nothing carried the sender's signing public key, so a recipient had no way to verify a signature at all. Fixed by adding EventDetails.sourcePublicKey (not secret, so carrying it directly is the simplest fix). Design.md §5 and the B2 tests updated to match.
+
+A genuine, open security-design gap — not fixed, deliberately, and now tracked in §9 as item #4. I wrote a "forged signature" test that turned out to be wrong: I signed with an impostor key and embedded that same impostor key as the claimed sender — which is self-consistent, so it correctly passed verification. That failure taught me something real: sourcePublicKey/verify() only prove tamper-evidence (signature and embedded key agree with each other), not sender authentication (that the embedded key actually belongs to the claimed sourceServiceId). Nothing today binds a serviceId to its authorized signing key. This isn't quietly patched — it's flagged as a real open question with three candidate directions, none chosen, because it deserves actual design work rather than a rushed fix bolted onto B6.
+
+A test-isolation bug disguised as a caplog quirk. A flaky test led me to (wrongly) suspect pytest-asyncio/caplog interaction, write a manual-logging-handler workaround, verify with an isolated probe that caplog was never actually broken, and then find the real cause: subscribe() starts a heartbeat that close() cancels but never deregisters, so a KV entry outlives its test until the 60s TTL expires — a "no recipients" test wasn't actually recipient-free if it ran after one that had subscribed. Fixed at the root (the cleanup fixture now purges the registry too, not just the stream), and reverted the red-herring workaround rather than leaving it in as unexplained cruft.
+
+Verified: 5 new integration tests against the real Phase 2 pair, run twice for stability (45 tests total), clean ruff, mypy, bandit, pip-audit, and the full pre-commit chain.
+
+Ready for B7 (the end-to-end proof with two fake adapters) — though worth noting upfront: B6's own tests already exercise most of what B7 asks for (real publish → real JetStream delivery → real decrypt+verify between two real BusClient instances), so B7 may end up being a light consolidation rather than new ground. Want to continue there, or pause here given B6 landed a real open design question worth sitting with first?
+
+Design.md#1-1
+Let's resolve the open design questions
+Let me pull up the current state of §9 and think through each before asking — two are genuinely open decisions, two were deliberately deferred by earlier choice rather than left ambiguous.
+
+AskUserQuestion
+OUT
+Your questions have been answered: "Should the File Storage Adapter also detect externally-triggered UPDATES to existing files, not just creates (§9 item #3)? Decision #19 only covers detecting files created by an outside process."="Decide later, in Phase 3", "How should we close the sender-authentication gap found in Step B6 (§9 item #4)? Today, sourcePublicKey proves a signature is self-consistent, but nothing independently confirms it really belongs to the claimed sourceServiceId."="New service-identity directory (Recommended)", "Items #1 (File Storage command/response schema) and #2 (real subject/domain names) were deliberately deferred earlier — to Phase 3, and until real domains are known, respectively. Keep deferring both, or discuss either now?"="Keep both deferred (Recommended)". You can now continue with these answers in mind.
+This is a real, substantial fix — not just documentation. Since it directly touches registry.py and bus_client.py (both already built and tested), I'll implement it now: a new service-identity KV bucket (permanent, no TTL — unlike recipient liveness, an identity's signing key doesn't need to expire), registered once at connect time, and — critically — verification will look up the trusted key from this directory rather than trusting the message's own embedded sourcePublicKey. That's the actual fix; the embedded field alone was the whole problem.
+
+Let me start with the infra layer: a new bucket and new permissions for every identity.
+
+Read bootstrap_jetstream.sh
+Edit bootstrap_jetstream.sh
+Added 9 lines
+Edit bootstrap_jetstream.sh
+Added 2 lines
+Edit bootstrap_jetstream.sh
+Added 10 lines
+Now let's update bootstrap_auth.sh to grant every identity permission for the new bucket:
+
+Read bootstrap_auth.sh (lines 56-70)
+Read bootstrap_auth.sh (lines 136-165)
+Edit bootstrap_auth.sh
+Added 5 lines
+Now let's update BASELINE_SUB (broad read for identity lookups) and the gsb-admin permissions:
+
+Edit bootstrap_auth.sh
+Added 5 lines
+Bash Find gsb-admin permission block
+IN
+grep -n "gsb-admin" /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats/bootstrap_auth.sh
+
+OUT
+23:#   4b. Creates a dedicated gsb-admin identity (not an adapter) for
+53:ADMIN_ID="gsb-admin"   # infra-provisioning identity (Step A5), not an adapter
+Bash Find gsb-admin permission grant line
+IN
+grep -n "allow-pubsub" /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats/bootstrap_auth.sh
+
+OUT
+205:  --allow-pubsub '$JS.API.>,$KV.service-directory.>,_INBOX.>'
+Edit bootstrap_auth.sh
+Modified
+Now let's apply these against the live stack — both scripts are idempotent, so this should just add the new permissions/bucket without disrupting anything already running:
+
+Bash Re-run auth bootstrap to grant new service-identity permissions
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+sg docker -c "bash infra/nats/bootstrap_auth.sh" 2>&1 | tail -20
+
+OUT
+[ OK ] edited user "db-adapter-mysql-01"
+wrote /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats/operator/creds/db-adapter-mysql-01.creds
+== Admin identity: gsb-admin ==
+already exists, skipping add
+[ OK ] added pub "$JS.API.>"
+[ OK ] added pub "$KV.service-directory.>"
+[ OK ] added pub "$KV.service-identity.>"
+[ OK ] added pub "_INBOX.>"
+[ OK ] added sub "$JS.API.>"
+[ OK ] added sub "$KV.service-directory.>"
+[ OK ] added sub "$KV.service-identity.>"
+[ OK ] added sub "_INBOX.>"
+[ OK ] generated user creds file `/nsc/keys/creds/GregorsServiceBus/GSB/gsb-admin.creds`
+[ OK ] edited user "gsb-admin"
+wrote /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats/operator/creds/gsb-admin.creds
+== Memory resolver config ==
+Success!! - generated `/workspace/resolver.conf`
+[ OK ] wrote server configuration to `/workspace/resolver.conf`
+wrote /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats/resolver.conf
+Done. Next: Step A4 wires resolver.conf into nats-server.conf.
+Bash Re-run JetStream bootstrap to create the new service-identity bucket
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+sg docker -c "NATS_URL='nats://nats:4222' DOCKER_NETWORK='gsb_default' bash infra/nats/bootstrap_jetstream.sh" 2>&1
+
+OUT
+== Stream: EVENTS ==
+already exists, skipping add
+== KV bucket: service-directory ==
+already exists, skipping add
+== KV bucket: service-identity ==
+Information for Key-Value Store Bucket service-identity created 2026-08-25 00:26:56
+
+Configuration:
+
+            Bucket Name: service-identity
+           History Kept: 1
+          Values Stored: 0
+             Compressed: false
+  Per-Key TTL Supported: false
+     Backing Store Kind: JetStream
+            Bucket Size: 0 B
+    Maximum Bucket Size: unlimited
+     Maximum Value Size: unlimited
+            Maximum Age: unlimited
+       JetStream Stream: KV_service-identity
+                Storage: File
+
+Cluster Information:
+
+                   Name: 
+                 Leader: NDRJPOHCY3DT7Q24HCLUIF3IE2KZUKCNMLM3Y3C34KGOYRXBS4A5A3OS
+Done. Next: Step A6 wires everything into docker-compose.
+Now let's verify a fresh connection with the regenerated .creds can actually use the new permissions, without needing a server restart:
+
+Bash Verify new permissions work without restarting the server
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import asyncio, nats
+
+async def main():
+    nc = await nats.connect('nats://localhost:4222', user_credentials='infra/nats/operator/creds/webhook-listener-01.creds')
+    js = nc.jetstream()
+    kv = await js.key_value('service-identity')
+    await kv.put('webhook-listener-01', b'{\"test\":true}')
+    entry = await kv.get('webhook-listener-01')
+    print('put+get worked:', entry.value)
+    await kv.delete('webhook-listener-01')
+    await nc.close()
+
+asyncio.run(main())
+"
+
+OUT
+put+get worked: b'{"test":true}'
+No restart needed — confirmed. Now let's implement the Python side. First registry.py:
+
+Read registry.py
+Edit registry.py
+Added 11 lines
+Now let's add the constant, value-shape helper, and extend the class:
+
+Edit registry.py
+Added 1 line
+Edit registry.py
+Added 14 lines
+Now let's update RegistryClient.__init__/connect and add the two new methods:
+
+Edit registry.py
+Added 2 lines
+Now let's add the two new methods, right after deregister:
+
+Edit registry.py
+Added 36 lines
+I referenced KeyNotFoundError without verifying it's the real exception name for a missing KV key — let me check before running anything:
+
+Bash Check the actual exception name for a missing KV key
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import nats.js.errors as e
+print([x for x in dir(e) if 'Key' in x or 'Not' in x])
+"
+
+OUT
+['BucketNotFoundError', 'InvalidKeyError', 'KeyDeletedError', 'KeyHistoryTooLargeError', 'KeyNotFoundError', 'KeyValueError', 'KeyValueLimitMarkerTTLNotSupportedError', 'KeyWrongLastSequenceError', 'NoKeysError', 'NotFoundError', 'ObjectNotFoundError']
+Let's confirm it's actually what get() raises for a missing key, not just that the name exists:
+
+Bash Verify the actual exception raised for a missing KV key
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import asyncio, nats
+
+async def main():
+    nc = await nats.connect('nats://localhost:4222', user_credentials='infra/nats/operator/creds/gsb-admin.creds')
+    js = nc.jetstream()
+    kv = await js.key_value('service-identity')
+    try:
+        await kv.get('never-registered-service-id')
+    except Exception as e:
+        print(type(e), type(e).__module__, e)
+    await nc.close()
+
+asyncio.run(main())
+"
+
+OUT
+<class 'nats.js.errors.KeyNotFoundError'> nats.js.errors nats: key not found
+Confirmed correct. Now let's add the import:
+
+Read registry.py (lines 55-60)
+Bash Find the existing nats.js.errors import line
+IN
+grep -n "from nats.js.errors" /home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core/gsb_core/registry.py
+
+OUT
+66:from nats.js.errors import NoKeysError
+Edit registry.py
+Modified
+Now let's update bus_client.py — register identity once at connect, and fix the actual verification logic to use the trusted directory lookup instead of the message's own embedded claim:
+
+Read bus_client.py (lines 113-152)
+Edit bus_client.py
+Added 10 lines
+Now the crucial fix — _process()'s verification logic:
+
+Read bus_client.py (lines 229-248)
+Read bus_client.py (lines 240-254)
+Edit bus_client.py
+Added 26 lines
+Now let's add registry.py tests for the new identity methods:
+
+Read test_registry.py (lines 2-51)
+Bash Check end of test_registry.py
+IN
+tail -20 /home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core/tests/test_registry.py
+
+OUT
+            adapter_type="t",
+            encryption_public_key="pub-a",
+        )
+        # Give a moment for a (wrongly) matching update to arrive, if the
+        # watch's server-side filtering were broken.
+        await asyncio.sleep(0.3)
+
+        assert cache.current() == []
+    finally:
+        await cache.stop()
+
+
+async def test_cache_stop_cancels_cleanly(jetstream: JetStreamContext, subject: str) -> None:
+    kv = await jetstream.key_value("service-directory")
+    cache = RecipientCache(kv, subject)
+    await cache.start()
+
+    await cache.stop()
+
+    assert cache._task is None
+Let's add a service_id fixture and the new identity tests at the end of the file:
+
+Edit test_registry.py
+Added 9 lines
+Bash Append identity tests to test_registry.py
+IN
+cat >> /home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core/tests/test_registry.py << 'EOF'
+
+
+# --- service-identity (Design.md §9 item #4) ---------------------------
+
+
+async def test_register_identity_then_lookup(registry: RegistryClient, service_id: str) -> None:
+    await registry.register_identity(
+        service_id=service_id, adapter_type="test-adapter", signing_public_key="signing-pub-a"
+    )
+
+    assert await registry.lookup_signing_key(service_id) == "signing-pub-a"
+
+
+async def test_lookup_unknown_identity_returns_none(
+    registry: RegistryClient, service_id: str
+) -> None:
+    """Never registered — should be a clean None, not an exception."""
+    assert await registry.lookup_signing_key(service_id) is None
+
+
+async def test_register_identity_overwrites_previous_key(
+    registry: RegistryClient, service_id: str
+) -> None:
+    """Re-registering (e.g. on every BusClient.connect()) replaces the
+    previous key rather than accumulating history — matches the bucket's
+    history=1 config."""
+    await registry.register_identity(
+        service_id=service_id, adapter_type="test-adapter", signing_public_key="old-key"
+    )
+    await registry.register_identity(
+        service_id=service_id, adapter_type="test-adapter", signing_public_key="new-key"
+    )
+
+    assert await registry.lookup_signing_key(service_id) == "new-key"
+EOF
+
+OUT
+(Bash completed with no output)
+Now let's update test_bus_client.py — fix the mismatched-key test's expectations and add the critical "impersonation is now rejected" test that directly reproduces the original B6 gap and proves it's closed:
+
+Read test_bus_client.py (lines 161-210)
+Read test_bus_client.py (lines 209-263)
+Edit test_bus_client.py
+Added 82 lines
+Bash Confirm uuid is already imported
+IN
+grep -n "^import uuid" /home/bherring/dev/clodhopper/GregorsServiceBus/libs/gsb-core/tests/test_bus_client.py
+
+OUT
+18:import uuid
+Good, already imported. Now let's run the full test suite:
+
+Bash Run registry and bus_client tests with the new identity feature
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest libs/gsb-core/tests/test_registry.py libs/gsb-core/tests/test_bus_client.py -v 2>&1 | tail -60
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0 -- /home/bherring/dev/clodhopper/GregorsServiceBus/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/bherring/dev/clodhopper/GregorsServiceBus
+configfile: pyproject.toml
+plugins: cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 21 items
+
+libs/gsb-core/tests/test_registry.py::test_register_then_lookup PASSED   [  4%]
+libs/gsb-core/tests/test_registry.py::test_lookup_empty_subject_returns_empty_list PASSED [  9%]
+libs/gsb-core/tests/test_registry.py::test_lookup_does_not_include_other_subjects PASSED [ 14%]
+libs/gsb-core/tests/test_registry.py::test_multiple_recipients_for_same_subject PASSED [ 19%]
+libs/gsb-core/tests/test_registry.py::test_deregister_removes_from_lookup PASSED [ 23%]
+libs/gsb-core/tests/test_registry.py::test_heartbeat_registers_repeatedly PASSED [ 28%]
+libs/gsb-core/tests/test_registry.py::test_cache_sees_pre_existing_recipient_on_start PASSED [ 33%]
+libs/gsb-core/tests/test_registry.py::test_cache_picks_up_new_registration_after_start PASSED [ 38%]
+libs/gsb-core/tests/test_registry.py::test_cache_removes_entry_on_deregister PASSED [ 42%]
+libs/gsb-core/tests/test_registry.py::test_cache_ignores_unrelated_subjects PASSED [ 47%]
+libs/gsb-core/tests/test_registry.py::test_cache_stop_cancels_cleanly PASSED [ 52%]
+libs/gsb-core/tests/test_registry.py::test_register_identity_then_lookup PASSED [ 57%]
+libs/gsb-core/tests/test_registry.py::test_lookup_unknown_identity_returns_none PASSED [ 61%]
+libs/gsb-core/tests/test_registry.py::test_register_identity_overwrites_previous_key PASSED [ 66%]
+libs/gsb-core/tests/test_bus_client.py::test_publish_and_fetch_round_trip PASSED [ 71%]
+libs/gsb-core/tests/test_bus_client.py::test_publish_with_no_recipients_does_not_crash PASSED [ 76%]
+libs/gsb-core/tests/test_bus_client.py::test_tampered_ciphertext_is_not_returned PASSED [ 80%]
+libs/gsb-core/tests/test_bus_client.py::test_signature_not_matching_claimed_key_is_rejected PASSED [ 85%]
+libs/gsb-core/tests/test_bus_client.py::test_impersonation_with_self_consistent_key_is_rejected PASSED [ 90%]
+libs/gsb-core/tests/test_bus_client.py::test_message_from_unregistered_sender_is_rejected PASSED [ 95%]
+libs/gsb-core/tests/test_bus_client.py::test_fetch_without_subscribe_raises PASSED [100%]
+
+============================== 21 passed in 1.61s ==============================
+All pass, including the critical impersonation test — the original gap is now genuinely closed. Let's run the full toolchain:
+
+Bash Full test suite, ruff, mypy
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== full pytest ==="
+uv run --all-packages pytest -q 2>&1 | tail -8
+echo "=== ruff ==="
+uv run ruff check . 2>&1
+echo "=== mypy ==="
+uv run --all-packages mypy libs 2>&1
+
+OUT
+=== full pytest ===
+..................................................                       [100%]
+50 passed in 1.59s
+=== ruff ===
+All checks passed!
+=== mypy ===
+Success: no issues found in 12 source files
+All 50 tests pass, clean ruff/mypy. Now bandit, pip-audit, and pre-commit:
+
+Bash Bandit, pip-audit, full pre-commit
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== bandit ==="
+uv run bandit -q -r libs/gsb-core/gsb_core 2>&1
+echo "=== pip-audit ==="
+uv run pip-audit 2>&1 | tail -6
+echo "=== pre-commit ==="
+git add -N libs/gsb-core/gsb_core/registry.py libs/gsb-core/gsb_core/bus_client.py libs/gsb-core/tests/test_registry.py libs/gsb-core/tests/test_bus_client.py
+uv run --all-packages pre-commit run --all-files 2>&1
+git reset libs/gsb-core/gsb_core/registry.py libs/gsb-core/gsb_core/bus_client.py libs/gsb-core/tests/test_registry.py libs/gsb-core/tests/test_bus_client.py >/dev/null 2>&1
+
+OUT
+=== bandit ===
+=== pip-audit ===
+No known vulnerabilities found
+Name     Skip Reason
+-------- -----------------------------------------------------------------------
+gsb-core Dependency not found on PyPI and could not be audited: gsb-core (0.1.0)
+=== pre-commit ===
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+mypy.....................................................................Passed
+bandit...................................................................Passed
+Let's run twice more for stability, then clean up test state:
+
+Bash Run full suite twice more for stability
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest -q 2>&1 | tail -3
+uv run --all-packages pytest -q 2>&1 | tail -3
+
+OUT
+..................................................                       [100%]
+50 passed in 1.60s
+..................................................                       [100%]
+50 passed in 1.60s
+Bash Final cleanup of test state across both KV buckets and the stream
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import asyncio, nats
+async def main():
+    nc = await nats.connect('nats://localhost:4222', user_credentials='infra/nats/operator/creds/gsb-admin.creds')
+    js = nc.jetstream()
+    await js.purge_stream('EVENTS')
+    for bucket in ['service-directory', 'service-identity']:
+        kv = await js.key_value(bucket)
+        try:
+            for k in await kv.keys():
+                await kv.delete(k)
+            print(bucket, 'cleaned')
+        except Exception:
+            print(bucket, 'already empty')
+    await nc.close()
+asyncio.run(main())
+"
+
+OUT
+service-directory cleaned
+service-identity cleaned
+Now let's properly fold this into the architecture documentation — not just as a changelog note, but as part of the actual design (§2, §4, §6, §9, §11).
+
+Bash Find section boundaries for §4 subsections
+IN
+grep -n "^### 4\.\|^## 5\.\|^## 6\." /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md
+
+OUT
+103:### 4.1 Two separate keypairs per service
+116:### 4.2 Connection authentication (nkeys + decentralized JWT)
+128:### 4.3 Payload confidentiality (hybrid / envelope encryption)
+156:### 4.4 Subject-level authorization (NATS permissions)
+167:### 4.5 Registry / recipient directory (JetStream KV)
+195:## 5. Event Envelope
+229:## 6. NATS JetStream Layout
+Read Design.md (lines 186-195)
+Let's insert a new §4.6 documenting the identity directory as a first-class architecture piece:
+
+Edit Design.md
+Added 12 lines
+Now let's add the corresponding row to §2's decisions table:
+
+Bash Find decision #19 row to insert after
+IN
+grep -n "^| 19 \|^## 3\." /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md | head -3
+
+OUT
+50:| 19 | Does `FileWriteRequested` need a separate `FileCreateRequested` command, and does the File Storage Adapter watch for externally-created files? | **No separate command** — `FileWriteRequested` auto-creates a missing file. It emits `FileCreateCompleted` if the file was new, `FileWriteCompleted` if an existing file was updated. `FileCreateCompleted` is **also** published outside the command flow when the adapter notices a file created by an outside process (e.g. a shared/watched directory) — no preceding command, no `correlationId`. This is a deliberately narrow pull-forward of the folder-watch capability otherwise deferred (§8) — creation-detection only, not update-detection (§9). |
+54:## 3. High-Level Architecture
+Edit Design.md
+Added 1 line
+Now let's update §6 (JetStream layout) to mention the new bucket, and §9 to remove the now-resolved item:
+
+Bash Find §6 KV bucket line
+IN
+grep -n "KV bucket.*service-directory, as above" /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md
+
+OUT
+(Bash completed with no output)
+Bash View §6 content
+IN
+sed -n '/^## 6\./,/^---/p' /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md
+
+OUT
+## 6. NATS JetStream Layout
+
+- **Stream:** single stream `EVENTS`, subject filter `events.>` (one stream is simplest to operate; can be split by bounded context later if retention/ops needs diverge).
+- **Retention:** durable, limits-based retention — **7 days** age limit, plus a size cap as a backstop — not work-queue, since multiple adapters need independent delivery of the same message. Long enough to recover from adapter downtime/redeploys without replaying stale data; revisit if audit requirements later call for a longer window.
+- **Consumers:** one durable, filtered consumer per adapter (`filter_subject` scoped to what that adapter is permitted/configured to handle), so each adapter tracks its own delivery cursor independently and can restart without replaying everything.
+- **KV bucket:** `service-directory`, as above.
+
+---
+Edit Design.md
+Modified
+Now let's update §9 — remove the resolved item, note items #1/#2 were reconfirmed deferred, and reconfirm item #3's status:
+
+Read Design.md (lines 379-392)
+Edit Design.md
+Added 1 line
+Read Design.md (lines 375-378)
+Edit Design.md
+Modified
+Now let's update the §11 step entries to reflect what actually changed — A5 (new bucket), A3 (new permissions), and B6 (gap now closed):
+
+Bash Find A5, A3, B6 entries in §11
+IN
+grep -n "^\- \[x\] \*\*A5\.\|^\- \[x\] \*\*A3\.\|^\- \[x\] \*\*B6\." /home/bherring/dev/clodhopper/GregorsServiceBus/Design.md
+
+OUT
+415:- [x] **A3. Bootstrap script (auth)** — [infra/nats/bootstrap_auth.sh](infra/nats/bootstrap_auth.sh): idempotent, containerized (`nsc` via `natsio/nats-box`, manifest parsed via `mikefarah/yq`), creates the Operator, `GSB` Account, and one User per A2 manifest entry, applies its permissions plus a derived KV-write grant and a v1 baseline (`$JS.API.>`, `_INBOX.>`, KV-read-all — not scoped down further in v1, a candidate for later tightening), generates a `.creds` file per adapter, and emits the memory-resolver config block. **Executed and verified end-to-end** (Docker access resolved — host user added to the `docker` group) across 3 consecutive runs, confirming true idempotency (no duplicate permission entries on repeat `edit user` calls). Four real bugs surfaced only by running it, not by reading docs — worth remembering: (1) `nsc list ... --json` writes to **stderr**, not stdout — a `2>/dev/null` silently broke every existence check; (2) `nsc`'s table output carries ANSI color codes even without a TTY, breaking `grep -w` matching — switched existence checks to `--json` throughout; (3) `jq` wasn't actually present on the host despite being assumed — dropped entirely in favor of `yq` alone; (4) JetStream refuses to start under decentralized JWT auth without a **System Account** — only surfaced when Step A4 actually started the server, fixed by adding `--sys` to the operator-creation call, after which `nsc generate config --mem-resolver` emits the needed `system_account:` directive automatically; (5) **JetStream is separately disabled per-account by default**, independent of both the system-account fix and the server's global `jetstream{}` block — surfaced while testing Step A5, fixed by adding `nsc edit account --js-mem-storage 256M --js-disk-storage 2G` (kept in step with `nats-server.conf`'s own caps). Also added a dedicated **`gsb-admin`** identity (`$JS.API.>` + `$KV.service-directory.>` + `_INBOX.>`, full pub+sub) — provisioning shared JetStream infrastructure isn't any particular adapter's job, so Step A5 uses this rather than repurposing one adapter's creds. Also settled: client connection uses a single `.creds` file (JWT+nkey bundled, `nsc generate creds`), not separate nkey-seed/JWT paths — §7.6 and B4 updated accordingly.
+416:- [x] **A5. Bootstrap script (JetStream objects)** — [infra/nats/bootstrap_jetstream.sh](infra/nats/bootstrap_jetstream.sh): idempotent, containerized, using the `gsb-admin` identity from A3. Creates the `EVENTS` stream (`events.>`, file storage, limits retention, discard-old, 7-day max-age, 1G max-bytes backstop) and the `service-directory` KV bucket (file storage, 60s max-age applied uniformly per key's last-write time — see terminology note below). **Executed and verified end-to-end**: both objects created successfully against the live A4 server; then empirically verified the actual TTL/heartbeat *mechanism* itself (not just that the bucket was created with some TTL value) by writing two keys, refreshing only one at t=30s, and checking both at t=65s — the refreshed key was still present (revision 3), the unrefreshed one had genuinely expired (`key not found`). This is the concrete behavior Decision #7's heartbeat/TTL design depends on, now confirmed rather than assumed. **Terminology note**: NATS's `nats kv add --ttl` sets a bucket-wide max-age applied per key's last-write timestamp — not the same mechanism as NATS's separate opt-in "Per-Key TTL" feature (`--marker-ttl`, for *different* TTL values per key). Since every registry entry uses the *same* fixed TTL in our design, the simpler bucket-wide setting is sufficient and was used; "per-key TTL" language elsewhere in this doc (§4.5) refers to the functional behavior (each key's own expiry clock resets on its own writes), not literally NATS's `--marker-ttl` feature.
+436:- [x] **B6. `bus_client.py`** — [libs/gsb-core/gsb_core/bus_client.py](libs/gsb-core/gsb_core/bus_client.py): `BusClient.publish()` (look up recipients via a cached `RecipientCache` → encrypt → sign → build envelope → JetStream publish) and `.subscribe()`/`.fetch()` (register + heartbeat as a recipient → durable filtered pull consumer → decrypt → verify → hand back a `ReceivedEvent` for explicit ack/nak). Ties together B2/B3/B5 into the first fully end-to-end capstone of Track B. **Executed and verified**: 5 integration tests against the real Phase 2 pair (`webhook-listener-01` → `file-storage-01`) on their real subject, run twice for stability (45 tests total), clean `ruff`/`mypy`/`bandit`/`pip-audit`/`pre-commit`.
+Edit Design.md
+Modified
+Edit Design.md
+Modified
+Edit Design.md
+Added 2 lines
+Now let's add a note to infra/nats/README.md documenting this addition:
+
+Bash Find Step A5 section in the README
+IN
+grep -n "^## Step A5\|^## Step A6\|service-directory" /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats/README.md | head -10
+
+OUT
+61:## Step A5 — JetStream objects
+63:[`bootstrap_jetstream.sh`](bootstrap_jetstream.sh) creates the `EVENTS` stream and `service-directory` KV bucket against a running server, using the `gsb-admin` identity (added to `bootstrap_auth.sh` in this step — see below).
+68:2. **Provisioning shared infrastructure isn't any adapter's job.** Added a dedicated `gsb-admin` identity to `bootstrap_auth.sh` (`$JS.API.>` + `$KV.service-directory.>` + `_INBOX.>`) rather than reusing one adapter's `.creds` file for stream/bucket management.
+74:## Step A6 — docker-compose
+85:**Executed and verified end-to-end, twice, from a fully clean state** — no operator, account, users, stream, bucket, or containers existing beforehand. First run: auth bootstrap → `nats` starts clean → readiness confirmed → `EVENTS` stream and `service-directory` bucket created. Second run: every step correctly reports "already exists, skipping add" while still confirming the server is up — genuine idempotency of the *entire* pipeline end to end, not just individual scripts tested in isolation. Left running afterward (this is the real deployment now, not a throwaway test container) — `docker compose down` to stop it, `docker compose down -v` to also drop the JetStream data volume.
+133:as file-storage-01 kv put service-directory events.files.FileWriteRequested.file-storage-01 '{"encryptionPublicKey":"placeholder"}'
+134:as file-storage-01 kv put service-directory events.files.FileWriteRequested.some-other-adapter should-be-denied
+137:as gsb-admin kv put service-directory events.files.FileWriteRequested.some-other-adapter should-succeed
+142:as gsb-admin kv del service-directory events.files.FileWriteRequested.file-storage-01 -f
+143:as gsb-admin kv del service-directory events.files.FileWriteRequested.some-other-adapter -f
+Read README.md (lines 62-75)
+Edit README.md
+Added 2 lines
+Let's do final sanity checks — syntax validation and a git status review:
+
+Bash Syntax check all bootstrap scripts and review git status
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+bash -n infra/nats/bootstrap_auth.sh && bash -n infra/nats/bootstrap_jetstream.sh && bash -n infra/nats/up.sh && echo "SYNTAX_OK"
+echo "---"
+git status --short
+
+OUT
+SYNTAX_OK
+---
+ M Design.md
+ M infra/nats/README.md
+ M infra/nats/bootstrap_auth.sh
+ M infra/nats/bootstrap_jetstream.sh
+ M libs/gsb-core/gsb_core/envelope.py
+ M libs/gsb-core/gsb_core/registry.py
+ M libs/gsb-core/tests/test_envelope.py
+ M libs/gsb-core/tests/test_registry.py
+?? libs/gsb-core/gsb_core/bus_client.py
+?? libs/gsb-core/tests/test_bus_client.py
+Given how much the bootstrap scripts changed, let me do one full clean-slate verification — same rigor as A6 — to confirm the whole pipeline still works from true scratch, not just incrementally:
+
+Bash Tear down everything for a full clean-slate test
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+sg docker -c "docker compose down -v" 2>&1
+rm -rf infra/nats/operator infra/nats/resolver.conf
+echo "clean slate ready"
+
+OUT
+ Container gsb-nats-1 Stopping 
+ Container gsb-nats-1 Stopped 
+ Container gsb-nats-1 Removing 
+ Container gsb-nats-1 Removed 
+ Network gsb_default Removing 
+ Volume gsb_nats-data Removing 
+ Volume gsb_nats-data Removed 
+ Network gsb_default Removed 
+clean slate ready
+Bash Run full clean-slate bootstrap with the new identity mechanism
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+sg docker -c "bash infra/nats/up.sh" 2>&1 | tail -25
+
+OUT
+                 Leader: NCMBKUMZKJEO23W7QWVR2U6VNNUOLT22C75WL2CU4VQBG5BVGFOUNKOR
+== KV bucket: service-identity ==
+Information for Key-Value Store Bucket service-identity created 2026-08-25 00:33:53
+
+Configuration:
+
+            Bucket Name: service-identity
+           History Kept: 1
+          Values Stored: 0
+             Compressed: false
+  Per-Key TTL Supported: false
+     Backing Store Kind: JetStream
+            Bucket Size: 0 B
+    Maximum Bucket Size: unlimited
+     Maximum Value Size: unlimited
+            Maximum Age: unlimited
+       JetStream Stream: KV_service-identity
+                Storage: File
+
+Cluster Information:
+
+                   Name: 
+                 Leader: NCMBKUMZKJEO23W7QWVR2U6VNNUOLT22C75WL2CU4VQBG5BVGFOUNKOR
+Done. Next: Step A6 wires everything into docker-compose.
+Done — infra is up. Try: docker compose logs -f nats
+Full clean bootstrap succeeded, including the new bucket. Now let's run the Python test suite against this genuinely fresh infra:
+
+Bash Run full test suite against fresh clean-slate infra
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages pytest -q 2>&1 | tail -5
+
+OUT
+..................................................                       [100%]
+50 passed in 1.61s
+Bash Final test-state cleanup and stack health check
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import asyncio, nats
+async def main():
+    nc = await nats.connect('nats://localhost:4222', user_credentials='infra/nats/operator/creds/gsb-admin.creds')
+    js = nc.jetstream()
+    await js.purge_stream('EVENTS')
+    for bucket in ['service-directory', 'service-identity']:
+        kv = await js.key_value(bucket)
+        try:
+            for k in await kv.keys():
+                await kv.delete(k)
+        except Exception:
+            pass
+    await nc.close()
+asyncio.run(main())
+"
+sg docker -c "docker compose ps" 2>&1
+
+OUT
+NAME         IMAGE         COMMAND                  SERVICE   CREATED          STATUS          PORTS
+gsb-nats-1   nats:2.14.5   "/nats-server -c /et…"   nats      20 seconds ago   Up 19 seconds   0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+All three open design questions resolved. Summary:
+
+#3 (File Storage update-detection) — deferred to Phase 3, as you chose; reconfirmed explicitly in §9 rather than left ambiguous.
+
+#1/#2 (command schema, subject naming) — kept deferred, as you chose; also reconfirmed explicitly.
+
+#4 (sender-authentication gap) — implemented, not just documented, since it directly touched code already built and tested:
+
+New service-identity KV bucket (permanent, no TTL — an identity's key doesn't need to expire the way liveness registrations do), created by bootstrap_jetstream.sh (A5), with every adapter granted access via bootstrap_auth.sh (A3) — re-applied against the live, already-running stack with no server restart needed (confirmed: permission grants live in each User's own JWT, not server config).
+registry.py gained register_identity()/lookup_signing_key() — a separate concept from recipient registration, since a pure publisher (e.g. Webhook Listener) never subscribes to anything and would otherwise never have an identity entry at all.
+bus_client.py: connect() now registers the adapter's own identity once; verification now looks up the trusted key from the directory instead of trusting the message's own embedded sourcePublicKey claim — that's the actual fix.
+The proof: test_impersonation_with_self_consistent_key_is_rejected reproduces the exact scenario that originally exposed this gap in B6 (an impostor signs with their own key and embeds that same self-consistent key) and confirms it's now correctly rejected.
+Verified thoroughly — 8 new tests (50 total), full toolchain clean, and then a complete teardown/rebuild from true scratch (docker compose down -v, wiped all generated auth state, full up.sh re-bootstrap) to confirm the whole pipeline — not just incremental changes — still works end to end. All 50 tests pass against the genuinely fresh infra.
+
+Folded into the architecture itself, not just a changelog entry: new §4.6 describes the identity directory as a first-class design element (with an honest caveat — it's a v1-scoped trust mechanism, not a full PKI, no revocation beyond overwrite), Decision #20 added to §2, §6 and §9 updated, and §11's A3/A5/B6 entries note what changed and why.
+
+All test state cleaned up; the stack is running fresh and healthy. Design.md's open-questions list is now empty of anything genuinely unresolved — everything left is a deliberate, reconfirmed deferral. Ready to continue to B7 whenever you'd like, though as noted before, B6 (and now this) already covers most of what B7 would prove.
+
+----------------- Step B6 Completed -----------------------

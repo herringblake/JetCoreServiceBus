@@ -63,7 +63,12 @@ JS_DISK_STORAGE="2G"
 # its manifest-declared subjects — needed for the JetStream client library
 # and NATS request-reply plumbing to function. See header note above.
 BASELINE_PUB='$JS.API.>'
-BASELINE_SUB='$JS.API.>,_INBOX.>,$KV.service-directory.>'
+# $KV.service-identity.> read: every adapter needs to look up *any* other
+# adapter's registered signing key to verify a received message's sender
+# (Design.md §9 item #4 resolution) — read access is necessarily broad,
+# same as service-directory's; only the per-adapter *write* scope (own
+# namespace only, derived above) is what actually enforces least privilege.
+BASELINE_SUB='$JS.API.>,_INBOX.>,$KV.service-directory.>,$KV.service-identity.>'
 
 mkdir -p "$STORE_DIR" "$CREDS_DIR"
 
@@ -160,6 +165,11 @@ while IFS= read -r adapter; do
       kv_write="${kv_write:+$kv_write,}\$KV.service-directory.$s.$service_id"
     done
   fi
+  # Every adapter — publisher or subscriber — registers its own signing
+  # identity once at connect time (Design.md §9 item #4 resolution / §11
+  # Step B6 follow-up), unlike service-directory registration, which only
+  # happens for subjects actually subscribed to.
+  kv_write="${kv_write:+$kv_write,}\$KV.service-identity.$service_id"
 
   all_pub="$(printf '%s,%s,%s' "$pub_subjects" "$BASELINE_PUB" "$kv_write" | sed 's/,,*/,/g; s/^,//; s/,$//')"
   all_sub="$(printf '%s,%s' "$sub_subjects" "$BASELINE_SUB" | sed 's/,,*/,/g; s/^,//; s/,$//')"
@@ -192,7 +202,7 @@ else
 fi
 
 nsc edit user --account "$ACCOUNT_NAME" --name "$ADMIN_ID" \
-  --allow-pubsub '$JS.API.>,$KV.service-directory.>,_INBOX.>'
+  --allow-pubsub '$JS.API.>,$KV.service-directory.>,$KV.service-identity.>,_INBOX.>'
 
 nsc generate creds --account "$ACCOUNT_NAME" --name "$ADMIN_ID" \
   >"$CREDS_DIR/$ADMIN_ID.creds"

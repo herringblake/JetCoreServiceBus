@@ -71,6 +71,8 @@ Beyond "did it create the objects," the actual **TTL/heartbeat mechanism** the r
 
 One terminology note worth keeping in mind: `nats kv add --ttl` sets a bucket-wide max-age applied per key's own last-write time — not NATS's separate opt-in "Per-Key TTL" feature (`--marker-ttl`), which is for giving *different* keys *different* TTLs. Our design only ever needs one uniform TTL value, so the simpler mechanism is sufficient and is what's used.
 
+**Updated after Step B6:** `bootstrap_jetstream.sh` now also creates a second bucket, `service-identity` — deliberately **no** `--ttl` this time (Design.md §4.6, Decision #20). It closes a real gap Step B6's integration testing found: a message's embedded `sourcePublicKey` alone can't prove who really sent it, only that the signature is self-consistent with *some* key. `bootstrap_auth.sh` was re-run (idempotently) to grant every identity access to the new bucket; confirmed this took effect on fresh connections with no `nats-server` restart needed — permission grants live in each User's own JWT, not the server's static config, so a freshly-regenerated `.creds` file is all a client needs.
+
 ## Step A6 — docker-compose
 
 [`docker-compose.yml`](../../docker-compose.yml) (repo root) runs just the `nats` service for now — adapters get added in Phase 3. [`up.sh`](up.sh) is the orchestration wrapper: `bootstrap_auth.sh` → `docker compose up -d nats` → wait for the server to actually accept authenticated connections → `bootstrap_jetstream.sh`.

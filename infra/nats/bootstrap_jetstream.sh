@@ -10,6 +10,15 @@ set -euo pipefail
 #     max-age, 1G max-bytes backstop) — Design.md §6.
 #   - the service-directory KV bucket (60s per-key TTL, uniform across all
 #     entries — Design.md §4.5, §11 parameter table).
+#   - the service-identity KV bucket (Design.md §9 item #4 / §11 Step B6
+#     follow-up) — no TTL. Unlike service-directory (which tracks "is this
+#     adapter currently alive to receive"), an identity's signing key
+#     doesn't need to expire on a heartbeat; a decommissioned adapter's
+#     stale identity entry is harmless (worst case: a claim to be that old
+#     serviceId still needs that old service's real private key), whereas
+#     a *missing* entry for a still-live service would wrongly reject
+#     legitimate messages. Registered once at BusClient.connect(), not on
+#     a repeating heartbeat.
 #
 # Requires a running nats-server reachable at $NATS_URL, already bootstrapped
 # per Steps A3/A4 — in particular, the GSB account needs JetStream storage
@@ -40,6 +49,8 @@ STREAM_MAX_BYTES="1G"    # dev-sized backstop; comfortably under the GSB
 
 KV_BUCKET="service-directory"
 KV_TTL="60s"              # Design.md §11 parameter table
+
+IDENTITY_KV_BUCKET="service-identity"   # no TTL — see note above
 
 if [ ! -f "$CREDS_FILE" ]; then
   echo "Missing $CREDS_FILE — run bootstrap_auth.sh (Step A3) first." >&2
@@ -77,6 +88,16 @@ else
   nats kv add "$KV_BUCKET" \
     --storage file \
     --ttl "$KV_TTL" \
+    --replicas 1 \
+    --history 1
+fi
+
+echo "== KV bucket: $IDENTITY_KV_BUCKET =="
+if nats kv ls -n 2>/dev/null | grep -qx "$IDENTITY_KV_BUCKET"; then
+  echo "already exists, skipping add"
+else
+  nats kv add "$IDENTITY_KV_BUCKET" \
+    --storage file \
     --replicas 1 \
     --history 1
 fi

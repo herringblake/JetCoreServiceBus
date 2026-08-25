@@ -3,13 +3,24 @@
 connection; built and tested against the real Track A stack (Step A6), not
 a mock.
 
-Two things live here:
+Three things live here:
   - `RegistryClient` — register/heartbeat this adapter's own recipient
     entries (one per subject it subscribes to), plus a one-shot lookup.
   - `RecipientCache` — a live, watch-updated view of who's currently
     registered for one subject, for a publisher to consult before
     encrypting (Design.md §4.5: "a JetStream KV watch, not a GET per
     publish").
+  - Identity registration/lookup (`register_identity`/`lookup_signing_key`,
+    the `service-identity` bucket) — added to resolve Design.md §9 item #4,
+    a real gap found while building Step B6: `EventDetails.sourcePublicKey`
+    alone only proves a signature is *self-consistent*, not that the
+    embedded key actually belongs to the claimed sender. Every adapter
+    registers its own signing key here once at connect time (unlike
+    service-directory, this isn't scoped to "subjects subscribed to" — a
+    pure publisher that never subscribes to anything still needs an
+    identity entry so others can verify messages it sends), and a
+    recipient looks up the *trusted* key for `sourceServiceId` here rather
+    than trusting the message's own embedded claim.
 
 Both were built against real, confirmed nats-py behavior, not its docs —
 several things here don't work the way a first read of the API would
@@ -52,7 +63,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import nats.errors
-from nats.js.errors import NoKeysError
+from nats.js.errors import KeyNotFoundError, NoKeysError
 from nats.js.kv import KV_DEL, KV_PURGE
 
 if TYPE_CHECKING:
@@ -62,6 +73,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 BUCKET_NAME = "service-directory"
+IDENTITY_BUCKET_NAME = "service-identity"
 
 # Design.md §11 parameter table: TTL 60s, heartbeat well under that (3x
 # safety margin) so a couple of missed beats don't drop registration.
@@ -88,6 +100,20 @@ def _kv_key(subject: str, service_id: str) -> str:
     return f"{subject}.{service_id}"
 
 
+def _identity_value(*, service_id: str, adapter_type: str, signing_public_key: str) -> bytes:
+    """The service-identity value shape — parallel to
+    `_registration_value`, but for the identity/trust directory rather
+    than recipient liveness."""
+    return json.dumps(
+        {
+            "serviceId": service_id,
+            "adapterType": adapter_type,
+            "signingPublicKey": signing_public_key,
+            "registeredAt": datetime.now(UTC).isoformat(),
+        }
+    ).encode()
+
+
 class RegistryClient:
     """Register/heartbeat/deregister this adapter's own entries, and do a
     one-shot recipient lookup. For a publisher that needs live-updated
@@ -96,13 +122,15 @@ class RegistryClient:
     call, which is exactly what Design.md §4.5 says NOT to do per publish.
     """
 
-    def __init__(self, kv: KeyValue) -> None:
+    def __init__(self, kv: KeyValue, identity_kv: KeyValue) -> None:
         self._kv = kv
+        self._identity_kv = identity_kv
 
     @classmethod
     async def connect(cls, js: JetStreamContext) -> RegistryClient:
         kv = await js.key_value(BUCKET_NAME)
-        return cls(kv)
+        identity_kv = await js.key_value(IDENTITY_BUCKET_NAME)
+        return cls(kv, identity_kv)
 
     async def register(
         self, *, subject: str, service_id: str, adapter_type: str, encryption_public_key: str
@@ -124,6 +152,42 @@ class RegistryClient:
         case). The common "adapter just died" case doesn't need this —
         the TTL handles it."""
         await self._kv.delete(_kv_key(subject, service_id))
+
+    async def register_identity(
+        self, *, service_id: str, adapter_type: str, signing_public_key: str
+    ) -> None:
+        """Registers this adapter's own signing public key in the
+        service-identity directory — call once, at connect time (not on a
+        heartbeat; see the module docstring for why no TTL is involved
+        here). Every adapter does this, publisher or subscriber, since a
+        recipient needs to be able to look up *any* claimed sender's key."""
+        await self._identity_kv.put(
+            service_id,
+            _identity_value(
+                service_id=service_id,
+                adapter_type=adapter_type,
+                signing_public_key=signing_public_key,
+            ),
+        )
+
+    async def lookup_signing_key(self, service_id: str) -> str | None:
+        """The *trusted* signing public key registered for `service_id`,
+        or None if that serviceId has never registered an identity. A
+        recipient should verify a message's signature against this, not
+        against the message's own embedded `sourcePublicKey` claim —
+        that's the whole point (Design.md §9 item #4)."""
+        try:
+            entry = await self._identity_kv.get(service_id)
+        except KeyNotFoundError:
+            return None
+        if entry.value is None:
+            return None
+        try:
+            value = json.loads(entry.value)
+            return str(value["signingPublicKey"])
+        except (json.JSONDecodeError, KeyError):
+            logger.warning("skipping malformed service-identity entry %s", service_id)
+            return None
 
     def heartbeat(
         self,
@@ -155,6 +219,14 @@ class RegistryClient:
                 await asyncio.sleep(interval_seconds)
 
         return asyncio.create_task(_loop())
+
+    async def watch(self, subject: str) -> RecipientCache:
+        """A live, watch-updated `RecipientCache` for `subject`, started
+        and ready to use — added during Step B6 so `BusClient` doesn't
+        need access to this client's private `_kv` to build one itself."""
+        cache = RecipientCache(self._kv, subject)
+        await cache.start()
+        return cache
 
     async def lookup_recipients(self, subject: str) -> list[str]:
         """One-shot lookup of current recipient public keys for

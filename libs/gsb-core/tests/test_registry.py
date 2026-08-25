@@ -44,6 +44,15 @@ def subject() -> str:
     return f"events.test.RegistryTest{uuid.uuid4().hex[:8]}"
 
 
+@pytest.fixture
+def service_id() -> str:
+    """A fresh, never-used-before service id per test — for the
+    service-identity tests, which key entries by service id alone (no TTL,
+    so unlike `subject` above, isolation matters for the whole test run,
+    not just concurrent tests)."""
+    return f"test-service-{uuid.uuid4().hex[:8]}"
+
+
 async def test_register_then_lookup(registry: RegistryClient, subject: str) -> None:
     await registry.register(
         subject=subject,
@@ -213,3 +222,37 @@ async def test_cache_stop_cancels_cleanly(jetstream: JetStreamContext, subject: 
     await cache.stop()
 
     assert cache._task is None
+
+
+# --- service-identity (Design.md §9 item #4) ---------------------------
+
+
+async def test_register_identity_then_lookup(registry: RegistryClient, service_id: str) -> None:
+    await registry.register_identity(
+        service_id=service_id, adapter_type="test-adapter", signing_public_key="signing-pub-a"
+    )
+
+    assert await registry.lookup_signing_key(service_id) == "signing-pub-a"
+
+
+async def test_lookup_unknown_identity_returns_none(
+    registry: RegistryClient, service_id: str
+) -> None:
+    """Never registered — should be a clean None, not an exception."""
+    assert await registry.lookup_signing_key(service_id) is None
+
+
+async def test_register_identity_overwrites_previous_key(
+    registry: RegistryClient, service_id: str
+) -> None:
+    """Re-registering (e.g. on every BusClient.connect()) replaces the
+    previous key rather than accumulating history — matches the bucket's
+    history=1 config."""
+    await registry.register_identity(
+        service_id=service_id, adapter_type="test-adapter", signing_public_key="old-key"
+    )
+    await registry.register_identity(
+        service_id=service_id, adapter_type="test-adapter", signing_public_key="new-key"
+    )
+
+    assert await registry.lookup_signing_key(service_id) == "new-key"

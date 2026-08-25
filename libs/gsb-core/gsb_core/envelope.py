@@ -48,6 +48,16 @@ class EventDetails(BaseModel):
     # an envelope whose signature is still None — see Design.md Decision #5.
     signature: str | None = Field(default=None, alias="signature")
 
+    # Added during Step B6: a recipient verifying `signature` needs the
+    # sender's Ed25519 *public* nkey, and there was no way to get one —
+    # `sourceServiceId` is just an opaque string, and no registry maps
+    # "serviceId -> signing public key" (service-directory is keyed by
+    # (subject, serviceId) for *recipient* registration, a different
+    # lookup entirely). Public keys aren't secret, so carrying it directly
+    # in the envelope is the simplest fix — no new directory needed. Same
+    # optionality reasoning as `signature` above.
+    source_public_key: str | None = Field(default=None, alias="sourcePublicKey")
+
 
 class EncryptionMetadata(BaseModel):
     """Design.md §4.3 / §5 — the hybrid-encryption envelope metadata.

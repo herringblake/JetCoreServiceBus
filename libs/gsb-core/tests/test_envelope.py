@@ -62,6 +62,7 @@ def test_wire_shape_matches_design_doc_section_5() -> None:
         "sourceServiceId",
         "correlationId",
         "signature",
+        "sourcePublicKey",
     }
     encryption = parsed["event"]["encryption"]
     assert set(encryption.keys()) == {"algorithm", "recipients"}
