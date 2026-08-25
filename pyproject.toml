@@ -47,6 +47,7 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["libs", "adapters"]
+asyncio_mode = "auto"
 
 # nkeys and pyrage ship no type stubs / py.typed marker (confirmed via
 # mypy, not assumed) — standard per-module opt-out rather than a project-

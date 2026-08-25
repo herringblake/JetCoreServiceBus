@@ -1,0 +1,215 @@
+"""Tests for registry.py (Design.md §4.5) — Step B5.
+
+Requires a live NATS server, bootstrapped per Steps A3-A6: `bash
+infra/nats/up.sh` (or, if already up, just `docker compose up -d nats`).
+Connects as `gsb-admin` (full `$KV.service-directory.>` access — Step A3),
+so these tests can exercise both the "own namespace" and "other adapter's
+namespace" cases without hitting the per-adapter permission scoping tested
+separately in Step A7.
+
+Each test uses a unique subject (a fresh uuid4 suffix) so tests can't
+interfere with each other or with anything left in the real bucket.
+"""
+
+import asyncio
+import uuid
+from collections.abc import AsyncGenerator
+
+import nats
+import pytest
+from gsb_core.registry import RecipientCache, RegistryClient
+from nats.js import JetStreamContext
+
+CREDS_PATH = "infra/nats/operator/creds/gsb-admin.creds"
+NATS_URL = "nats://localhost:4222"
+
+
+@pytest.fixture
+async def jetstream() -> AsyncGenerator[JetStreamContext]:
+    nc = await nats.connect(NATS_URL, user_credentials=CREDS_PATH)
+    try:
+        yield nc.jetstream()
+    finally:
+        await nc.close()
+
+
+@pytest.fixture
+async def registry(jetstream: JetStreamContext) -> RegistryClient:
+    return await RegistryClient.connect(jetstream)
+
+
+@pytest.fixture
+def subject() -> str:
+    """A fresh, never-used-before subject per test."""
+    return f"events.test.RegistryTest{uuid.uuid4().hex[:8]}"
+
+
+async def test_register_then_lookup(registry: RegistryClient, subject: str) -> None:
+    await registry.register(
+        subject=subject,
+        service_id="svc-a",
+        adapter_type="test-adapter",
+        encryption_public_key="pub-a",
+    )
+
+    recipients = await registry.lookup_recipients(subject)
+
+    assert recipients == ["pub-a"]
+
+
+async def test_lookup_empty_subject_returns_empty_list(
+    registry: RegistryClient, subject: str
+) -> None:
+    """No one has ever registered for this (freshly generated) subject."""
+    assert await registry.lookup_recipients(subject) == []
+
+
+async def test_lookup_does_not_include_other_subjects(
+    registry: RegistryClient, subject: str
+) -> None:
+    other_subject = f"{subject}-unrelated"
+    await registry.register(
+        subject=other_subject,
+        service_id="svc-a",
+        adapter_type="test-adapter",
+        encryption_public_key="pub-a",
+    )
+
+    assert await registry.lookup_recipients(subject) == []
+
+
+async def test_multiple_recipients_for_same_subject(registry: RegistryClient, subject: str) -> None:
+    await registry.register(
+        subject=subject, service_id="svc-a", adapter_type="t", encryption_public_key="pub-a"
+    )
+    await registry.register(
+        subject=subject, service_id="svc-b", adapter_type="t", encryption_public_key="pub-b"
+    )
+
+    assert sorted(await registry.lookup_recipients(subject)) == ["pub-a", "pub-b"]
+
+
+async def test_deregister_removes_from_lookup(registry: RegistryClient, subject: str) -> None:
+    await registry.register(
+        subject=subject, service_id="svc-a", adapter_type="t", encryption_public_key="pub-a"
+    )
+    assert await registry.lookup_recipients(subject) == ["pub-a"]
+
+    await registry.deregister(subject=subject, service_id="svc-a")
+
+    assert await registry.lookup_recipients(subject) == []
+
+
+async def test_heartbeat_registers_repeatedly(registry: RegistryClient, subject: str) -> None:
+    """Doesn't wait out the real 60s bucket TTL (that mechanism was already
+    proven empirically in Step A5/A7) — just confirms the heartbeat task
+    actually drives repeated register() calls on schedule, and stops
+    cleanly on cancellation."""
+    task = registry.heartbeat(
+        subject=subject,
+        service_id="svc-a",
+        adapter_type="t",
+        encryption_public_key="pub-a",
+        interval_seconds=0.2,
+    )
+    try:
+        await asyncio.sleep(0.7)
+        assert await registry.lookup_recipients(subject) == ["pub-a"]
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+async def test_cache_sees_pre_existing_recipient_on_start(
+    jetstream: JetStreamContext, registry: RegistryClient, subject: str
+) -> None:
+    await registry.register(
+        subject=subject, service_id="svc-a", adapter_type="t", encryption_public_key="pub-a"
+    )
+
+    kv = await jetstream.key_value("service-directory")
+    cache = RecipientCache(kv, subject)
+    await cache.start()
+    try:
+        assert cache.current() == ["pub-a"]
+    finally:
+        await cache.stop()
+
+
+async def test_cache_picks_up_new_registration_after_start(
+    jetstream: JetStreamContext, registry: RegistryClient, subject: str
+) -> None:
+    kv = await jetstream.key_value("service-directory")
+    cache = RecipientCache(kv, subject)
+    await cache.start()
+    try:
+        assert cache.current() == []
+
+        await registry.register(
+            subject=subject, service_id="svc-a", adapter_type="t", encryption_public_key="pub-a"
+        )
+
+        async def _eventually_sees_it() -> None:
+            while cache.current() != ["pub-a"]:
+                await asyncio.sleep(0.05)
+
+        await asyncio.wait_for(_eventually_sees_it(), timeout=5)
+    finally:
+        await cache.stop()
+
+
+async def test_cache_removes_entry_on_deregister(
+    jetstream: JetStreamContext, registry: RegistryClient, subject: str
+) -> None:
+    await registry.register(
+        subject=subject, service_id="svc-a", adapter_type="t", encryption_public_key="pub-a"
+    )
+    kv = await jetstream.key_value("service-directory")
+    cache = RecipientCache(kv, subject)
+    await cache.start()
+    try:
+        assert cache.current() == ["pub-a"]
+
+        await registry.deregister(subject=subject, service_id="svc-a")
+
+        async def _eventually_empty() -> None:
+            while cache.current() != []:
+                await asyncio.sleep(0.05)
+
+        await asyncio.wait_for(_eventually_empty(), timeout=5)
+    finally:
+        await cache.stop()
+
+
+async def test_cache_ignores_unrelated_subjects(
+    jetstream: JetStreamContext, registry: RegistryClient, subject: str
+) -> None:
+    other_subject = f"{subject}-unrelated"
+    kv = await jetstream.key_value("service-directory")
+    cache = RecipientCache(kv, subject)
+    await cache.start()
+    try:
+        await registry.register(
+            subject=other_subject,
+            service_id="svc-a",
+            adapter_type="t",
+            encryption_public_key="pub-a",
+        )
+        # Give a moment for a (wrongly) matching update to arrive, if the
+        # watch's server-side filtering were broken.
+        await asyncio.sleep(0.3)
+
+        assert cache.current() == []
+    finally:
+        await cache.stop()
+
+
+async def test_cache_stop_cancels_cleanly(jetstream: JetStreamContext, subject: str) -> None:
+    kv = await jetstream.key_value("service-directory")
+    cache = RecipientCache(kv, subject)
+    await cache.start()
+
+    await cache.stop()
+
+    assert cache._task is None
