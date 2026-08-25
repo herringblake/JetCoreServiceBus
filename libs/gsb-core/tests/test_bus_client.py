@@ -13,95 +13,20 @@ consumer name per test (a stale consumer's cursor could otherwise point at
 sequence numbers a purge just invalidated).
 """
 
-import asyncio
 import base64
 import uuid
-from collections.abc import AsyncGenerator
 
-import nats
 import pytest
-from gsb_core.bus_client import BusClient
-from gsb_core.config import AdapterSettings
-from gsb_core.crypto import (
-    encrypt_for_recipients,
-    generate_encryption_keypair,
-    generate_signing_keypair,
-    sign,
-)
+from _helpers import SUBJECT, connect, wait_until_cache_nonempty
+from gsb_core.crypto import encrypt_for_recipients, generate_signing_keypair, sign
 from gsb_core.envelope import EncryptionMetadata, Event, EventDetails, EventEnvelope
-from gsb_core.registry import RecipientCache
-from nats.js.errors import NoKeysError
 
-NATS_URL = "nats://localhost:4222"
-SUBJECT = "events.files.FileWriteRequested"
-CREDS_DIR = "infra/nats/operator/creds"
-
-
-@pytest.fixture(autouse=True)
-async def _clean_state() -> AsyncGenerator[None]:
-    """Purges the EVENTS stream AND any service-directory registrations
-    for SUBJECT before each test, via gsb-admin — real adapter identities
-    can't be given arbitrary unique test subjects (only their real, fixed
-    ones), so tests get clean state each time instead.
-
-    The KV half of this was added after a real, initially-confusing
-    failure: `test_publish_with_no_recipients_does_not_crash` failed
-    intermittently depending on what ran before it in the same session —
-    `subscribe()` in an earlier test starts a real heartbeat that
-    `BusClient.close()` cancels but never deregisters, so the KV entry
-    lingers until its 60s TTL naturally expires. Purging only the message
-    stream (registry.py's own concern is untouched by that) wasn't enough;
-    a genuinely "no recipients" test needs the registry cleaned too, not
-    just the stream.
-    """
-    nc = await nats.connect(NATS_URL, user_credentials=f"{CREDS_DIR}/gsb-admin.creds")
-    js = nc.jetstream()
-    await js.purge_stream("EVENTS")
-    kv = await js.key_value("service-directory")
-    try:
-        for key in await kv.keys(filters=[f"{SUBJECT}."]):
-            await kv.delete(key)
-    except NoKeysError:
-        pass
-    await nc.close()
-    yield
-
-
-@pytest.fixture
-def durable_name() -> str:
-    return f"test-{uuid.uuid4().hex[:8]}"
-
-
-def _settings(service_id: str) -> AdapterSettings:
-    # AdapterSettings needs an env-driven load in production (Step B4), but
-    # constructing it directly is simpler and equally valid for tests —
-    # pydantic-settings models are just pydantic models with extra loading
-    # behavior bolted on.
-    return AdapterSettings(
-        service_id=service_id,
-        nats_url=NATS_URL,
-        nats_creds_path=f"{CREDS_DIR}/{service_id}.creds",
-    )
-
-
-async def _connect(service_id: str) -> BusClient:
-    signing = generate_signing_keypair()
-    encryption = generate_encryption_keypair()
-    return await BusClient.connect(
-        _settings(service_id),
-        adapter_type="test-adapter",
-        encryption_keypair=encryption,
-        signing_seed=signing.seed,
-        signing_public_key=signing.public_key,
-    )
-
-
-async def _wait_until_cache_nonempty(cache: RecipientCache, *, timeout: float = 3.0) -> None:
-    async def _poll() -> None:
-        while not cache.current():
-            await asyncio.sleep(0.05)
-
-    await asyncio.wait_for(_poll(), timeout=timeout)
+# Kept as local aliases so the rest of this file (and its history/diffs)
+# doesn't need to change beyond the import — the shared implementations
+# now live in _helpers.py / conftest.py (Step B7), alongside
+# test_end_to_end.py which needs the same setup.
+_connect = connect
+_wait_until_cache_nonempty = wait_until_cache_nonempty
 
 
 async def test_publish_and_fetch_round_trip(durable_name: str) -> None:
