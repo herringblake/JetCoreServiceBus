@@ -12784,3 +12784,249 @@ One thing left as-is: the checkout directory itself is still named GregorsServic
 git status --short shows the diff as modified files plus D/?? for the gsb-core→jetcore directory move (git will read that as a rename once you git add) — nothing staged or committed, per your standing instruction.
 
 ------------------ Rename Complete ----------------------
+
+================ Phase 2 Planning =======================
+
+Scope out Phase 2 and document break down of implementation steps.
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+wc -l Design.md
+grep -n "^# \|^## \|^### " Design.md
+
+OUT
+460 Design.md
+1:# Title: Jet Core Service Bus — Design Document
+11:## 1. Goals & Non-Goals
+28:## 2. Key Decisions (resolved during design discussion)
+55:## 3. High-Level Architecture
+102:## 4. Security Model
+104:### 4.1 Two separate keypairs per service
+117:### 4.2 Connection authentication (nkeys + decentralized JWT)
+129:### 4.3 Payload confidentiality (hybrid / envelope encryption)
+157:### 4.4 Subject-level authorization (NATS permissions)
+168:### 4.5 Registry / recipient directory (JetStream KV)
+194:### 4.6 Identity / sender-authentication directory (JetStream KV) — Decision #20
+208:## 5. Event Envelope
+242:## 6. NATS JetStream Layout
+251:## 7. Python Project
+253:### 7.1 Repository layout
+295:### 7.2 Libraries (proposed)
+317:### 7.3 Required services (for `docker-compose`, described — not written yet)
+324:### 7.4 Development tooling
+339:### 7.5 Development environment setup
+346:### 7.6 Environment properties (docker-compose)
+360:## 8. Initial Adapters
+375:## 9. Open Questions Summary
+387:## 10. Proposed Implementation Plan (high-level, no code yet)
+398:## 11. Phase 1 — Detailed Breakdown
+411:### Track A — NATS / JetStream Infrastructure
+421:### Track B — `jetcore` Library
+454:### Suggested sequencing
+Read Design.md (lines 361-460)
+Read Design.md (lines 2-361)
+Read adapter_identities.yaml
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+cat -n libs/jetcore/tests/test_config.py
+
+OUT
+     1	"""Tests for config.py (Design.md §7.6) — Step B4."""
+     2	
+     3	from pathlib import Path
+     4	
+     5	import pytest
+     6	from jetcore.config import AdapterSettings
+     7	from pydantic import ValidationError
+     8	
+     9	
+    10	@pytest.fixture
+    11	def creds_file(tmp_path: Path) -> Path:
+    12	    """A file that merely needs to exist — AdapterSettings only validates
+    13	    that the path is real, not that it's a well-formed .creds file (that's
+    14	    for whoever actually connects with it, Step B6)."""
+    15	    path = tmp_path / "test.creds"
+    16	    path.write_text("not a real creds file, just needs to exist")
+    17	    return path
+    18	
+    19	
+    20	def _env(monkeypatch: pytest.MonkeyPatch, creds_file: Path, **extra: str) -> None:
+    21	    monkeypatch.setenv("JETCORE_SERVICE_ID", "file-storage-01")
+    22	    monkeypatch.setenv("JETCORE_NATS_CREDS_PATH", str(creds_file))
+    23	    for key, value in extra.items():
+    24	        monkeypatch.setenv(key, value)
+    25	
+    26	
+    27	def test_loads_required_fields_from_env(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
+    28	    _env(monkeypatch, creds_file)
+    29	
+    30	    settings = AdapterSettings(_env_file=None)
+    31	
+    32	    assert settings.service_id == "file-storage-01"
+    33	    assert settings.nats_creds_path == creds_file
+    34	
+    35	
+    36	def test_defaults(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
+    37	    _env(monkeypatch, creds_file)
+    38	
+    39	    settings = AdapterSettings(_env_file=None)
+    40	
+    41	    assert settings.nats_url == "nats://nats:4222"
+    42	    assert settings.subjects == []
+    43	    assert settings.log_level == "INFO"
+    44	
+    45	
+    46	def test_subjects_comma_separated(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
+    47	    _env(
+    48	        monkeypatch,
+    49	        creds_file,
+    50	        JETCORE_SUBJECTS="events.files.FileWriteRequested, events.files.FileReadRequested",
+    51	    )
+    52	
+    53	    settings = AdapterSettings(_env_file=None)
+    54	
+    55	    assert settings.subjects == [
+    56	        "events.files.FileWriteRequested",
+    57	        "events.files.FileReadRequested",
+    58	    ]
+    59	
+    60	
+    61	def test_subjects_json_array(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
+    62	    _env(monkeypatch, creds_file, JETCORE_SUBJECTS='["events.a", "events.b"]')
+    63	
+    64	    settings = AdapterSettings(_env_file=None)
+    65	
+    66	    assert settings.subjects == ["events.a", "events.b"]
+    67	
+    68	
+    69	def test_subjects_empty_string_means_empty_list(
+    70	    monkeypatch: pytest.MonkeyPatch, creds_file: Path
+    71	) -> None:
+    72	    _env(monkeypatch, creds_file, JETCORE_SUBJECTS="")
+    73	
+    74	    settings = AdapterSettings(_env_file=None)
+    75	
+    76	    assert settings.subjects == []
+    77	
+    78	
+    79	def test_missing_required_service_id_raises(
+    80	    monkeypatch: pytest.MonkeyPatch, creds_file: Path
+    81	) -> None:
+    82	    monkeypatch.setenv("JETCORE_NATS_CREDS_PATH", str(creds_file))
+    83	
+    84	    with pytest.raises(ValidationError):
+    85	        AdapterSettings(_env_file=None)
+    86	
+    87	
+    88	def test_nonexistent_creds_path_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    89	    monkeypatch.setenv("JETCORE_SERVICE_ID", "file-storage-01")
+    90	    monkeypatch.setenv("JETCORE_NATS_CREDS_PATH", str(tmp_path / "does-not-exist.creds"))
+    91	
+    92	    with pytest.raises(ValidationError):
+    93	        AdapterSettings(_env_file=None)
+    94	
+    95	
+    96	def test_invalid_log_level_raises(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
+    97	    _env(monkeypatch, creds_file, JETCORE_LOG_LEVEL="VERBOSE")
+    98	
+    99	    with pytest.raises(ValidationError):
+   100	        AdapterSettings(_env_file=None)
+   101	
+   102	
+   103	def test_subclassing_adds_adapter_specific_settings(
+   104	    monkeypatch: pytest.MonkeyPatch, creds_file: Path
+   105	) -> None:
+   106	    _env(monkeypatch, creds_file, JETCORE_WATCH_DIR="/data/files")
+   107	
+   108	    class FileStorageSettings(AdapterSettings):
+   109	        watch_dir: str
+   110	
+   111	    settings = FileStorageSettings(_env_file=None)
+   112	
+   113	    assert settings.watch_dir == "/data/files"
+   114	    assert settings.service_id == "file-storage-01"  # inherited field still works
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+sed -n '455,460p' Design.md | cat -A | head -20
+
+OUT
+$
+B1M-bM-^@M-^SB4 have no infrastructure dependency and can start immediately / in parallel with Track A. B5M-bM-^@M-^SB7 need A6 (a running, bootstrapped NATS) to exist first. A7 and B7 both serve as the exit criteria for Phase 1 M-bM-^@M-^T once both pass, Phase 2's vertical slice (M-BM-'10) can begin.$
+$
+---$
+$
+*This document is a living draft M-bM-^@M-^T update it as open questions are resolved and the design evolves, rather than letting decisions drift into code undocumented.*$
+Edit Design.md
+Added 2 lines
+Edit Design.md
+Added 7 lines
+Edit Design.md
+Added 2 lines
+Now update §9's item #1 and add the new §12 section:
+
+Edit Design.md
+Modified
+Edit Design.md
+Added 52 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+grep -n "^## \|^### " Design.md
+echo "---"
+wc -l Design.md
+
+OUT
+11:## 1. Goals & Non-Goals
+28:## 2. Key Decisions (resolved during design discussion)
+57:## 3. High-Level Architecture
+104:## 4. Security Model
+106:### 4.1 Two separate keypairs per service
+119:### 4.2 Connection authentication (nkeys + decentralized JWT)
+131:### 4.3 Payload confidentiality (hybrid / envelope encryption)
+159:### 4.4 Subject-level authorization (NATS permissions)
+170:### 4.5 Registry / recipient directory (JetStream KV)
+196:### 4.6 Identity / sender-authentication directory (JetStream KV) — Decision #20
+210:## 5. Event Envelope
+244:## 6. NATS JetStream Layout
+253:## 7. Python Project
+255:### 7.1 Repository layout
+306:### 7.2 Libraries (proposed)
+328:### 7.3 Required services (for `docker-compose`, described — not written yet)
+335:### 7.4 Development tooling
+350:### 7.5 Development environment setup
+357:### 7.6 Environment properties (docker-compose)
+371:## 8. Initial Adapters
+386:## 9. Open Questions Summary
+398:## 10. Proposed Implementation Plan (high-level, no code yet)
+409:## 11. Phase 1 — Detailed Breakdown
+422:### Track A — NATS / JetStream Infrastructure
+432:### Track B — `jetcore` Library
+465:### Suggested sequencing
+471:## 12. Phase 2 — Detailed Breakdown
+490:### Track C — File Storage Adapter
+500:### Track D — Webhook Listener
+508:### Track E — Integration
+517:### Suggested sequencing
+---
+523 Design.md
+Structure looks clean. Let's do a final sanity read of §12 to check formatting renders correctly.
+
+Read Design.md (lines 472-523)
+Renders clean. Design.md is now fully updated for Phase 2 planning.
+
+Phase 2 scoped and documented — nothing built yet, per the "design first, build on continue" rhythm.
+
+Added to Design.md:
+
+Decisions #21 and #22 in §2's ledger — the two things Phase 2 genuinely needed settled before it could be scoped: how the Webhook Listener verifies an inbound request (generic shared-secret header, since no real source is being integrated yet — same placeholder spirit as Decision #14), and the webhook→command mapping (URL path segment → file path, raw body → base64 content).
+A new §12, "Phase 2 — Detailed Breakdown", mirroring §11's format exactly: a parameters table (adapter package naming, both payload shapes, path-traversal handling, the HTTP port, the data volume), then three tracks:
+Track C — File Storage Adapter (C1–C7): scaffold → settings → schemas → the write-path command handler → the external-creation watch (watchfiles, per Decision #19) → entrypoint → tests. Built and verified standing alone first, since it's the piece the other track needs something to prove against.
+Track D — Webhook Listener (D1–D5): scaffold → settings → the HTTP endpoint → entrypoint → tests.
+Track E — Integration (E1–E4): docker-compose wiring, Dockerfiles, a manual smoke test (A7's pattern, this time through real HTTP), and an automated end-to-end test (B7's test_end_to_end.py pattern, extended past the library into real adapters).
+One real correction caught while scoping, not building: §7.1's original repo layout sketched a generic app/ package name for every adapter — that collides under uv's single shared workspace venv (two adapters can't both own a top-level app module in one site-packages). Fixed the layout to name each package after its adapter, matching jetcore's own convention, and left a note explaining why.
+§9's open-questions list updated: item #1 (File Storage Adapter command schema) is now marked partially resolved — the write path is fully specified for Phase 2, list/read/delete remain deferred to Phase 3 as before.
+Sequencing is deliberately linear this time (C → D → E) rather than Phase 1's parallel tracks, since there's nothing for the Webhook Listener to prove against until the File Storage Adapter actually works. Ready for "continue on to Step C1" whenever you want to start building.
+
+---------------- Phase 2 Planning Completed -------------------

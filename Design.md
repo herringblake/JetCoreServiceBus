@@ -49,6 +49,8 @@ This document expands the original design notes into a concrete architecture, re
 | 18 | Is the adapter identity manifest (§11 Step A2) keyed per adapter *type* or per *instance*? | **Per instance.** The service-directory KV's `<subject>.<serviceId>` key shape (§4.5) already implies instance-level identity (e.g. `file-storage-01`), so a deployment can run multiple independent instances of the same adapter type — e.g. two HTTP Adapter instances, each wired to a different external API, each with its own NATS identity and permissions. See [infra/nats/adapter_identities.yaml](infra/nats/adapter_identities.yaml). |
 | 19 | Does `FileWriteRequested` need a separate `FileCreateRequested` command, and does the File Storage Adapter watch for externally-created files? | **No separate command** — `FileWriteRequested` auto-creates a missing file. It emits `FileCreateCompleted` if the file was new, `FileWriteCompleted` if an existing file was updated. `FileCreateCompleted` is **also** published outside the command flow when the adapter notices a file created by an outside process (e.g. a shared/watched directory) — no preceding command, no `correlationId`. This is a deliberately narrow pull-forward of the folder-watch capability otherwise deferred (§8) — creation-detection only, not update-detection (§9). |
 | 20 | How is the sender-authentication gap found in Step B6 closed (§9 item #4)? | **New `service-identity` KV directory** (§4.6) — every adapter registers its own signing key once at connect time (not on a heartbeat, no TTL); a recipient verifies against the *trusted* looked-up key, not the message's own embedded `sourcePublicKey` claim. Accepted as a v1-scoped mechanism, not a full PKI (no revocation beyond overwrite). |
+| 21 | How does the Phase 2 Webhook Listener verify an inbound request is legitimate, given no specific real external source is chosen yet (§8's "TBD per integration")? | **Shared-secret header** (`X-Webhook-Secret`, constant-time compared against a per-adapter configured secret) — a generic, source-agnostic placeholder that proves "verify before trusting the bus with it" as a real step, same spirit as Decision #14's placeholder subjects. A real integration's actual scheme (HMAC-SHA256 signature header, etc.) is source-specific and deferred until a real source is picked (§12). |
+| 22 | What's the `FileWriteRequested` → HTTP mapping and command payload shape for Phase 2 (§9 item #1, write path only)? | **URL path segment → relative file `path`** (`POST /webhooks/{path:path}`, resolved and validated to stay inside `watch_dir`), **raw request body → `content`** (base64 in the payload). Deliberately generic — no real webhook source is being integrated yet, so this proves the pattern (HTTP in → verified → bus command out) rather than shaping around a specific vendor's schema. `list`/`read`/`delete` command shapes remain deferred to Phase 3 (§9). |
 
 ---
 
@@ -277,9 +279,16 @@ JetCoreServiceBus/
     rest_api_service/
     webhook_sender/
     webhook_listener/
+      pyproject.toml
+      webhook_listener/       # importable package — see §12 note below
+      tests/
+      Dockerfile
     db_adapter_mysql/
     file_storage_adapter/
-      # each: pyproject.toml, app/, tests/, Dockerfile
+      pyproject.toml
+      file_storage_adapter/   # importable package
+      tests/
+      Dockerfile
   infra/
     nats/
       nats-server.conf        # JetStream + JWT resolver config (no static authorization block)
@@ -291,6 +300,8 @@ JetCoreServiceBus/
 ```
 
 Each adapter is its own installable Python package with its own `Dockerfile`, depending on `jetcore` as a local/editable dependency (or a private index later). This keeps adapters independently deployable while sharing the crypto/envelope/bus logic in one audited place.
+
+**Correction (found during Phase 2 scoping, §12):** the tree above originally sketched a generic `app/` package per adapter. That doesn't work under `uv`'s single shared workspace venv (§7.5) — two adapters both installing a top-level `app` module would collide in one `site-packages`. Each adapter's importable package is named after the adapter itself instead (`webhook_listener`, `file_storage_adapter`, ...), matching the `jetcore` convention already in place. Caught by reasoning about the workspace model before building, not by hitting the collision — worth recording anyway since it contradicts what was written here originally.
 
 ### 7.2 Libraries (proposed)
 
@@ -376,7 +387,7 @@ All adapters are built on `jetcore`, so "build a new adapter" mostly means writi
 
 Architectural questions have been resolved and folded into §2–§8 above (Decisions #1–#20). What's left is deliberately deferred, not blocking:
 
-1. **File Storage Adapter command/response schema** — exact subject names and payload shape for the `list`/`read`/`write`/`delete` commands are TBD, to be nailed down when that adapter is actually built (Phase 3). Reconfirmed still deferred, not blocking.
+1. **File Storage Adapter command/response schema** — exact subject names and payload shape for the `list`/`read`/`write`/`delete` commands are TBD. **Partially resolved for Phase 2**: the write path (`FileWriteRequested` → `FileCreateCompleted`/`FileWriteCompleted`) is fully specified in §12 (Decision #22), since Phase 2 needs it to build the vertical slice. `list`/`read`/`delete` remain deferred to Phase 3, unchanged.
 2. **Subject naming** — real bounded-context names are deferred by choice; `events.<context>.<EventType>` stays a placeholder pattern (`orders` as stand-in) until real domains are known. Nothing else in the design depends on the specific names chosen. Reconfirmed still deferred, not blocking.
 3. **Externally-triggered file *updates*** — Decision #19 has the File Storage Adapter detect externally-created files (→ `FileCreateCompleted`), but not externally-triggered updates to existing files. Reconfirmed as deferred to Phase 3, when the real usage pattern (how chatty the watched directory actually is) will be clearer.
 
@@ -454,6 +465,58 @@ Phase 1 (§10) splits into two tracks that can largely proceed in parallel, conv
 ### Suggested sequencing
 
 B1–B4 have no infrastructure dependency and can start immediately / in parallel with Track A. B5–B7 need A6 (a running, bootstrapped NATS) to exist first. A7 and B7 both serve as the exit criteria for Phase 1 — once both pass, Phase 2's vertical slice (§10) can begin.
+
+---
+
+## 12. Phase 2 — Detailed Breakdown
+
+Phase 2 (§10) builds the first real adapters on top of Phase 1's foundation: **Webhook Listener → File Storage Adapter**, the write-only vertical slice already scoped in §8 and §9/Decision #19, and already provisioned in the identity manifest ([infra/nats/adapter_identities.yaml](infra/nats/adapter_identities.yaml)). Nothing here is built yet — this is the step-by-step scope for when implementation starts, same spirit as §11.
+
+Unlike Phase 1's two independent tracks, Phase 2 is one slice with a natural dependency order: the File Storage Adapter (the consumer/writer) needs to exist and work before there's anything meaningful for the Webhook Listener (the producer) to prove end-to-end against — so Track C is built and verified first, Track D second, and Track E wires them together.
+
+**Parameters this breakdown settles — flag now if any should change, otherwise treated as settled for Phase 2:**
+
+| Parameter | Decision | Rationale |
+|---|---|---|
+| Adapter package naming | `webhook_listener`, `file_storage_adapter` (not the `app/` placeholder originally sketched in §7.1) | Both packages install into one shared workspace venv (§7.5) — a literal `app` module name would collide between them. Matches the `jetcore` convention. |
+| `FileWriteRequested` payload shape | `{"path": "<relative path>", "content": "<base64>"}` | Minimal, generic — a file's identity (path) and bytes (content), nothing source-specific baked in. |
+| Completion event payload shape (`FileCreateCompleted`/`FileWriteCompleted`) | `{"path": "...", "sizeBytes": N, "occurredAt": "<ISO8601>"}` | `correlationId` (if the request carried one) already lives in `eventDetails` (§5) — not duplicated in the payload. |
+| Path handling | `path` is resolved against the adapter's `watch_dir` and **must stay inside it** — reject anything that resolves outside (`..` traversal, absolute paths, symlink escape) | A command-driven adapter that writes wherever a message tells it to is a real path-traversal risk; the trust boundary is `watch_dir`, not "wherever the OS lets us write." |
+| Webhook → command mapping (Decision #22) | `POST /webhooks/{path:path}` — the URL path segment becomes the relative file `path`; the raw request body becomes `content` | No real external webhook source is being integrated yet (§8) — stays deliberately generic, proving "HTTP in → verified → bus command out," not a specific vendor's payload shape. |
+| Webhook source verification (Decision #21) | Shared-secret header (`X-Webhook-Secret`), constant-time compared against a configured per-adapter secret (`JETCORE_WEBHOOK_SECRET`, via a subclassed `AdapterSettings` — the exact pattern Step B4's `test_subclassing_adds_adapter_specific_settings` already proved) | Generic placeholder, same spirit as Decision #14's placeholder subjects — a real integration would swap in that source's actual scheme (HMAC header, etc.) without touching anything downstream of "request accepted." |
+| File Storage Adapter data volume | `watch_dir` bind-mounted into the container (`infra/files/` on the host, git-ignored) | Needs to actually persist/be inspectable on the host for smoke testing, same reasoning as `nats-data` in §7.6. |
+| Webhook Listener HTTP port | `8080`, published in `docker-compose.yml` (§7.6's anticipated shape) | No conflict with `4222`/`8222` (NATS) or `3306` (MySQL, unused this phase). |
+
+### Track C — File Storage Adapter
+
+- [ ] **C1. Package scaffold** — `adapters/file_storage_adapter/pyproject.toml` (depends on `jetcore` as an in-workspace path dependency, plus `aiofiles`/`watchfiles` per §7.2), `file_storage_adapter/` package dir, `tests/`, `Dockerfile`. Same shape as Step B1's scaffold, one workspace member further.
+- [ ] **C2. `settings.py`** — `FileStorageSettings(AdapterSettings)` adding `watch_dir: Path` (`JETCORE_WATCH_DIR`), the pattern Step B4 already proved viable. Validates `watch_dir` exists and is a directory at load time, same fail-fast spirit as `nats_creds_path`'s `FilePath`.
+- [ ] **C3. `schemas/` files** — JSON Schema for `events.files.FileWriteRequested`, `events.files.FileCreateCompleted`, `events.files.FileWriteCompleted` (v1), per §7.1/§5 and this section's payload-shape parameters. Written before the handler code that has to conform to them, the order Phase 1 mostly followed (schema/model first, implementation second).
+- [ ] **C4. Command handler — write path** — subscribe to `events.files.FileWriteRequested` via `BusClient`, resolve+validate `path` against `watch_dir` (reject traversal), check existence *before* writing to determine create-vs-update, write via `aiofiles`, publish `FileCreateCompleted` or `FileWriteCompleted` accordingly (Decision #19), ack. Modeled directly on `FakeConsumerAdapter`'s shape from Step B7 — this is that pattern's first real use.
+- [ ] **C5. External-creation watch** — `watchfiles` watching `watch_dir` for files that appear with no preceding command; publishes `FileCreateCompleted` with no `correlationId` (Decision #19's narrow pull-forward). Runs concurrently with C4's consume loop (`asyncio.gather`, the same concurrency shape B7 proved). Debounce/settle behavior (a file mid-write shouldn't fire before it's stable) is flagged as something to verify empirically against real `watchfiles` behavior, not assume.
+- [ ] **C6. Entrypoint + graceful shutdown** — `__main__.py` wiring settings → `BusClient.connect()` → C4+C5 concurrently, `SIGTERM`/`SIGINT` handling so `docker compose stop`/`down` exits cleanly rather than being killed after Compose's default grace period.
+- [ ] **C7. Tests + verification** — integration tests against the real Phase 1 stack (same fixture style as `libs/jetcore/tests`, not mocked): round-trip write, create-vs-update detection, path-traversal rejection, external-creation detection. `ruff`/`mypy`/`bandit`/`pip-audit`/`pre-commit` clean. This is Track C's exit criteria — the adapter must work standing alone (driven by test code publishing `FileWriteRequested` directly) before Track D gives it a real producer.
+
+### Track D — Webhook Listener
+
+- [ ] **D1. Package scaffold** — `adapters/webhook_listener/pyproject.toml` (`jetcore` + `fastapi` + `uvicorn` per §7.2), package dir, `tests/`, `Dockerfile`.
+- [ ] **D2. `settings.py`** — `WebhookListenerSettings(AdapterSettings)` adding the shared-secret config (Decision #21) and the HTTP bind port.
+- [ ] **D3. HTTP endpoint** — `POST /webhooks/{path:path}` (Decision #22): verify `X-Webhook-Secret`, reject with `401` on mismatch/missing before touching the bus at all, read the raw body, base64-encode into `{"path": ..., "content": ...}`, publish `events.files.FileWriteRequested` via `BusClient` (fire-and-forget per the manifest's own description — respond `202 Accepted` once published, not once processed). A `GET /healthz` for Compose/manual liveness checks, since — per A6/A7's finding — not every image in this stack ships a usable shell/HTTP client for that; a Python-native ASGI app can trivially serve its own.
+- [ ] **D4. Entrypoint** — `uvicorn` app factory wired to settings/`BusClient` lifecycle (connect on startup, close on shutdown — FastAPI lifespan, not a global).
+- [ ] **D5. Tests + verification** — `httpx`-based tests against the running app (FastAPI's ASGI test transport) for the HTTP-facing behavior (secret rejected/accepted, body→payload mapping, `202`/`401` codes), plus one live-bus integration test confirming a real `POST` results in a real `FileWriteRequested` landing on the stream. `ruff`/`mypy`/`bandit`/`pip-audit`/`pre-commit` clean.
+
+### Track E — Integration
+
+- [ ] **E1. `docker-compose.yml` wiring** — add `webhook-listener` and `file-storage-adapter` services: build from each adapter's `Dockerfile`, mount the relevant `.creds` file (Step A3's output) and `watch_dir` (File Storage Adapter only), set the `JETCORE_*` env vars per §7.6, publish `8080` for the Webhook Listener. `depends_on: nats` for ordering only — per A6's finding, `nats:2.14.5` has no shell for a Compose-native healthcheck, so both adapters must retry their own NATS connection on startup rather than assume Compose ordering means "ready."
+- [ ] **E2. Adapter `Dockerfile`s** — multi-stage, `uv`-based build (install just that adapter + `jetcore` via `uv sync --package`, not the whole dev workspace) on a `python:3.12-slim` base. First real Dockerfiles in the repo — worth verifying image size and that the editable local `jetcore` dependency actually resolves correctly in a container build context, a real risk with workspace path-dependencies, not guaranteed to just work.
+- [ ] **E3. Manual end-to-end smoke test** — same spirit as Step A7, this time through the real HTTP surface: `curl -X POST` a file's content to the running Webhook Listener with the correct secret, confirm the file lands under the File Storage Adapter's `watch_dir` on the host (bind mount makes this directly checkable), confirm the correct completion event (`FileCreateCompleted` first call, `FileWriteCompleted` on a repeat call to the same path) via a raw `nats` subscribe, confirm a wrong/missing secret is rejected with no bus traffic at all, confirm a `..`-traversal `path` is rejected without writing outside `watch_dir`.
+- [ ] **E4. Automated end-to-end test** — a `test_webhook_to_file_storage_end_to_end.py`-style test (naming echoes Step B7's `test_end_to_end.py`) that starts both adapters against the real Phase 1 stack and drives the whole path via a real HTTP `POST`, asserting the file's real on-disk content and the completion event — closing the loop the same way B7 did for the library alone.
+
+**Exit criteria:** Track C passes standing alone, then Track D passes standing alone, then E3+E4 both pass against the fully wired `docker-compose` stack — mirroring Phase 1's "both tracks converge, then prove it end-to-end from a clean rebuild" pattern (§11's B7 checkpoint).
+
+### Suggested sequencing
+
+C1–C7 first (Track E's dependency note above explains why). D1–D5 follow, reusing C's schema/settings patterns. E1–E4 only make sense once both tracks pass independently.
 
 ---
 
