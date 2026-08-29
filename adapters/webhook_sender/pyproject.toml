@@ -1,0 +1,33 @@
+# webhook_sender — subscribes to configured subjects and POSTs the
+# decrypted payload to an external webhook URL, best-effort, single
+# attempt, no retry (Design.md §8, Decision #12, §13 Track G).
+#
+# Dependencies added incrementally as each module (Design.md §13 Track G)
+# is actually built, same discipline every prior adapter followed.
+# `jetcore` is the one dependency every adapter needs from the start.
+#
+# [project] name is "jetcore-webhook-sender", not "webhook-sender" — a
+# real, unrelated package already owns that name on PyPI (found while
+# building this step, Design.md §13 Step G5 — `webhook-listener` turned
+# out to collide the same way, fixed at the same time). See that
+# package's own pyproject.toml comment and Decision #28 for the full
+# reasoning; the Python import name (`webhook_sender`) is unaffected.
+
+[project]
+name = "jetcore-webhook-sender"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "jetcore",
+]
+
+[tool.uv.sources]
+jetcore = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["webhook_sender"]

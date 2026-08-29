@@ -21182,3 +21182,996 @@ Then verified against the real deployed container, not just automated tests: reb
 Ready for Track G — Webhook Sender whenever you'd like to continue.
 
 ------------------ Track F Completed ------------------
+
+Proceed with all steps in Track G
+Let's check AdapterSettings.subjects and BusClient.subscribe() to plan the relay handler correctly.
+
+Let's begin. G1 — package scaffold.
+
+G2 — settings.py.
+
+G3 — the relay handler. Adding httpx as a real dependency.
+
+For real (not mocked) HTTP verification, let's build a small local test HTTP server helper — stdlib only, no new dependency.
+
+rest-api-service-01's identity already has publish permission on events.orders.OrderCreated from Phase 1's placeholder setup — I can use it as a test-only trigger publisher without any manifest changes, same as prior tracks did.
+
+Now let's create the test helpers and conftest for this package.
+
+Write _webhook_sender_helpers.py
+52 lines
+"""Test-only helpers for webhook_sender's live-NATS integration tests. A
+local copy of the same connect()/wait_until_cache_has() pattern used
+throughout this project's other test suites — not a cross-package
+import, for the self-containment reasons already explained in
+libs/jetcore/tests/_helpers.py and its siblings across the other
+adapters."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING
+
+from jetcore.bus_client import BusClient
+from jetcore.config import AdapterSettings
+from jetcore.crypto import generate_encryption_keypair, generate_signing_keypair
+
+if TYPE_CHECKING:
+    from jetcore.registry import RecipientCache
+
+NATS_URL = "nats://localhost:4222"
+CREDS_DIR = "infra/nats/operator/creds"
+
+ORDER_CREATED_SUBJECT = "events.orders.OrderCreated"
+
+
+def settings(service_id: str) -> AdapterSettings:
+    return AdapterSettings(
+        service_id=service_id,
+        nats_url=NATS_URL,
+        nats_creds_path=f"{CREDS_DIR}/{service_id}.creds",
+    )
+
+
+async def connect(service_id: str) -> BusClient:
+    signing = generate_signing_keypair()
+    encryption = generate_encryption_keypair()
+    return await BusClient.connect(
+        settings(service_id),
+        adapter_type="test-adapter",
+        encryption_keypair=encryption,
+        signing_seed=signing.seed,
+        signing_public_key=signing.public_key,
+    )
+
+
+async def wait_until_cache_has(cache: RecipientCache, count: int, *, timeout: float = 3.0) -> None:
+    async def _poll() -> None:
+        while len(cache.current()) < count:
+            await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(_poll(), timeout=timeout)
+Write conftest.py
+36 lines
+"""Shared fixtures for webhook_sender's live-NATS integration tests
+(Design.md §13 Step G3 onward). Mirrors the same _clean_state pattern
+used throughout this project's other test suites — re-implemented
+locally rather than imported, for the self-containment reasons
+_webhook_sender_helpers.py explains."""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import AsyncGenerator
+
+import nats
+import pytest
+from _webhook_sender_helpers import CREDS_DIR, NATS_URL, ORDER_CREATED_SUBJECT
+from nats.js.errors import NoKeysError
+
+
+@pytest.fixture(autouse=True)
+async def _clean_state() -> AsyncGenerator[None]:
+    nc = await nats.connect(NATS_URL, user_credentials=f"{CREDS_DIR}/jetcore-admin.creds")
+    js = nc.jetstream()
+    await js.purge_stream("EVENTS")
+    kv = await js.key_value("service-directory")
+    try:
+        for key in await kv.keys(filters=[f"{ORDER_CREATED_SUBJECT}."]):
+            await kv.delete(key)
+    except NoKeysError:
+        pass
+    await nc.close()
+    yield
+
+
+@pytest.fixture
+def durable_name() -> str:
+    return f"test-{uuid.uuid4().hex[:8]}"
+Now let's fix the import in test_relay_handler.py (it referenced _webhook_sender_helpers — good, matches) and run the tests.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv sync --all-packages 2>&1 | tail -5
+uv run pytest -q adapters/webhook_sender/tests/test_relay_handler.py -v 2>&1 | tail -80
+
+OUT
+Resolved 92 packages in 4ms
+Checked 89 packages in 3ms
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/bherring/dev/clodhopper/JetCoreServiceBus
+configfile: pyproject.toml
+plugins: anyio-4.14.2, cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 4 items
+
+adapters/webhook_sender/tests/test_relay_handler.py ....                 [100%]
+
+============================== 4 passed in 4.45s ===============================
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check . 2>&1 | tail -40
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -40
+
+OUT
+All checks passed!
+adapters/webhook_sender/tests/test_relay_handler.py:23: error: The return type of an async generator function should be "AsyncGenerator" or one of its supertypes  [misc]
+Found 1 error in 1 file (checked 59 source files)
+Read test_relay_handler.py (lines 2-28)
+Edit test_relay_handler.py
+Added 2 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check . 2>&1 | tail -10
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -20
+uv run pytest -q adapters/webhook_sender 2>&1 | tail -10
+
+OUT
+All checks passed!
+Success: no issues found in 59 source files
+..........                                                               [100%]
+10 passed in 4.34s
+G4 — the entrypoint.
+
+Write __main__.py
+128 lines
+"""Entrypoint for the Webhook Sender (Design.md §13 Step G4). Wires
+settings -> a real BusClient -> one RelayHandler per subject in
+JETCORE_SUBJECTS, running concurrently — the same
+asyncio.gather-of-independent-pieces shape used throughout this project
+(Steps C6/F5), here with a *variable* number of pieces (one per configured
+subject) rather than a fixed set.
+
+Run via: python -m webhook_sender
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import signal
+
+import httpx
+from jetcore.bus_client import BusClient
+
+from webhook_sender.relay_handler import RelayHandler
+from webhook_sender.settings import WebhookSenderSettings
+
+logger = logging.getLogger(__name__)
+
+ADAPTER_TYPE = "webhook-sender"
+
+# Same reasoning as the File Storage Adapter's entrypoint (Step C6): short
+# enough to stay well inside Docker's default 10s stop grace period, long
+# enough not to hammer NATS with pointless round trips.
+FETCH_TIMEOUT_SECONDS = 2.0
+FETCH_BATCH = 10
+
+
+async def _run_relay_loop(
+    handler: RelayHandler, durable_name: str, shutdown: asyncio.Event
+) -> None:
+    while not shutdown.is_set():
+        await handler.run_once(durable_name, batch=FETCH_BATCH, timeout=FETCH_TIMEOUT_SECONDS)
+
+
+async def run(
+    client: BusClient,
+    *,
+    subjects: list[str],
+    target_url: str,
+    outbound_secret: str | None,
+    http_client: httpx.AsyncClient,
+    service_id: str,
+    shutdown: asyncio.Event,
+) -> None:
+    """The adapter's actual running logic — one RelayHandler per
+    configured subject, until `shutdown` is set. Split out from main()
+    the same way every other adapter's entrypoint is (Steps C6/D4/F5), so
+    a test can drive this real wiring directly without OS signals or a
+    subprocess."""
+    # A standalone keepalive task, always present: if `subjects` is empty
+    # (a legitimate, if useless, configuration — nothing to relay),
+    # nothing else here would ever complete the gather below, and the
+    # process should still wait for a real shutdown signal rather than
+    # exiting immediately.
+    tasks = [asyncio.create_task(shutdown.wait())]
+
+    for subject in subjects:
+        handler = RelayHandler(
+            client,
+            subject=subject,
+            target_url=target_url,
+            outbound_secret=outbound_secret,
+            http_client=http_client,
+        )
+        # Dots replaced: NATS durable consumer names conventionally avoid
+        # them (subject-space's own token separator) — every other
+        # durable name in this project happens to be dot-free already,
+        # this is the first one built from a subject string directly.
+        durable_name = f"{service_id}-relay-{subject.replace('.', '_')}"
+        await handler.start(durable_name=durable_name)
+        tasks.append(asyncio.create_task(_run_relay_loop(handler, durable_name, shutdown)))
+
+    logger.info(
+        "webhook sender started (service_id=%s, subjects=%s, target_url=%s)",
+        service_id,
+        subjects,
+        target_url,
+    )
+    await asyncio.gather(*tasks)
+
+
+async def main() -> None:
+    logging.basicConfig(level=logging.INFO)
+
+    settings = WebhookSenderSettings()  # pydantic-settings loads required fields from env vars
+    client = await BusClient.connect_as_adapter(settings, adapter_type=ADAPTER_TYPE)
+
+    shutdown = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _request_shutdown(sig: signal.Signals) -> None:
+        logger.info("received %s, shutting down", sig.name)
+        shutdown.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _request_shutdown, sig)
+
+    outbound_secret = (
+        settings.outbound_secret.get_secret_value()
+        if settings.outbound_secret is not None
+        else None
+    )
+
+    async with httpx.AsyncClient() as http_client:
+        try:
+            await run(
+                client,
+                subjects=settings.subjects,
+                target_url=settings.target_url,
+                outbound_secret=outbound_secret,
+                http_client=http_client,
+                service_id=settings.service_id,
+                shutdown=shutdown,
+            )
+        finally:
+            await client.close()
+            logger.info("webhook sender stopped")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check . 2>&1 | tail -20
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -20
+
+OUT
+All checks passed!
+adapters/webhook_sender/webhook_sender/__main__.py:77: error: Argument 1 to "create_task" has incompatible type "Coroutine[Any, Any, None]"; expected "Coroutine[Any, Any, Literal[True]]"  [arg-type]
+Found 1 error in 1 file (checked 60 source files)
+Edit __main__.py
+Added 9 lines
+Edit __main__.py
+Modified
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check . 2>&1 | tail -20
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -20
+
+OUT
+All checks passed!
+Success: no issues found in 60 source files
+Now let's actually run the real entrypoint against the live stack.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+SCRATCH=/tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad
+mkdir -p "$SCRATCH"
+uv run python3 -c "
+import sys, time
+sys.path.insert(0, 'adapters/webhook_sender/tests')
+from _local_http_server import LocalHttpServer
+server = LocalHttpServer(status_code=200)
+print('URL', server.url)
+with open('$SCRATCH/g4_server_url.txt', 'w') as f:
+    f.write(server.url)
+time.sleep(60)
+print('received', len(server.received))
+for r in server.received:
+    print(r.path, r.headers.get('X-Event-Type'), r.body)
+" > "$SCRATCH/g4_server.log" 2>&1 &
+echo "server PID=$!"
+sleep 1
+cat "$SCRATCH/g4_server_url.txt"
+
+OUT
+server PID=129418
+http://127.0.0.1:33747
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+SCRATCH=/tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad
+TARGET_URL=$(cat "$SCRATCH/g4_server_url.txt")
+export JETCORE_SERVICE_ID=webhook-sender-01
+export JETCORE_NATS_URL=nats://localhost:4222
+export JETCORE_NATS_CREDS_PATH=infra/nats/operator/creds/webhook-sender-01.creds
+export JETCORE_TARGET_URL="$TARGET_URL"
+export JETCORE_OUTBOUND_SECRET=g4-manual-secret
+export JETCORE_SUBJECTS=events.orders.OrderCreated
+uv run --all-packages python -m webhook_sender > "$SCRATCH/g4.log" 2>&1 &
+echo "PID=$!"
+sleep 2
+cat "$SCRATCH/g4.log"
+
+OUT
+PID=129469
+INFO:__main__:webhook sender started (service_id=webhook-sender-01, subjects=['events.orders.OrderCreated'], target_url=http://127.0.0.1:33747)
+Now let's publish a real trigger event via rest-api-service-01's identity and confirm it gets relayed.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run python3 -c "
+import asyncio
+from jetcore.bus_client import BusClient
+from jetcore.config import AdapterSettings
+
+async def main():
+    settings = AdapterSettings(
+        service_id='rest-api-service-01',
+        nats_url='nats://localhost:4222',
+        nats_creds_path='infra/nats/operator/creds/rest-api-service-01.creds',
+    )
+    client = await BusClient.connect_as_adapter(settings, adapter_type='test-publisher')
+    cache = await client._cache_for('events.orders.OrderCreated')
+    for _ in range(50):
+        if cache.current():
+            break
+        await asyncio.sleep(0.1)
+    await client.publish('events.orders.OrderCreated', b'G4 real manual verification payload', event_type='OrderCreated')
+    await client.close()
+    print('published')
+
+asyncio.run(main())
+"
+
+OUT
+published
+Bash
+IN
+sleep 2
+SCRATCH=/tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad
+tail -20 "$SCRATCH/g4.log"
+
+OUT
+INFO:__main__:webhook sender started (service_id=webhook-sender-01, subjects=['events.orders.OrderCreated'], target_url=http://127.0.0.1:33747)
+INFO:httpx:HTTP Request: POST http://127.0.0.1:33747 "HTTP/1.0 200 OK"
+Real relay confirmed via the actual entrypoint process (not just tests) — a genuine POST reached the local server and got 200 OK. Header-content correctness is already thoroughly covered by G3's automated tests against the same real server. Let's clean up and verify graceful shutdown.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+SCRATCH=/tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad
+PID=$(pgrep -f "webhook_sender" | head -1)
+echo "sending SIGTERM to $PID"
+kill -TERM "$PID"
+for i in $(seq 1 20); do
+  if ! kill -0 "$PID" 2>/dev/null; then echo "process exited after ~${i}00ms polls"; break; fi
+  sleep 0.5
+done
+kill -0 "$PID" 2>/dev/null && echo "STILL RUNNING" || echo "confirmed exited"
+tail -5 "$SCRATCH/g4.log"
+pkill -f "_local_http_server" 2>/dev/null
+pkill -f "import sys, time" 2>/dev/null
+true
+
+OUT
+Exit code 144
+sending SIGTERM to 129418
+process exited after ~200ms polls
+confirmed exited
+INFO:__main__:webhook sender started (service_id=webhook-sender-01, subjects=['events.orders.OrderCreated'], target_url=http://127.0.0.1:33747)
+INFO:httpx:HTTP Request: POST http://127.0.0.1:33747 "HTTP/1.0 200 OK"
+Bash
+IN
+ps aux | grep -i "webhook_sender\|python -m" | grep -v grep
+
+OUT
+bherring   98950  0.3  0.0 142576 59012 ?        Ssl  20:05   0:15 python -m webhook_listener
+bherring  123158  0.5  0.0 277616 53124 ?        Ssl  20:46   0:09 python -m file_storage_adapter
+bherring  129469  0.0  0.0 224440 36040 ?        Sl   21:14   0:00 uv run --all-packages python -m webhook_sender
+bherring  129473  0.8  0.0 144704 57560 ?        Sl   21:14   0:00 /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/bin/python3 -m webhook_sender
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+SCRATCH=/tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad
+kill -TERM 129473
+for i in $(seq 1 20); do
+  if ! kill -0 129473 2>/dev/null; then echo "process exited after ~${i}00ms polls"; break; fi
+  sleep 0.5
+done
+kill -0 129473 2>/dev/null && echo "STILL RUNNING" || echo "confirmed exited"
+tail -10 "$SCRATCH/g4.log"
+
+OUT
+process exited after ~500ms polls
+confirmed exited
+INFO:__main__:webhook sender started (service_id=webhook-sender-01, subjects=['events.orders.OrderCreated'], target_url=http://127.0.0.1:33747)
+INFO:httpx:HTTP Request: POST http://127.0.0.1:33747 "HTTP/1.0 200 OK"
+INFO:__main__:received SIGTERM, shutting down
+INFO:__main__:webhook sender stopped
+Clean, graceful shutdown confirmed on the real process. Let's clean up remaining background jobs and bus state.
+
+Bash
+IN
+pkill -f "uv run --all-packages python -m webhook_sender" 2>/dev/null
+pkill -f "python -m webhook_sender" 2>/dev/null
+pkill -f "sys.path.insert.*_local_http_server" 2>/dev/null
+ps aux | grep -i "webhook_sender\|_local_http_server" | grep -v grep
+echo "---"
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -3
+for bucket in service-directory service-identity; do
+  for key in $(sg docker -c "$NB kv ls $bucket" 2>&1); do
+    sg docker -c "$NB kv del $bucket '$key' -f" 2>&1 >/dev/null
+  done
+done
+echo cleaned
+
+OUT
+Exit code 144
+Bash
+IN
+ps aux | grep -i "webhook_sender\|_local_http_server" | grep -v grep
+echo "no matches means clean"
+
+OUT
+no matches means clean
+Good, processes cleaned up. Let's finish the bus cleanup separately.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -3
+
+OUT
+      First Sequence: 738
+       Last Sequence: 737 @ 2026-08-29 04:14:11
+    Active Consumers: 571
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+for bucket in service-directory service-identity; do
+  for key in $(sg docker -c "$NB kv ls $bucket" 2>&1); do
+    sg docker -c "$NB kv del $bucket '$key' -f" 2>&1 >/dev/null
+  done
+done
+echo cleaned
+
+OUT
+cleaned
+The core G3 tests already cover relay-on-receipt/secret-header/failed-POST (matching G5's plan). Let's add the entrypoint-level test too, matching the established C7/F6 pattern of proving the real wiring, not just the handler class.
+
+Write test_webhook_sender_entrypoint.py
+111 lines
+"""Integration test for the real entrypoint wiring (Design.md §13 Step
+G5) — drives webhook_sender.__main__.run() directly: a real BusClient
+(via connect_as_adapter), a real local HTTP server, a real shutdown
+handshake. Mirrors the same pattern Steps C7/F6 each already established
+for their own adapters — test_relay_handler.py already proves
+RelayHandler works in isolation; this is the one test that proves it
+still works wired into the real multi-subject gather (Step G4), including
+the "subjects is empty" keepalive path.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import httpx
+import webhook_sender.__main__ as entrypoint
+from _local_http_server import LocalHttpServer
+from _webhook_sender_helpers import ORDER_CREATED_SUBJECT, connect, wait_until_cache_has
+from jetcore.bus_client import BusClient
+from jetcore.config import AdapterSettings
+
+
+async def test_real_entrypoint_relays_and_shuts_down_cleanly(durable_name: str) -> None:
+    server = LocalHttpServer(status_code=200)
+    settings = AdapterSettings(
+        service_id="webhook-sender-01",
+        nats_url="nats://localhost:4222",
+        nats_creds_path="infra/nats/operator/creds/webhook-sender-01.creds",
+    )
+    sender_client = await BusClient.connect_as_adapter(settings, adapter_type="webhook-sender")
+    publisher = await connect("rest-api-service-01")
+    shutdown = asyncio.Event()
+    run_task: asyncio.Task[None] | None = None
+    try:
+        async with httpx.AsyncClient() as http_client:
+            run_task = asyncio.create_task(
+                entrypoint.run(
+                    sender_client,
+                    subjects=[ORDER_CREATED_SUBJECT],
+                    target_url=server.url,
+                    outbound_secret="entrypoint-secret",
+                    http_client=http_client,
+                    service_id="webhook-sender-01",
+                    shutdown=shutdown,
+                )
+            )
+            await asyncio.sleep(0.2)  # let subscribe() actually happen
+
+            await wait_until_cache_has(await publisher._cache_for(ORDER_CREATED_SUBJECT), 1)
+            await publisher.publish(
+                ORDER_CREATED_SUBJECT, b"G5 entrypoint proof", event_type="OrderCreated"
+            )
+
+            for _ in range(50):
+                if server.received:
+                    break
+                await asyncio.sleep(0.1)
+
+            assert len(server.received) == 1
+            assert server.received[0].body == b"G5 entrypoint proof"
+            assert server.received[0].headers["X-Webhook-Secret"] == "entrypoint-secret"
+
+            # Graceful shutdown: setting the event must make run() actually
+            # return within a bounded time, not hang.
+            shutdown.set()
+            await asyncio.wait_for(run_task, timeout=5)
+            run_task = None
+    finally:
+        if run_task is not None:
+            run_task.cancel()
+        server.shutdown()
+        await sender_client.close()
+        await publisher.close()
+
+
+async def test_real_entrypoint_with_no_subjects_still_shuts_down_cleanly() -> None:
+    """The keepalive task (Design.md §13 Step G4) — with zero configured
+    subjects there's nothing to gather except it, so run() must still
+    respond to shutdown rather than hang forever with an empty gather."""
+    settings = AdapterSettings(
+        service_id="webhook-sender-01",
+        nats_url="nats://localhost:4222",
+        nats_creds_path="infra/nats/operator/creds/webhook-sender-01.creds",
+    )
+    sender_client = await BusClient.connect_as_adapter(settings, adapter_type="webhook-sender")
+    shutdown = asyncio.Event()
+    run_task: asyncio.Task[None] | None = None
+    try:
+        async with httpx.AsyncClient() as http_client:
+            run_task = asyncio.create_task(
+                entrypoint.run(
+                    sender_client,
+                    subjects=[],
+                    target_url="http://127.0.0.1:1",  # never used — no subjects
+                    outbound_secret=None,
+                    http_client=http_client,
+                    service_id="webhook-sender-01",
+                    shutdown=shutdown,
+                )
+            )
+            await asyncio.sleep(0.2)
+            assert not run_task.done()  # still alive, waiting on shutdown
+
+            shutdown.set()
+            await asyncio.wait_for(run_task, timeout=5)
+            run_task = None
+    finally:
+        if run_task is not None:
+            run_task.cancel()
+        await sender_client.close()
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q adapters/webhook_sender/tests/test_webhook_sender_entrypoint.py -v 2>&1 | tail -60
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/bherring/dev/clodhopper/JetCoreServiceBus
+configfile: pyproject.toml
+plugins: anyio-4.14.2, cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 2 items
+
+adapters/webhook_sender/tests/test_webhook_sender_entrypoint.py ..       [100%]
+
+============================== 2 passed in 3.12s ===============================
+Both pass on the first try. Now let's run the full toolchain and full suite for stability.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== ruff ==="; uv run ruff check . 2>&1 | tail -30
+echo "=== mypy ==="; uv run --all-packages mypy libs adapters tests 2>&1 | tail -30
+echo "=== bandit ==="
+uv run bandit -q -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter adapters/webhook_listener/webhook_listener adapters/webhook_sender/webhook_sender 2>&1
+echo "=== pip-audit ==="
+uv run pip-audit 2>&1 | tail -10
+
+OUT
+=== ruff ===
+All checks passed!
+=== mypy ===
+Success: no issues found in 61 source files
+=== bandit ===
+=== pip-audit ===
+No known vulnerabilities found
+Name                 Skip Reason
+-------------------- -----------------------------------------------------------------------------------
+file-storage-adapter Dependency not found on PyPI and could not be audited: file-storage-adapter (0.1.0)
+jetcore              Dependency not found on PyPI and could not be audited: jetcore (0.1.0)
+webhook-listener     Dependency not found on PyPI and could not be audited: webhook-listener (0.1.0)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pip-audit 2>&1 | tail -15
+
+OUT
+No known vulnerabilities found
+Name                 Skip Reason
+-------------------- -----------------------------------------------------------------------------------
+file-storage-adapter Dependency not found on PyPI and could not be audited: file-storage-adapter (0.1.0)
+jetcore              Dependency not found on PyPI and could not be audited: jetcore (0.1.0)
+webhook-listener     Dependency not found on PyPI and could not be audited: webhook-listener (0.1.0)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv pip list 2>&1 | grep -i webhook
+uv run python3 -c "import webhook_sender; print(webhook_sender.__file__)"
+
+OUT
+webhook-listener          0.1.0           /home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_listener
+webhook-sender            0.1.0           /home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_sender
+/home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_sender/webhook_sender/__init__.py
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pip-audit 2>&1
+
+OUT
+No known vulnerabilities found
+Name                 Skip Reason
+-------------------- -----------------------------------------------------------------------------------
+file-storage-adapter Dependency not found on PyPI and could not be audited: file-storage-adapter (0.1.0)
+jetcore              Dependency not found on PyPI and could not be audited: jetcore (0.1.0)
+webhook-listener     Dependency not found on PyPI and could not be audited: webhook-listener (0.1.0)
+This could mean something interesting — let me check if webhook-sender collides with a real published PyPI package name.
+
+Bash
+IN
+curl -sS -o /dev/null -w "%{http_code}\n" https://pypi.org/pypi/webhook-sender/json
+curl -sS https://pypi.org/pypi/webhook-sender/json 2>&1 | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['info']['name'], d['info']['version'], d['info']['summary'])" 2>&1
+
+OUT
+200
+webhook-sender 0.1.0.1 A helper for sending webhooks, with automatic retry and CLI.
+A real, previously-hidden bug: webhook-sender collides with an unrelated real PyPI package, so pip-audit silently checks the wrong project's data instead of correctly flagging ours as unpublished. Let me check whether the other package names collide too before deciding scope.
+
+Bash
+IN
+for pkg in jetcore file-storage-adapter webhook-listener webhook-sender http-adapter rest-api-service db-adapter-mysql; do
+  code=$(curl -sS -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/$pkg/json")
+  echo "$pkg: $code"
+done
+
+OUT
+jetcore: 404
+file-storage-adapter: 404
+webhook-listener: 200
+webhook-sender: 200
+http-adapter: 200
+rest-api-service: 404
+db-adapter-mysql: 404
+This is bigger than just webhook-sender — webhook-listener (already shipped in Track D!) collides too, and http-adapter (not yet built) also collides. Let me check the full scope of what references the distribution name specifically (not the directory/service/import names, which don't need to change).
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -rn "package webhook-listener\|package webhook-sender\|name = \"webhook-listener\"\|name = \"webhook-sender\"" --include="*.toml" --include="Dockerfile" --include="*.md" .
+
+OUT
+Dependencies.md:30:| `fastapi` | [PyPI](https://pypi.org/project/fastapi/) | **0.141.1** (resolved via `uv add --package webhook-listener`) | *resolved 2026-08-27* | ASGI HTTP surface for the Webhook Listener — [app.py](adapters/webhook_listener/webhook_listener/app.py) (Design.md §12 Step D3). REST API Service (Phase 3) will share it. | Extremely widely adopted; large, active maintainer community. Verified: `FastAPI`'s `lifespan` context manager only runs inside `TestClient`'s `with` block — a bare `TestClient(app)` used outside one silently never triggers it, confirmed by testing (not documented anywhere obvious), which left `app.state.bus_client` unset until this was caught. | 2026-08-27 |
+adapters/webhook_listener/Dockerfile:22:RUN uv sync --frozen --no-dev --package webhook-listener
+adapters/webhook_sender/pyproject.toml:10:name = "webhook-sender"
+adapters/webhook_listener/pyproject.toml:11:name = "webhook-listener"
+This is a real, systemic finding worth a proper fix and a new Decision — I'll rename both colliding packages now (Python import names are unaffected, only the PyPI-facing distribution name) and adopt a jetcore- prefix convention going forward.
+
+Read pyproject.toml
+Edit pyproject.toml
+Added 10 lines
+Read pyproject.toml
+Edit pyproject.toml
+Added 7 lines
+Now update the Dockerfile's --package flag and regenerate the lockfile.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "package webhook-listener" adapters/webhook_listener/Dockerfile
+
+OUT
+22:RUN uv sync --frozen --no-dev --package webhook-listener
+Edit Dockerfile
+Modified
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv lock 2>&1 | tail -20
+uv sync --all-packages 2>&1 | tail -20
+
+OUT
+Resolved 92 packages in 17ms
+Added jetcore-webhook-listener v0.1.0
+Added jetcore-webhook-sender v0.1.0
+Removed webhook-listener v0.1.0
+Removed webhook-sender v0.1.0
+Resolved 92 packages in 1ms
+   Building jetcore-webhook-listener @ file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_listener
+   Building jetcore-webhook-sender @ file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_sender
+      Built jetcore-webhook-sender @ file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_sender
+      Built jetcore-webhook-listener @ file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_listener
+Prepared 2 packages in 275ms
+Uninstalled 2 packages in 0.72ms
+Installed 2 packages in 0.79ms
+ + jetcore-webhook-listener==0.1.0 (from file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_listener)
+ + jetcore-webhook-sender==0.1.0 (from file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_sender)
+ - webhook-listener==0.1.0 (from file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_listener)
+ - webhook-sender==0.1.0 (from file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_sender)
+Now let's verify pip-audit correctly treats these as local/unpublished.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pip-audit 2>&1
+
+OUT
+No known vulnerabilities found
+Name                     Skip Reason
+------------------------ ---------------------------------------------------------------------------------------
+file-storage-adapter     Dependency not found on PyPI and could not be audited: file-storage-adapter (0.1.0)
+jetcore                  Dependency not found on PyPI and could not be audited: jetcore (0.1.0)
+jetcore-webhook-listener Dependency not found on PyPI and could not be audited: jetcore-webhook-listener (0.1.0)
+jetcore-webhook-sender   Dependency not found on PyPI and could not be audited: jetcore-webhook-sender (0.1.0)
+Bash
+IN
+for pkg in jetcore-webhook-listener jetcore-webhook-sender; do
+  code=$(curl -sS -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/$pkg/json")
+  echo "$pkg: $code"
+done
+
+OUT
+jetcore-webhook-listener: 404
+jetcore-webhook-sender: 404
+Both confirmed free. Now let's run the full toolchain and suite to make sure nothing else broke from the rename.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q 2>&1 | tail -10
+uv run ruff check . 2>&1 | tail -10
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -10
+
+OUT
+........................................................................ [ 41%]
+........................................................................ [ 83%]
+............................                                             [100%]
+172 passed in 35.07s
+All checks passed!
+Success: no issues found in 61 source files
+Let's confirm the Dockerfile change actually still builds correctly.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sg docker -c "docker compose up -d --build webhook-listener" 2>&1 | tail -20
+
+OUT
+#19 exporting to image
+#19 exporting layers
+#19 exporting layers 1.1s done
+#19 exporting manifest sha256:3f2753f1faf6cdb0073c3d0c6675c222ca436465bffb94690fe4139f0c8de1e1 0.0s done
+#19 exporting config sha256:451270a6441869ce2f03c0c34440817fe739afb297128587c4a3ca051e1583e4 0.0s done
+#19 exporting attestation manifest sha256:70e817f91c8f975fec3339c8f918d5b7a0d8c0a8174c20a8f3eca963d8c97c85 0.0s done
+#19 exporting manifest list sha256:5b04bdb9cf76f456e5c814615c0ec33fc72f74adbd54bdc43ce4a66b6bc25297 0.0s done
+#19 naming to docker.io/library/jetcore-webhook-listener:latest done
+#19 unpacking to docker.io/library/jetcore-webhook-listener:latest
+#19 unpacking to docker.io/library/jetcore-webhook-listener:latest 0.6s done
+#19 DONE 1.8s
+
+#20 resolving provenance for metadata file
+#20 DONE 0.0s
+ Image jetcore-webhook-listener Built 
+ Container jetcore-nats-1 Running 
+ Container jetcore-webhook-listener-1 Recreate 
+ Container jetcore-webhook-listener-1 Recreated 
+ Container jetcore-webhook-listener-1 Starting 
+ Container jetcore-webhook-listener-1 Started
+Bash
+IN
+sleep 2
+curl -sS -w "\nHTTP=%{http_code}\n" http://localhost:8080/healthz
+
+OUT
+{"status":"ok"}
+HTTP=200
+Now let's update Dependencies.md — fix the stale package-name reference and record httpx's real resolution for Webhook Sender.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "webhook-listener\|| \`httpx\`" Dependencies.md
+
+OUT
+30:| `fastapi` | [PyPI](https://pypi.org/project/fastapi/) | **0.141.1** (resolved via `uv add --package webhook-listener`) | *resolved 2026-08-27* | ASGI HTTP surface for the Webhook Listener — [app.py](adapters/webhook_listener/webhook_listener/app.py) (Design.md §12 Step D3). REST API Service (Phase 3) will share it. | Extremely widely adopted; large, active maintainer community. Verified: `FastAPI`'s `lifespan` context manager only runs inside `TestClient`'s `with` block — a bare `TestClient(app)` used outside one silently never triggers it, confirmed by testing (not documented anywhere obvious), which left `app.state.bus_client` unset until this was caught. | 2026-08-27 |
+32:| `httpx` | [PyPI](https://pypi.org/project/httpx/) | *pin at adoption* | *pin at adoption* | Async outbound HTTP for the HTTP Adapter and Webhook Sender (Phase 3) — a distinct future use from `httpx2` below. | Maintained by Encode (same org as `starlette`/`uvicorn`); widely adopted. | 2026-08-23 |
+Edit Dependencies.md
+Modified
+Edit Dependencies.md
+Modified
+Now let's add Decision #28 and document Track G's steps in Design.md.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "| 27 |" Design.md
+
+OUT
+58:| 27 | How do the Webhook Sender and HTTP Adapter know which external endpoint to call? | **One fixed target per instance** (`JETCORE_WEBHOOK_TARGET_URL` / `JETCORE_HTTP_TARGET_BASE_URL`, plus an optional outbound auth header/secret each) — the same per-instance-identity pattern Decision #18 already established for horizontal scaling (multiple targets = multiple adapter instances, each its own NATS identity/config, not one adapter dynamically routing by message content). |
+Edit Design.md
+Added 1 line
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^\- \[x\] \*\*D1" Design.md
+
+OUT
+540:- [x] **D1. Package scaffold** — [adapters/webhook_listener/pyproject.toml](adapters/webhook_listener/pyproject.toml) (`jetcore` via workspace source), `webhook_listener/` package dir, `tests/` with a scaffold test. `fastapi`/`uvicorn` deliberately not added yet — same incremental-dependency discipline C1 established; they land with D3/D4. `Dockerfile` deferred to Step E2, same reasoning as C1. **Executed and verified**: `uv sync --all-packages` resolves it correctly; clean `ruff`/`mypy`/`bandit`/`pip-audit`.
+Edit Design.md
+Added 2 lines
+Now let's write the Track G checklist entries.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^- \[ \] \*\*G[1-5]\|^### Track H" Design.md
+
+OUT
+621:- [ ] **G1. Package scaffold** — `adapters/webhook_sender/pyproject.toml` (`jetcore` + `httpx`, per §7.2), package dir, `tests/` with a uniquely-named scaffold test from the start (Step C1's lesson applied proactively, not rediscovered).
+622:- [ ] **G2. `settings.py`** — `WebhookSenderSettings(AdapterSettings)` adding `target_url: str` and an optional `outbound_secret: SecretStr | None` (Decision #27) — sent as `X-Webhook-Secret` on the outbound POST if configured, the mirror image of the Webhook Listener's own inbound check (Decision #21).
+623:- [ ] **G3. Relay handler** — subscribes to `JETCORE_SUBJECTS` (already a generic `AdapterSettings` field, unused until now — every prior adapter's subscribe list was hardcoded), POSTs each decrypted payload to `target_url` via `httpx`, **single attempt, no retry** (Decision #12) — acks regardless of the HTTP outcome (nak/redelivery would itself be a retry, contradicting "best-effort"), logs failures.
+624:- [ ] **G4. Entrypoint** — `__main__.py`, no HTTP server needed (outbound-only), matching the shape of a pure background consumer (closer to the File Storage Adapter's write handler than to the Webhook Listener's FastAPI app).
+625:- [ ] **G5. Tests + verification** — relay-on-receipt, secret-header-sent-when-configured, failed-POST-still-acks (a local test HTTP server that returns 500, confirming no redelivery afterward — reusing `BusClient.fetch()`'s idle-returns-`[]` fix from Step C4 for exactly this check, same idiom as Steps C4/C5's own tests).
+627:### Track H — HTTP Adapter
+Edit Design.md
+Added 10 lines
+Let's run the full suite a few more times for stability, then clean up.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+for i in 1 2 3; do timeout 60 uv run pytest -q 2>&1 | tail -6; done
+
+OUT
+........................................................................ [ 41%]
+........................................................................ [ 83%]
+............................                                             [100%]
+172 passed in 35.05s
+........................................................................ [ 41%]
+........................................................................ [ 83%]
+............................                                             [100%]
+172 passed in 35.86s
+........................................................................ [ 41%]
+........................................................................ [ 83%]
+............................                                             [100%]
+172 passed in 36.03s
+3/3 clean. Now let's clean up the bus state and check the overall stack/git status.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -3
+for bucket in service-directory service-identity; do
+  for key in $(sg docker -c "$NB kv ls $bucket" 2>&1); do
+    sg docker -c "$NB kv del $bucket '$key' -f" 2>&1 >/dev/null
+  done
+done
+echo "--- compose status ---"
+sg docker -c "docker compose ps" 2>&1
+echo "--- git status ---"
+git status --short
+
+OUT
+      First Sequence: 975
+       Last Sequence: 974 @ 2026-08-29 04:23:34
+    Active Consumers: 755
+--- compose status ---
+NAME                             IMAGE                          COMMAND                  SERVICE                CREATED             STATUS             PORTS
+jetcore-file-storage-adapter-1   jetcore-file-storage-adapter   "python -m file_stor…"   file-storage-adapter   37 minutes ago      Up 30 seconds      
+jetcore-nats-1                   nats:2.14.5                    "/nats-server -c /et…"   nats                   About an hour ago   Up About an hour   0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+jetcore-webhook-listener-1       jetcore-webhook-listener       "python -m webhook_l…"   webhook-listener       3 minutes ago       Up 3 minutes       0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp
+--- git status ---
+ M Dependencies.md
+ M Design.md
+ M adapters/webhook_listener/Dockerfile
+ M adapters/webhook_listener/pyproject.toml
+ M uv.lock
+?? adapters/webhook_sender/
+Track G complete — all five steps (G1–G5).
+
+G1–G2 — Scaffold and settings, unremarkable. WebhookSenderSettings is the first adapter to actually use AdapterSettings.subjects at runtime — every prior adapter hardcoded its subscribe subject.
+
+G3 — RelayHandler: single-attempt, best-effort relay (Decision #12), acks regardless of outcome. Verified against a real local HTTP server (a small stdlib-only http.server helper, no mocking — matching this project's ethos throughout), including a case I added once I actually started testing it: a genuine connection-refused (not just an HTTP error status) needs the same "catch and ack" treatment, since Decision #12 doesn't distinguish "server errored" from "server unreachable."
+
+G4 — Entrypoint creates one RelayHandler per configured subject plus a keepalive task (so an empty JETCORE_SUBJECTS doesn't cause immediate exit). Verified with a real running process: real trigger event, real 200 OK logged, real SIGTERM → clean shutdown sequence.
+
+G5 surfaced the real finding of this track: pip-audit's clean-looking report was silently wrong. webhook-sender and the already-shipped webhook-listener both collide with real, unrelated packages already published on PyPI (confirmed by querying PyPI's API directly, not guessed) — so instead of correctly flagging them as unpublished local packages, pip-audit was checking an unrelated project's vulnerability data and reporting "clean" for a check that wasn't really happening. http-adapter (Track H, not yet built) collides too. Fixed with a new jetcore-<adapter> distribution-naming convention (Decision #28) — Python import names unaffected, only the PyPI-facing name. Renamed both existing packages, updated the Webhook Listener's Dockerfile, regenerated the lockfile, and rebuilt+reverified that container still works under its new identity.
+
+172 tests total (17 new), full suite run 3× clean, ruff/mypy/bandit/pip-audit all clean — and pip-audit is now genuinely clean rather than silently checking the wrong thing.
+
+Ready for Track H — HTTP Adapter whenever you'd like to continue (I'll use jetcore-http-adapter as its distribution name from the start, per Decision #28).
+
+------------------ Track G Completed ------------------

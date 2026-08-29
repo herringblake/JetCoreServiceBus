@@ -6,9 +6,19 @@
 # Dependencies added incrementally as each module (Design.md §12 Track D)
 # is actually built, same discipline Track C followed. `jetcore` is the
 # one dependency every adapter needs from the start.
+#
+# [project] name is "jetcore-webhook-listener", not "webhook-listener" —
+# a real, unrelated package already owns that name on PyPI (confirmed
+# during Design.md §13 Step G5), which silently made `pip-audit` check
+# the WRONG project's vulnerability data for ours instead of correctly
+# flagging it as unpublished, the way jetcore/file-storage-adapter's
+# genuinely-unique names already do. Renamed retroactively; the Python
+# import name (`webhook_listener`, everywhere in code) is unaffected —
+# only the PyPI-facing distribution name / `uv add --package` identifier
+# changed (Decision #28).
 
 [project]
-name = "webhook-listener"
+name = "jetcore-webhook-listener"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [

@@ -19,7 +19,7 @@ COPY adapters/webhook_listener/pyproject.toml adapters/webhook_listener/pyprojec
 COPY libs/jetcore/jetcore libs/jetcore/jetcore
 COPY adapters/webhook_listener/webhook_listener adapters/webhook_listener/webhook_listener
 
-RUN uv sync --frozen --no-dev --package webhook-listener
+RUN uv sync --frozen --no-dev --package jetcore-webhook-listener
 
 # Not root — same reasoning as file_storage_adapter/Dockerfile, applied
 # here too for defense-in-depth even though this adapter has no host
