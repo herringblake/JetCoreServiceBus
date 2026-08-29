@@ -20,6 +20,8 @@ uv sync --all-packages
 
 **Use `--all-packages`, not plain `uv sync`.** This project's root `pyproject.toml` is a "virtual" workspace root (Design.md §7.5) — nothing in it depends on `jetcore` or the future adapter packages, so a plain `uv sync` silently resolves only the shared dev-tool group and reports success *without installing any workspace member at all*. This was confirmed by actually testing it, not assumed: `uv sync` alone left `jetcore` unimportable with no error or warning. `--all-packages` is the documented uv flag for "sync every workspace member," and is the only form that actually sets this project up correctly.
 
+**If you rename or move the checkout directory, recreate `.venv`.** `.venv/bin/`'s console scripts (`pytest`, `ruff`, `mypy`, ...) hardcode the venv's *absolute* path in their shebang line at creation time — renaming the parent directory leaves them pointing at a path that no longer exists (`error: Failed to spawn: \`pytest\` — No such file or directory`), confirmed by actually hitting this after renaming this project's own directory. A plain `uv sync --all-packages` re-run does **not** fix already-installed scripts' shebangs (it only reinstalls what changed); `rm -rf .venv && uv sync --all-packages` does. Nothing else in this repo is affected by a rename — infra (`docker-compose.yml`, the bootstrap scripts) already pins its own names/paths independent of the checkout directory, by design.
+
 ## Running the checks
 
 ```bash
