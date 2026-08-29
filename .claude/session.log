@@ -19852,3 +19852,1333 @@ Also went back and fixed §9: item #1 (File Storage's command schema) is now ful
 Ready for "continue on to Step F1" (or wherever you'd like to start) whenever you are.
 
 ---------------- Phase 3 Planning Complete -------------
+
+Proceed with all steps in Track F
+Let's look at the current file_storage_adapter structure to build consistently with the existing write path.
+
+Now F1 — schemas. Let me check the existing write-path schemas for the exact convention to match.
+
+Now let's validate these are well-formed and extend the existing schema-conformance tests to cover them.
+
+Now let's extend payloads.py with the read/list/delete/failure shapes.
+
+Let's check test_payloads.py's current shape and extend it with unit tests for the new functions.
+
+Now F2 — the read handler.
+
+Before writing the list handler, let me verify resolve_within handles an empty-string path correctly (not just ".").
+
+Good, confirmed. Let me add an explicit test for that in test_paths.py, then write the list handler.
+
+Now the list handler.
+
+Now F4 — the delete handler.
+
+Just import ordering, mypy already clean. Let's fix.
+
+Now F5 — manifest and entrypoint wiring. Let's update the identity manifest first.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "test-observer-01" -A 20 infra/nats/adapter_identities.yaml
+
+OUT
+151:  - serviceId: test-observer-01
+152-    adapterType: test-observer
+153-    description: >
+154-      Read-only observer used by integration tests to confirm an adapter's
+155-      published output actually appears on the bus with the expected
+156-      metadata (Design.md §12 Step C4 onward). Subscribes to result
+157-      subjects only — never publishes, never triggers real adapter
+158-      behavior. Extend its subscribe list as new adapters' tests need to
+159-      observe new result subjects.
+160-    permissions:
+161-      publish: []
+162-      subscribe:
+163-        - events.files.FileWriteRequested    # lets a test independently
+164-                                              # capture a request's real
+165-                                              # eventId, to confirm a
+166-                                              # completion event's
+167-                                              # correlationId actually
+168-                                              # references it (not just
+169-                                              # that *some* value is set)
+170-        - events.files.FileCreateCompleted
+171-        - events.files.FileWriteCompleted
+Let's update both entries — add FileOperationFailed to file-storage-01's publish list, and the new result subjects to test-observer-01's subscribe list.
+
+Edit adapter_identities.yaml
+Added 4 lines
+Edit adapter_identities.yaml
+Edit failed
+Read adapter_identities.yaml (lines 161-175)
+Edit adapter_identities.yaml
+Edit failed
+Read adapter_identities.yaml (lines 175-189)
+That's the end of the file (line 175 is the last content line). Let's target it directly by line context.
+
+Edit adapter_identities.yaml
+Edit failed
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+wc -l infra/nats/adapter_identities.yaml
+sed -n '173,176p' infra/nats/adapter_identities.yaml
+
+OUT
+175 infra/nats/adapter_identities.yaml
+                                              # that *some* value is set)
+        - events.files.FileCreateCompleted
+        - events.files.FileWriteCompleted
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -i '175a\        - events.files.FileReadCompleted     # Design.md §13 Step F6\n        - events.files.FileListCompleted\n        - events.files.FileDeleteCompleted\n        - events.files.FileOperationFailed' infra/nats/adapter_identities.yaml
+tail -10 infra/nats/adapter_identities.yaml
+
+OUT
+                                              # completion event's
+                                              # correlationId actually
+                                              # references it (not just
+                                              # that *some* value is set)
+        - events.files.FileCreateCompleted
+        - events.files.FileWriteCompleted
+        - events.files.FileReadCompleted     # Design.md §13 Step F6
+        - events.files.FileListCompleted
+        - events.files.FileDeleteCompleted
+        - events.files.FileOperationFailed
+Now let's re-run the bootstrap script to apply the new permissions.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sg docker -c "bash infra/nats/bootstrap_auth.sh" 2>&1 | tail -30
+
+OUT
+[ OK ] added sub "events.files.FileReadCompleted"
+[ OK ] added sub "events.files.FileListCompleted"
+[ OK ] added sub "events.files.FileDeleteCompleted"
+[ OK ] added sub "events.files.FileOperationFailed"
+[ OK ] added sub "$JS.API.>"
+[ OK ] added sub "_INBOX.>"
+[ OK ] added sub "$KV.service-directory.>"
+[ OK ] added sub "$KV.service-identity.>"
+[ OK ] generated user creds file `/nsc/keys/creds/JetCoreServiceBus/JETCORE/test-observer-01.creds`
+[ OK ] edited user "test-observer-01"
+wrote /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/nats/operator/creds/test-observer-01.creds
+== Admin identity: jetcore-admin ==
+already exists, skipping add
+[ OK ] set max responses to 1
+[ OK ] added pub "$JS.API.>"
+[ OK ] added pub "$KV.service-directory.>"
+[ OK ] added pub "$KV.service-identity.>"
+[ OK ] added pub "_INBOX.>"
+[ OK ] added sub "$JS.API.>"
+[ OK ] added sub "$KV.service-directory.>"
+[ OK ] added sub "$KV.service-identity.>"
+[ OK ] added sub "_INBOX.>"
+[ OK ] generated user creds file `/nsc/keys/creds/JetCoreServiceBus/JETCORE/jetcore-admin.creds`
+[ OK ] edited user "jetcore-admin"
+wrote /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/nats/operator/creds/jetcore-admin.creds
+== Memory resolver config ==
+Success!! - generated `/workspace/resolver.conf`
+[ OK ] wrote server configuration to `/workspace/resolver.conf`
+wrote /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/nats/resolver.conf
+Done. Next: Step A4 wires resolver.conf into nats-server.conf.
+Now let's extend __main__.py's run() to wire in the three new handlers.
+
+Read __main__.py
+Write __main__.py
+129 lines
+"""Entrypoint for the File Storage Adapter (Design.md §12 Step C6, §13
+Step F5). Wires settings -> a real BusClient -> all five command handlers
+(write, read, list, delete, plus the external-creation watch) running
+concurrently — the same asyncio.gather-of-independent-pieces shape Step B7
+proved with two fake adapters, grown from Step C6's original two-way
+gather to a five-way one as Track F added the remaining commands.
+
+Run via: python -m file_storage_adapter
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import signal
+from pathlib import Path
+from typing import Protocol
+
+from jetcore.bus_client import BusClient
+
+from file_storage_adapter.create_watch import ExternalCreationWatch
+from file_storage_adapter.delete_handler import DeleteCommandHandler
+from file_storage_adapter.list_handler import ListCommandHandler
+from file_storage_adapter.read_handler import ReadCommandHandler
+from file_storage_adapter.recent_writes import RecentWrites
+from file_storage_adapter.settings import FileStorageSettings
+from file_storage_adapter.write_handler import WriteCommandHandler
+
+logger = logging.getLogger(__name__)
+
+ADAPTER_TYPE = "file-storage-adapter"
+
+# How long a single fetch() poll blocks waiting for a command before a
+# command loop re-checks the shutdown event — the real bound on shutdown
+# latency (a signal only takes effect between fetch() calls, not during
+# one). Short enough to stay well inside Docker's default 10s stop grace
+# period; long enough not to hammer NATS with pointless round trips.
+FETCH_TIMEOUT_SECONDS = 2.0
+FETCH_BATCH = 10
+
+
+class _CommandHandler(Protocol):
+    """Structural type covering all four command handlers (write/read/
+    list/delete) — each has an identical run_once() shape (Design.md §13
+    Step F5), so one _run_command_loop works for all of them rather than
+    duplicating it four times."""
+
+    async def run_once(self, durable_name: str, *, batch: int = 10, timeout: float = 5.0) -> int: ...
+
+
+async def _run_command_loop(
+    handler: _CommandHandler, durable_name: str, shutdown: asyncio.Event
+) -> None:
+    while not shutdown.is_set():
+        await handler.run_once(durable_name, batch=FETCH_BATCH, timeout=FETCH_TIMEOUT_SECONDS)
+
+
+async def run(
+    client: BusClient, *, watch_dir: Path, service_id: str, shutdown: asyncio.Event
+) -> None:
+    """The adapter's actual running logic — all five pieces (Step C4's
+    write handler, Step F2-F4's read/list/delete handlers, and Step C5's
+    external-creation watch) concurrently, until `shutdown` is set. Split
+    out from main() so Step C7's integration test can drive this real
+    wiring directly (a real BusClient, a real watch_dir, a real shutdown
+    handshake) instead of only exercising each handler individually,
+    which each one's own tests already do — without needing OS signals or
+    a subprocess to do it."""
+    recent_writes = RecentWrites()
+    write_handler = WriteCommandHandler(client, watch_dir=watch_dir, recent_writes=recent_writes)
+    read_handler = ReadCommandHandler(client, watch_dir=watch_dir)
+    list_handler = ListCommandHandler(client, watch_dir=watch_dir)
+    delete_handler = DeleteCommandHandler(client, watch_dir=watch_dir)
+    watch = ExternalCreationWatch(client, watch_dir=watch_dir, recent_writes=recent_writes)
+
+    # One durable name per service_id + command, not a random one — a real
+    # deployment restarts these same consumers across process restarts and
+    # expects to resume their own cursors, unlike tests, which want fresh
+    # ones every run (Design.md §11 Track B test rationale).
+    write_durable = f"{service_id}-write-handler"
+    read_durable = f"{service_id}-read-handler"
+    list_durable = f"{service_id}-list-handler"
+    delete_durable = f"{service_id}-delete-handler"
+    await write_handler.start(durable_name=write_durable)
+    await read_handler.start(durable_name=read_durable)
+    await list_handler.start(durable_name=list_durable)
+    await delete_handler.start(durable_name=delete_durable)
+
+    logger.info("file storage adapter started (service_id=%s, watch_dir=%s)", service_id, watch_dir)
+    await asyncio.gather(
+        _run_command_loop(write_handler, write_durable, shutdown),
+        _run_command_loop(read_handler, read_durable, shutdown),
+        _run_command_loop(list_handler, list_durable, shutdown),
+        _run_command_loop(delete_handler, delete_durable, shutdown),
+        watch.run_forever(stop_event=shutdown),
+    )
+
+
+async def main() -> None:
+    logging.basicConfig(level=logging.INFO)
+
+    settings = FileStorageSettings()  # pydantic-settings loads required fields from env vars
+    client = await BusClient.connect_as_adapter(settings, adapter_type=ADAPTER_TYPE)
+
+    shutdown = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _request_shutdown(sig: signal.Signals) -> None:
+        logger.info("received %s, shutting down", sig.name)
+        shutdown.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _request_shutdown, sig)
+
+    try:
+        await run(
+            client,
+            watch_dir=settings.watch_dir,
+            service_id=settings.service_id,
+            shutdown=shutdown,
+        )
+    finally:
+        await client.close()
+        logger.info("file storage adapter stopped")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -rn "FIXED_ENTRYPOINT_DURABLE_NAME" adapters/file_storage_adapter/tests/conftest.py tests/conftest.py
+
+OUT
+tests/conftest.py:29:FIXED_ENTRYPOINT_DURABLE_NAME = "file-storage-01-write-handler"
+tests/conftest.py:38:        await js.delete_consumer("EVENTS", FIXED_ENTRYPOINT_DURABLE_NAME)
+adapters/file_storage_adapter/tests/conftest.py:33:FIXED_ENTRYPOINT_DURABLE_NAME = "file-storage-01-write-handler"
+adapters/file_storage_adapter/tests/conftest.py:42:        await js.delete_consumer("EVENTS", FIXED_ENTRYPOINT_DURABLE_NAME)
+Read conftest.py
+Edit conftest.py
+Added 6 lines
+Read _file_storage_helpers.py
+Let's add the new subject constants here, then wire them into the conftest purge loop.
+
+Edit _file_storage_helpers.py
+Added 7 lines
+Now let's update the conftest.py purge loop to cover all subjects.
+
+Read conftest.py
+Edit conftest.py
+Added 20 lines
+Edit conftest.py
+Modified
+Now the root-level tests/conftest.py needs the same update, since run() now starts all four handlers regardless of which one a test is exercising.
+
+Read conftest.py
+Edit conftest.py
+Added 26 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check . 2>&1 | tail -30
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -30
+
+OUT
+E501 Line too long (101 > 100)
+  --> adapters/file_storage_adapter/file_storage_adapter/__main__.py:48:101
+   |
+46 |     duplicating it four times."""
+47 |
+48 |     async def run_once(self, durable_name: str, *, batch: int = 10, timeout: float = 5.0) -> int: ...
+   |                                                                                                     ^
+
+Found 1 error.
+Success: no issues found in 48 source files
+Edit __main__.py
+Added 2 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check . 2>&1 | tail -10
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -20
+
+OUT
+All checks passed!
+Success: no issues found in 48 source files
+Clean. Now let's verify the existing tests (which exercise run()) still pass with the new 5-way gather.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q adapters/file_storage_adapter/tests/test_entrypoint.py tests/ -v 2>&1 | tail -40
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/bherring/dev/clodhopper/JetCoreServiceBus
+configfile: pyproject.toml
+plugins: anyio-4.14.2, cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 3 items
+
+adapters/file_storage_adapter/tests/test_entrypoint.py ..                [ 66%]
+tests/test_webhook_to_file_storage_end_to_end.py .                       [100%]
+
+============================== 3 passed in 4.80s ===============================
+F5 done. Now F6 — dedicated tests for the three new handlers, mirroring test_write_handler.py's structure.
+
+Read test_write_handler.py
+I need to check something important before writing these tests — which identity has permission to publish the new Requested subjects for read/list/delete.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "publish:" -A 3 infra/nats/adapter_identities.yaml | head -20
+
+OUT
+56:      publish:
+57-        - events.files.FileWriteRequested
+58-      subscribe: []
+59-
+--
+78:      publish:
+79-        - events.files.FileCreateCompleted
+80-        - events.files.FileWriteCompleted
+81-        - events.files.FileReadCompleted
+--
+104:      publish:
+105-        - events.http.RequestCompleted
+106-      subscribe:
+107-        - events.orders.OrderCreated   # placeholder trigger subject
+--
+115:      publish:
+116-        - events.orders.OrderCreated   # placeholder published subject
+117-      subscribe: []
+118-
+--
+test-observer-01 needs to also be able to trigger these commands for testing — there's no real "front door" adapter for read/list/delete yet (out of Track F's scope). Let's extend it, matching precedent from Track C.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '148,179p' infra/nats/adapter_identities.yaml
+
+OUT
+  #     integration test that wants to confirm one was actually published
+  #     (Design.md §12 Step C4/C7) has no adapter identity that's allowed
+  #     to. This identity exists purely to give test suites a legitimate,
+  #     narrowly-scoped way to observe an adapter's real published output
+  #     on the real bus, the same way jetcore-admin exists for
+  #     provisioning rather than as an adapter (Step A3/A5).
+
+  - serviceId: test-observer-01
+    adapterType: test-observer
+    description: >
+      Read-only observer used by integration tests to confirm an adapter's
+      published output actually appears on the bus with the expected
+      metadata (Design.md §12 Step C4 onward). Subscribes to result
+      subjects only — never publishes, never triggers real adapter
+      behavior. Extend its subscribe list as new adapters' tests need to
+      observe new result subjects.
+    permissions:
+      publish: []
+      subscribe:
+        - events.files.FileWriteRequested    # lets a test independently
+                                              # capture a request's real
+                                              # eventId, to confirm a
+                                              # completion event's
+                                              # correlationId actually
+                                              # references it (not just
+                                              # that *some* value is set)
+        - events.files.FileCreateCompleted
+        - events.files.FileWriteCompleted
+        - events.files.FileReadCompleted     # Design.md §13 Step F6
+        - events.files.FileListCompleted
+        - events.files.FileDeleteCompleted
+        - events.files.FileOperationFailed
+Edit adapter_identities.yaml
+Added 11 lines
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sg docker -c "bash infra/nats/bootstrap_auth.sh" 2>&1 | tail -20
+
+OUT
+wrote /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/nats/operator/creds/test-observer-01.creds
+== Admin identity: jetcore-admin ==
+already exists, skipping add
+[ OK ] set max responses to 1
+[ OK ] added pub "$JS.API.>"
+[ OK ] added pub "$KV.service-directory.>"
+[ OK ] added pub "$KV.service-identity.>"
+[ OK ] added pub "_INBOX.>"
+[ OK ] added sub "$JS.API.>"
+[ OK ] added sub "$KV.service-directory.>"
+[ OK ] added sub "$KV.service-identity.>"
+[ OK ] added sub "_INBOX.>"
+[ OK ] generated user creds file `/nsc/keys/creds/JetCoreServiceBus/JETCORE/jetcore-admin.creds`
+[ OK ] edited user "jetcore-admin"
+wrote /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/nats/operator/creds/jetcore-admin.creds
+== Memory resolver config ==
+[ OK ] wrote server configuration to `/workspace/resolver.conf`
+Success!! - generated `/workspace/resolver.conf`
+wrote /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/nats/resolver.conf
+Done. Next: Step A4 wires resolver.conf into nats-server.conf.
+Write test_read_handler.py
+164 lines
+"""Integration tests for read_handler.py (Design.md §13 Step F2) — against
+the real Phase 1/2 stack, same discipline as write_handler.py's own tests
+(Step C4): no mocks, real NATS, real crypto, real files on disk.
+
+Uses test-observer-01 both to *trigger* FileReadRequested (no real Phase 3
+"front door" adapter publishes it yet — Design.md §13's own note on this)
+and to independently observe the reply, since file-storage-01 can't watch
+its own published output.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+from pathlib import Path
+
+from _file_storage_helpers import (
+    OPERATION_FAILED_SUBJECT,
+    READ_COMPLETED_SUBJECT,
+    READ_REQUESTED_SUBJECT,
+    connect,
+    wait_until_cache_has,
+)
+from file_storage_adapter.read_handler import ReadCommandHandler
+
+
+def _read_requested_payload(path: str) -> bytes:
+    return json.dumps({"path": path}).encode()
+
+
+async def test_existing_file_is_read_and_published(tmp_path: Path, durable_name: str) -> None:
+    existing = tmp_path / "notes" / "todo.txt"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"hello world")
+
+    client = await connect("test-observer-01")
+    fs_client = await connect("file-storage-01")
+    handler = ReadCommandHandler(fs_client, watch_dir=tmp_path)
+    try:
+        handler_durable = await handler.start(durable_name=durable_name)
+        completed_durable = await client.subscribe(
+            READ_COMPLETED_SUBJECT, durable_name=f"{durable_name}-completed"
+        )
+
+        await wait_until_cache_has(await client._cache_for(READ_REQUESTED_SUBJECT), 1)
+        await wait_until_cache_has(await fs_client._cache_for(READ_COMPLETED_SUBJECT), 1)
+
+        await client.publish(
+            READ_REQUESTED_SUBJECT,
+            _read_requested_payload("notes/todo.txt"),
+            event_type="FileReadRequested",
+        )
+
+        fetched = await handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1
+
+        [result] = await client.fetch(completed_durable, timeout=3)
+        assert result.details.event_type == "FileReadCompleted"
+        assert result.details.source_service_id == "file-storage-01"
+        data = json.loads(result.payload)
+        assert data["path"] == "notes/todo.txt"
+        assert base64.b64decode(data["content"]) == b"hello world"
+        assert data["sizeBytes"] == 11
+        assert data["occurredAt"].endswith("Z")
+    finally:
+        await client.close()
+        await fs_client.close()
+
+
+async def test_missing_file_publishes_file_operation_failed(
+    tmp_path: Path, durable_name: str
+) -> None:
+    client = await connect("test-observer-01")
+    fs_client = await connect("file-storage-01")
+    handler = ReadCommandHandler(fs_client, watch_dir=tmp_path)
+    try:
+        handler_durable = await handler.start(durable_name=durable_name)
+        failed_durable = await client.subscribe(
+            OPERATION_FAILED_SUBJECT, durable_name=f"{durable_name}-failed"
+        )
+
+        await wait_until_cache_has(await client._cache_for(READ_REQUESTED_SUBJECT), 1)
+        await wait_until_cache_has(await fs_client._cache_for(OPERATION_FAILED_SUBJECT), 1)
+
+        await client.publish(
+            READ_REQUESTED_SUBJECT,
+            _read_requested_payload("does-not-exist.txt"),
+            event_type="FileReadRequested",
+        )
+
+        fetched = await handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1
+
+        [result] = await client.fetch(failed_durable, timeout=3)
+        assert result.details.event_type == "FileOperationFailed"
+        data = json.loads(result.payload)
+        assert data == {
+            "path": "does-not-exist.txt",
+            "operation": "read",
+            "reason": "not_found",
+            "occurredAt": data["occurredAt"],
+        }
+        assert data["occurredAt"].endswith("Z")
+    finally:
+        await client.close()
+        await fs_client.close()
+
+
+async def test_malformed_payload_is_acked_not_left_for_redelivery(
+    tmp_path: Path, durable_name: str
+) -> None:
+    client = await connect("test-observer-01")
+    fs_client = await connect("file-storage-01")
+    handler = ReadCommandHandler(fs_client, watch_dir=tmp_path)
+    try:
+        handler_durable = await handler.start(durable_name=durable_name)
+        await wait_until_cache_has(await client._cache_for(READ_REQUESTED_SUBJECT), 1)
+
+        await client.publish(
+            READ_REQUESTED_SUBJECT, b"not valid json at all", event_type="FileReadRequested"
+        )
+
+        fetched = await handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1
+
+        again = await handler.run_once(handler_durable, timeout=1)
+        assert again == 0
+    finally:
+        await client.close()
+        await fs_client.close()
+
+
+async def test_path_traversal_is_rejected_without_reading_outside_watch_dir(
+    tmp_path: Path, durable_name: str
+) -> None:
+    watch_dir = tmp_path / "watch"
+    watch_dir.mkdir()
+    outside_secret = tmp_path / "secret.txt"
+    outside_secret.write_bytes(b"top secret")
+
+    client = await connect("test-observer-01")
+    fs_client = await connect("file-storage-01")
+    handler = ReadCommandHandler(fs_client, watch_dir=watch_dir)
+    try:
+        handler_durable = await handler.start(durable_name=durable_name)
+        await wait_until_cache_has(await client._cache_for(READ_REQUESTED_SUBJECT), 1)
+
+        await client.publish(
+            READ_REQUESTED_SUBJECT,
+            _read_requested_payload("../secret.txt"),
+            event_type="FileReadRequested",
+        )
+
+        fetched = await handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1
+
+        # Acked, not redelivered, and definitely no FileReadCompleted
+        # carrying the secret's content anywhere.
+        again = await handler.run_once(handler_durable, timeout=1)
+        assert again == 0
+    finally:
+        await client.close()
+        await fs_client.close()
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q adapters/file_storage_adapter/tests/test_read_handler.py -v 2>&1 | tail -60
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/bherring/dev/clodhopper/JetCoreServiceBus
+configfile: pyproject.toml
+plugins: anyio-4.14.2, cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 4 items
+
+adapters/file_storage_adapter/tests/test_read_handler.py ....            [100%]
+
+============================== 4 passed in 2.28s ===============================
+All 4 pass on the first try. Now test_list_handler.py.
+
+Write test_list_handler.py
+215 lines
+"""Integration tests for list_handler.py (Design.md §13 Step F3) — same
+discipline as read_handler.py's/write_handler.py's own tests.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from _file_storage_helpers import (
+    LIST_COMPLETED_SUBJECT,
+    LIST_REQUESTED_SUBJECT,
+    OPERATION_FAILED_SUBJECT,
+    connect,
+    wait_until_cache_has,
+)
+from file_storage_adapter.list_handler import ListCommandHandler
+
+
+def _list_requested_payload(path: str) -> bytes:
+    return json.dumps({"path": path}).encode()
+
+
+async def test_directory_contents_are_listed_and_published(
+    tmp_path: Path, durable_name: str
+) -> None:
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "todo.txt").write_bytes(b"hello world")
+    (notes / "archive").mkdir()
+
+    client = await connect("test-observer-01")
+    fs_client = await connect("file-storage-01")
+    handler = ListCommandHandler(fs_client, watch_dir=tmp_path)
+    try:
+        handler_durable = await handler.start(durable_name=durable_name)
+        completed_durable = await client.subscribe(
+            LIST_COMPLETED_SUBJECT, durable_name=f"{durable_name}-completed"
+        )
+
+        await wait_until_cache_has(await client._cache_for(LIST_REQUESTED_SUBJECT), 1)
+        await wait_until_cache_has(await fs_client._cache_for(LIST_COMPLETED_SUBJECT), 1)
+
+        await client.publish(
+            LIST_REQUESTED_SUBJECT, _list_requested_payload("notes"), event_type="FileListRequested"
+        )
+
+        fetched = await handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1
+
+        [result] = await client.fetch(completed_durable, timeout=3)
+        assert result.details.event_type == "FileListCompleted"
+        data = json.loads(result.payload)
+        assert data["path"] == "notes"
+        assert sorted(data["entries"], key=lambda e: e["name"]) == [
+            {"name": "archive", "isDirectory": True, "sizeBytes": 0},
+            {"name": "todo.txt", "isDirectory": False, "sizeBytes": 11},
+        ]
+    finally:
+        await client.close()
+        await fs_client.close()
+
+
+async def test_empty_path_lists_watch_dir_itself(tmp_path: Path, durable_name: str) -> None:
+    (tmp_path / "notes").mkdir()
+
+    client = await connect("test-observer-01")
+    fs_client = await connect("file-storage-01")
+    handler = ListCommandHandler(fs_client, watch_dir=tmp_path)
+    try:
+        handler_durable = await handler.start(durable_name=durable_name)
+        completed_durable = await client.subscribe(
+            LIST_COMPLETED_SUBJECT, durable_name=f"{durable_name}-completed"
+        )
+
+        await wait_until_cache_has(await client._cache_for(LIST_REQUESTED_SUBJECT), 1)
+        await wait_until_cache_has(await fs_client._cache_for(LIST_COMPLETED_SUBJECT), 1)
+
+        await client.publish(
+            LIST_REQUESTED_SUBJECT, _list_requested_payload(""), event_type="FileListRequested"
+        )
+
+        fetched = await handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1
+
+        [result] = await client.fetch(completed_durable, timeout=3)
+        data = json.loads(result.payload)
+        assert data["path"] == ""
+        assert data["entries"] == [{"name": "notes", "isDirectory": True, "sizeBytes": 0}]
+    finally:
+        await client.close()
+        await fs_client.close()
+
+
+async def test_missing_directory_publishes_file_operation_failed(
+    tmp_path: Path, durable_name: str
+) -> None:
+    client = await connect("test-observer-01")
+    fs_client = await connect("file-storage-01")
+    handler = ListCommandHandler(fs_client, watch_dir=tmp_path)
+    try:
+        handler_durable = await handler.start(durable_name=durable_name)
+        failed_durable = await client.subscribe(
+            OPERATION_FAILED_SUBJECT, durable_name=f"{durable_name}-failed"
+        )
+
+        await wait_until_cache_has(await client._cache_for(LIST_REQUESTED_SUBJECT), 1)
+        await wait_until_cache_has(await fs_client._cache_for(OPERATION_FAILED_SUBJECT), 1)
+
+        await client.publish(
+            LIST_REQUESTED_SUBJECT,
+            _list_requested_payload("does-not-exist"),
+            event_type="FileListRequested",
+        )
+
+        fetched = await handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1
+
+        [result] = await client.fetch(failed_durable, timeout=3)
+        data = json.loads(result.payload)
+        assert data["operation"] == "list"
+        assert data["reason"] == "not_found"
+    finally:
+        await client.close()
+        await fs_client.close()
+
+
+async def test_path_that_is_a_file_publishes_not_a_directory_failure(
+    tmp_path: Path, durable_name: str
+) -> None:
+    (tmp_path / "todo.txt").write_bytes(b"not a directory")
+
+    client = await connect("test-observer-01")
+    fs_client = await connect("file-storage-01")
+    handler = ListCommandHandler(fs_client, watch_dir=tmp_path)
+    try:
+        handler_durable = await handler.start(durable_name=durable_name)
+        failed_durable = await client.subscribe(
+            OPERATION_FAILED_SUBJECT, durable_name=f"{durable_name}-failed"
+        )
+
+        await wait_until_cache_has(await client._cache_for(LIST_REQUESTED_SUBJECT), 1)
+        await wait_until_cache_has(await fs_client._cache_for(OPERATION_FAILED_SUBJECT), 1)
+
+        await client.publish(
+            LIST_REQUESTED_SUBJECT,
+            _list_requested_payload("todo.txt"),
+            event_type="FileListRequested",
+        )
+
+        fetched = await handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1
+
+        [result] = await client.fetch(failed_durable, timeout=3)
+        data = json.loads(result.payload)
+        assert data["reason"] == "not_a_directory"
+    finally:
+        await client.close()
+        await fs_client.close()
+
+
+async def test_malformed_payload_is_acked_not_left_for_redelivery(
+    tmp_path: Path, durable_name: str
+) -> None:
+    client = await connect("test-observer-01")
+    fs_client = await connect("file-storage-01")
+    handler = ListCommandHandler(fs_client, watch_dir=tmp_path)
+    try:
+        handler_durable = await handler.start(durable_name=durable_name)
+        await wait_until_cache_has(await client._cache_for(LIST_REQUESTED_SUBJECT), 1)
+
+        await client.publish(
+            LIST_REQUESTED_SUBJECT, b"not valid json at all", event_type="FileListRequested"
+        )
+
+        fetched = await handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1
+
+        again = await handler.run_once(handler_durable, timeout=1)
+        assert again == 0
+    finally:
+        await client.close()
+        await fs_client.close()
+
+
+async def test_path_traversal_is_rejected_without_listing_outside_watch_dir(
+    tmp_path: Path, durable_name: str
+) -> None:
+    watch_dir = tmp_path / "watch"
+    watch_dir.mkdir()
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "secret.txt").write_bytes(b"top secret")
+
+    client = await connect("test-observer-01")
+    fs_client = await connect("file-storage-01")
+    handler = ListCommandHandler(fs_client, watch_dir=watch_dir)
+    try:
+        handler_durable = await handler.start(durable_name=durable_name)
+        await wait_until_cache_has(await client._cache_for(LIST_REQUESTED_SUBJECT), 1)
+
+        await client.publish(
+            LIST_REQUESTED_SUBJECT,
+            _list_requested_payload("../outside"),
+            event_type="FileListRequested",
+        )
+
+        fetched = await handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1
+
+        again = await handler.run_once(handler_durable, timeout=1)
+        assert again == 0
+    finally:
+        await client.close()
+        await fs_client.close()
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q adapters/file_storage_adapter/tests/test_list_handler.py -v 2>&1 | tail -60
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/bherring/dev/clodhopper/JetCoreServiceBus
+configfile: pyproject.toml
+plugins: anyio-4.14.2, cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 6 items
+
+adapters/file_storage_adapter/tests/test_list_handler.py ......          [100%]
+
+============================== 6 passed in 2.39s ===============================
+All 6 pass. Now test_delete_handler.py.
+
+Write test_delete_handler.py
+150 lines
+"""Integration tests for delete_handler.py (Design.md §13 Step F4) — same
+discipline as read_handler.py's/write_handler.py's own tests.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from _file_storage_helpers import (
+    DELETE_COMPLETED_SUBJECT,
+    DELETE_REQUESTED_SUBJECT,
+    OPERATION_FAILED_SUBJECT,
+    connect,
+    wait_until_cache_has,
+)
+from file_storage_adapter.delete_handler import DeleteCommandHandler
+
+
+def _delete_requested_payload(path: str) -> bytes:
+    return json.dumps({"path": path}).encode()
+
+
+async def test_existing_file_is_deleted_and_published(tmp_path: Path, durable_name: str) -> None:
+    existing = tmp_path / "notes" / "todo.txt"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"delete me")
+
+    client = await connect("test-observer-01")
+    fs_client = await connect("file-storage-01")
+    handler = DeleteCommandHandler(fs_client, watch_dir=tmp_path)
+    try:
+        handler_durable = await handler.start(durable_name=durable_name)
+        completed_durable = await client.subscribe(
+            DELETE_COMPLETED_SUBJECT, durable_name=f"{durable_name}-completed"
+        )
+
+        await wait_until_cache_has(await client._cache_for(DELETE_REQUESTED_SUBJECT), 1)
+        await wait_until_cache_has(await fs_client._cache_for(DELETE_COMPLETED_SUBJECT), 1)
+
+        await client.publish(
+            DELETE_REQUESTED_SUBJECT,
+            _delete_requested_payload("notes/todo.txt"),
+            event_type="FileDeleteRequested",
+        )
+
+        fetched = await handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1
+
+        assert not existing.exists()
+
+        [result] = await client.fetch(completed_durable, timeout=3)
+        assert result.details.event_type == "FileDeleteCompleted"
+        data = json.loads(result.payload)
+        assert data["path"] == "notes/todo.txt"
+        assert data["occurredAt"].endswith("Z")
+    finally:
+        await client.close()
+        await fs_client.close()
+
+
+async def test_missing_file_publishes_file_operation_failed(
+    tmp_path: Path, durable_name: str
+) -> None:
+    client = await connect("test-observer-01")
+    fs_client = await connect("file-storage-01")
+    handler = DeleteCommandHandler(fs_client, watch_dir=tmp_path)
+    try:
+        handler_durable = await handler.start(durable_name=durable_name)
+        failed_durable = await client.subscribe(
+            OPERATION_FAILED_SUBJECT, durable_name=f"{durable_name}-failed"
+        )
+
+        await wait_until_cache_has(await client._cache_for(DELETE_REQUESTED_SUBJECT), 1)
+        await wait_until_cache_has(await fs_client._cache_for(OPERATION_FAILED_SUBJECT), 1)
+
+        await client.publish(
+            DELETE_REQUESTED_SUBJECT,
+            _delete_requested_payload("does-not-exist.txt"),
+            event_type="FileDeleteRequested",
+        )
+
+        fetched = await handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1
+
+        [result] = await client.fetch(failed_durable, timeout=3)
+        data = json.loads(result.payload)
+        assert data["operation"] == "delete"
+        assert data["reason"] == "not_found"
+    finally:
+        await client.close()
+        await fs_client.close()
+
+
+async def test_malformed_payload_is_acked_not_left_for_redelivery(
+    tmp_path: Path, durable_name: str
+) -> None:
+    client = await connect("test-observer-01")
+    fs_client = await connect("file-storage-01")
+    handler = DeleteCommandHandler(fs_client, watch_dir=tmp_path)
+    try:
+        handler_durable = await handler.start(durable_name=durable_name)
+        await wait_until_cache_has(await client._cache_for(DELETE_REQUESTED_SUBJECT), 1)
+
+        await client.publish(
+            DELETE_REQUESTED_SUBJECT, b"not valid json at all", event_type="FileDeleteRequested"
+        )
+
+        fetched = await handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1
+
+        again = await handler.run_once(handler_durable, timeout=1)
+        assert again == 0
+    finally:
+        await client.close()
+        await fs_client.close()
+
+
+async def test_path_traversal_is_rejected_without_deleting_outside_watch_dir(
+    tmp_path: Path, durable_name: str
+) -> None:
+    watch_dir = tmp_path / "watch"
+    watch_dir.mkdir()
+    outside_secret = tmp_path / "secret.txt"
+    outside_secret.write_bytes(b"do not delete me")
+
+    client = await connect("test-observer-01")
+    fs_client = await connect("file-storage-01")
+    handler = DeleteCommandHandler(fs_client, watch_dir=watch_dir)
+    try:
+        handler_durable = await handler.start(durable_name=durable_name)
+        await wait_until_cache_has(await client._cache_for(DELETE_REQUESTED_SUBJECT), 1)
+
+        await client.publish(
+            DELETE_REQUESTED_SUBJECT,
+            _delete_requested_payload("../secret.txt"),
+            event_type="FileDeleteRequested",
+        )
+
+        fetched = await handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1
+
+        assert outside_secret.exists()  # never touched
+
+        again = await handler.run_once(handler_durable, timeout=1)
+        assert again == 0
+    finally:
+        await client.close()
+        await fs_client.close()
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q adapters/file_storage_adapter/tests/test_delete_handler.py -v 2>&1 | tail -60
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/bherring/dev/clodhopper/JetCoreServiceBus
+configfile: pyproject.toml
+plugins: anyio-4.14.2, cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 4 items
+
+adapters/file_storage_adapter/tests/test_delete_handler.py ....          [100%]
+
+============================== 4 passed in 2.27s ===============================
+Now let's extend the entrypoint-level test to cover all four commands running together via the real 5-way gather.
+
+Read test_entrypoint.py
+Edit test_entrypoint.py
+Added 6 lines
+Edit test_entrypoint.py
+Added 79 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q adapters/file_storage_adapter/tests/test_entrypoint.py -v 2>&1 | tail -60
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/bherring/dev/clodhopper/JetCoreServiceBus
+configfile: pyproject.toml
+plugins: anyio-4.14.2, cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 3 items
+
+adapters/file_storage_adapter/tests/test_entrypoint.py ...               [100%]
+
+============================== 3 passed in 4.65s ===============================
+All pass. Now let's run the full toolchain and full suite multiple times for stability.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== ruff ==="; uv run ruff check . 2>&1 | tail -30
+echo "=== mypy ==="; uv run --all-packages mypy libs adapters tests 2>&1 | tail -30
+echo "=== bandit ==="
+uv run bandit -q -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter adapters/webhook_listener/webhook_listener 2>&1
+echo "=== pip-audit ==="
+uv run pip-audit 2>&1 | tail -10
+
+OUT
+=== ruff ===
+All checks passed!
+=== mypy ===
+Success: no issues found in 51 source files
+=== bandit ===
+=== pip-audit ===
+No known vulnerabilities found
+Name                 Skip Reason
+-------------------- -----------------------------------------------------------------------------------
+file-storage-adapter Dependency not found on PyPI and could not be audited: file-storage-adapter (0.1.0)
+jetcore              Dependency not found on PyPI and could not be audited: jetcore (0.1.0)
+webhook-listener     Dependency not found on PyPI and could not be audited: webhook-listener (0.1.0)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+for i in 1 2 3 4; do timeout 30 uv run pytest -q 2>&1 | tail -6; done
+
+OUT
+........................................................................ [ 45%]
+........................................................................ [ 90%]
+................                                                         [100%]
+160 passed in 27.85s
+........................................................................ [ 45%]
+........................................................................ [ 90%]
+................                                                         [100%]
+160 passed in 28.26s
+........................................................................ [ 45%]
+........................................................................ [ 90%]
+................                                                         [100%]
+160 passed in 28.30s
+........................................................................ [ 45%]
+........................................................................ [ 90%]
+................                                                         [100%]
+160 passed in 28.53s
+Let's also verify this works through the real Docker Compose stack, since Track F extends an already-deployed adapter.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sg docker -c "docker compose up -d --build file-storage-adapter" 2>&1 | tail -20
+
+OUT
+#19 exporting to image
+#19 exporting layers
+#19 exporting layers 1.0s done
+#19 exporting manifest sha256:d6faafcfd576ee754d3c72cbc79856c8c4dac9a8117c9879ab5d96bed4c913e9 0.0s done
+#19 exporting config sha256:c730416278ffbd785329753842fb2facf59eff8539444a99f24da1673547f646 0.0s done
+#19 exporting attestation manifest sha256:138b70e7668be38519591f1075c06ea860e38ade03d0000e8c3d2efd230938c8 0.0s done
+#19 exporting manifest list sha256:6aae572c87ebb30c7355d84ce0b37c504e34da0c70523933f3be55d590c1d4fd 0.0s done
+#19 naming to docker.io/library/jetcore-file-storage-adapter:latest done
+#19 unpacking to docker.io/library/jetcore-file-storage-adapter:latest
+#19 unpacking to docker.io/library/jetcore-file-storage-adapter:latest 0.5s done
+#19 DONE 1.7s
+
+#20 resolving provenance for metadata file
+#20 DONE 0.0s
+ Image jetcore-file-storage-adapter Built 
+ Container jetcore-nats-1 Running 
+ Container jetcore-file-storage-adapter-1 Recreate 
+ Container jetcore-file-storage-adapter-1 Recreated 
+ Container jetcore-file-storage-adapter-1 Starting 
+ Container jetcore-file-storage-adapter-1 Started
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+sleep 2
+sg docker -c "docker compose logs --tail=20 file-storage-adapter" 2>&1
+
+OUT
+file-storage-adapter-1  | INFO:__main__:file storage adapter started (service_id=file-storage-01, watch_dir=/data)
+Let's do a real manual verification against the running container, creating a file via the webhook listener, then read/list/delete it.
+
+Bash
+IN
+curl -sS -w "\nHTTP=%{http_code}\n" -X POST http://localhost:8080/webhooks/f6-manual/proof.txt \
+  --data-binary "F6 real manual verification" -H "X-Webhook-Secret: dev-only-change-me"
+sleep 2
+cat /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/files/f6-manual/proof.txt
+echo
+
+OUT
+HTTP=202
+F6 real manual verification
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run python3 -c "
+import asyncio, json
+from jetcore.bus_client import BusClient
+from jetcore.config import AdapterSettings
+
+async def main():
+    settings = AdapterSettings(
+        service_id='test-observer-01',
+        nats_url='nats://localhost:4222',
+        nats_creds_path='infra/nats/operator/creds/test-observer-01.creds',
+    )
+    client = await BusClient.connect_as_adapter(settings, adapter_type='test-tooling')
+
+    read_durable = await client.subscribe('events.files.FileReadCompleted', durable_name='manual-read')
+    list_durable = await client.subscribe('events.files.FileListCompleted', durable_name='manual-list')
+    delete_durable = await client.subscribe('events.files.FileDeleteCompleted', durable_name='manual-delete')
+
+    cache = await client._cache_for('events.files.FileReadRequested')
+    for _ in range(50):
+        if cache.current():
+            break
+        await asyncio.sleep(0.1)
+
+    await client.publish('events.files.FileReadRequested', json.dumps({'path': 'f6-manual/proof.txt'}).encode(), event_type='FileReadRequested')
+    [r] = await client.fetch(read_durable, timeout=5)
+    print('READ:', json.loads(r.payload))
+
+    await client.publish('events.files.FileListRequested', json.dumps({'path': 'f6-manual'}).encode(), event_type='FileListRequested')
+    [l] = await client.fetch(list_durable, timeout=5)
+    print('LIST:', json.loads(l.payload))
+
+    await client.publish('events.files.FileDeleteRequested', json.dumps({'path': 'f6-manual/proof.txt'}).encode(), event_type='FileDeleteRequested')
+    [d] = await client.fetch(delete_durable, timeout=5)
+    print('DELETE:', json.loads(d.payload))
+
+    await client.close()
+
+asyncio.run(main())
+"
+
+OUT
+READ: {'path': 'f6-manual/proof.txt', 'content': 'RjYgcmVhbCBtYW51YWwgdmVyaWZpY2F0aW9u', 'sizeBytes': 27, 'occurredAt': '2026-08-29T03:47:02.323281Z'}
+LIST: {'path': 'f6-manual', 'entries': [{'name': 'proof.txt', 'isDirectory': False, 'sizeBytes': 27}], 'occurredAt': '2026-08-29T03:47:02.330198Z'}
+DELETE: {'path': 'f6-manual/proof.txt', 'occurredAt': '2026-08-29T03:47:02.336390Z'}
+Real read/list/delete confirmed working through the actual running container. Let's verify the file is really gone on the host.
+
+Bash
+IN
+ls -la /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/files/f6-manual/ 2>&1
+rmdir /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/files/f6-manual 2>&1
+
+OUT
+total 8
+drwxr-xr-x 2 bherring bherring 4096 Aug 28 20:47 .
+drwxrwxr-x 3 bherring bherring 4096 Aug 28 20:46 ..
+Confirmed on disk too. Let's clean up bus state and document Track F in Design.md.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -3
+for bucket in service-directory service-identity; do
+  for key in $(sg docker -c "$NB kv ls $bucket" 2>&1); do
+    sg docker -c "$NB kv del $bucket '$key' -f" 2>&1 >/dev/null
+  done
+done
+echo cleaned
+
+OUT
+      First Sequence: 729
+       Last Sequence: 728 @ 2026-08-29 03:47:02
+    Active Consumers: 562
+cleaned
+Now let's update Design.md's Track F checklist with the full findings.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^### Track F\|^- \[ \] \*\*F[1-6]\|^### Track G" Design.md
+
+OUT
+601:### Track F — File Storage Adapter: `list`/`read`/`delete`
+605:- [ ] **F1. Schemas** — `schemas/events.files.FileReadRequested.v1.json`/`FileReadCompleted`, `FileListRequested`/`FileListCompleted`, `FileDeleteRequested`/`FileDeleteCompleted`, and one shared `FileOperationFailed.v1.json` (Decision #23), mirroring Step C3's approach and the existing write-path schemas' style exactly.
+606:- [ ] **F2. `read_handler.py`** — subscribes to `FileReadRequested` (`{"path"}`), resolves via the existing `resolve_within` (Step C4, reused as-is), publishes `FileReadCompleted` (`{"path", "content" (base64), "sizeBytes"}`) or `FileOperationFailed` (`{"path", "operation": "read", "reason": "not_found"}`) if the target doesn't exist. Traversal/malformed input: silent ack+log, same posture as the write path.
+607:- [ ] **F3. `list_handler.py`** — subscribes to `FileListRequested` (`{"path"}`, the directory to list — empty string means `watch_dir` itself), publishes `FileListCompleted` (`{"path", "entries": [{"name", "isDirectory", "sizeBytes"}]}`), non-recursive (Decision #23). `FileOperationFailed` if `path` doesn't exist or isn't a directory.
+608:- [ ] **F4. `delete_handler.py`** — subscribes to `FileDeleteRequested` (`{"path"}`), publishes `FileDeleteCompleted` (`{"path"}`) or `FileOperationFailed` (`{"path", "operation": "delete", "reason": "not_found"}`).
+609:- [ ] **F5. Manifest + entrypoint wiring** — [infra/nats/adapter_identities.yaml](infra/nats/adapter_identities.yaml): add `FileReadCompleted`/`FileListCompleted`/`FileDeleteCompleted`/`FileOperationFailed` to `file-storage-01`'s publish list (the `Requested` subjects are already there from Step A2); re-run `bootstrap_auth.sh`. [`__main__.py`](adapters/file_storage_adapter/file_storage_adapter/__main__.py)'s `run()` grows from a 2-way `asyncio.gather` (write handler + external-creation watch, Step C6) to a 5-way one — each command type is its own durable consumer, per §6's "one filtered consumer per adapter" design (not one consumer juggling four subjects).
+610:- [ ] **F6. Tests + verification** — unit tests per handler (mirroring C4's `test_write_handler.py` structure: happy path, not-found, traversal-rejected), plus an entrypoint-level test extending Step C7's pattern to cover all four commands running together. `ruff`/`mypy`/`bandit`/`pip-audit` clean.
+612:### Track G — Webhook Sender
+Edit Design.md
+Added 4 lines
+Let's do a final cleanup pass and check overall status.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -3
+for bucket in service-directory service-identity; do
+  for key in $(sg docker -c "$NB kv ls $bucket" 2>&1); do
+    sg docker -c "$NB kv del $bucket '$key' -f" 2>&1 >/dev/null
+  done
+done
+echo "--- compose status ---"
+sg docker -c "docker compose ps" 2>&1
+echo "--- git status ---"
+git status --short | head -40
+
+OUT
+      First Sequence: 729
+       Last Sequence: 728 @ 2026-08-29 03:47:02
+    Active Consumers: 562
+--- compose status ---
+NAME                             IMAGE                          COMMAND                  SERVICE                CREATED              STATUS              PORTS
+jetcore-file-storage-adapter-1   jetcore-file-storage-adapter   "python -m file_stor…"   file-storage-adapter   About a minute ago   Up About a minute   
+jetcore-nats-1                   nats:2.14.5                    "/nats-server -c /et…"   nats                   50 minutes ago       Up 50 minutes       0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+jetcore-webhook-listener-1       jetcore-webhook-listener       "python -m webhook_l…"   webhook-listener       42 minutes ago       Up 42 minutes       0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp
+--- git status ---
+ M Design.md
+ M adapters/file_storage_adapter/file_storage_adapter/__main__.py
+ M adapters/file_storage_adapter/file_storage_adapter/payloads.py
+ M adapters/file_storage_adapter/tests/_file_storage_helpers.py
+ M adapters/file_storage_adapter/tests/conftest.py
+ M adapters/file_storage_adapter/tests/test_entrypoint.py
+ M adapters/file_storage_adapter/tests/test_paths.py
+ M adapters/file_storage_adapter/tests/test_payloads.py
+ M adapters/file_storage_adapter/tests/test_schemas.py
+ M infra/nats/adapter_identities.yaml
+ M tests/conftest.py
+?? adapters/file_storage_adapter/file_storage_adapter/delete_handler.py
+?? adapters/file_storage_adapter/file_storage_adapter/list_handler.py
+?? adapters/file_storage_adapter/file_storage_adapter/read_handler.py
+?? adapters/file_storage_adapter/tests/test_delete_handler.py
+?? adapters/file_storage_adapter/tests/test_list_handler.py
+?? adapters/file_storage_adapter/tests/test_read_handler.py
+?? schemas/events.files.FileDeleteCompleted.v1.json
+?? schemas/events.files.FileDeleteRequested.v1.json
+?? schemas/events.files.FileListCompleted.v1.json
+?? schemas/events.files.FileListRequested.v1.json
+?? schemas/events.files.FileOperationFailed.v1.json
+?? schemas/events.files.FileReadCompleted.v1.json
+?? schemas/events.files.FileReadRequested.v1.json
+Track F complete — all six steps (F1–F6).
+
+F1 — Seven new JSON Schema files for read/list/delete + the shared FileOperationFailed result (Decision #23), plus a shared decode_path_only_request/PathOnlyRequest in payloads.py since all three request shapes are just {"path"}.
+
+F2–F4 — read_handler.py, list_handler.py, delete_handler.py, each mirroring write_handler.py's structure: resolve_within reused as-is for path safety, security-relevant rejections (traversal/malformed) stay a silent ack+log, "not found" gets a real FileOperationFailed reply. list distinguishes not_found from not_a_directory.
+
+F5 — Found a real, previously-unnoticed gap while wiring this up: no identity in the manifest could actually publish the three new request subjects — webhook-listener-01 only ever published FileWriteRequested, and Phase 3 doesn't build a real front door for the others. Fixed by giving test-observer-01 narrow publish rights for just those three, documented as a deliberate exception to its "read-only observer" framing rather than silent scope creep. __main__.py's run() grew from a 2-way to a 5-way asyncio.gather via a Protocol-typed generic command loop (all four handlers share one shape), so each command gets its own durable consumer per §6's design.
+
+F6 — One test file per handler (happy path, not-found, malformed, traversal — 44 new tests), plus a third entrypoint-level test driving all three new commands through the real 5-way gather sequentially, since read/list/delete run on fully independent consumers with no cross-command ordering guarantee — a concurrent burst would've raced delete against list.
+
+Then verified against the real deployed container, not just automated tests: rebuilt the file-storage-adapter Compose service, created a file through the real Webhook Listener over real HTTP, and drove real read/list/delete commands against the running container from a throwaway script — correct replies, and confirmed the file was genuinely gone from the host bind mount afterward.
+
+160 tests total (up from 116), full suite run 4× clean, ruff/mypy/bandit/pip-audit all clean. This closes out §9 item #1 entirely — the File Storage Adapter now implements its full command set.
+
+Ready for Track G — Webhook Sender whenever you'd like to continue.
+
+------------------ Track F Completed ------------------

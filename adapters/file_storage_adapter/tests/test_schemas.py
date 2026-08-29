@@ -30,6 +30,13 @@ def _load(name: str) -> dict[str, Any]:
         "events.files.FileWriteRequested",
         "events.files.FileCreateCompleted",
         "events.files.FileWriteCompleted",
+        "events.files.FileReadRequested",
+        "events.files.FileReadCompleted",
+        "events.files.FileListRequested",
+        "events.files.FileListCompleted",
+        "events.files.FileDeleteRequested",
+        "events.files.FileDeleteCompleted",
+        "events.files.FileOperationFailed",
     ],
 )
 def test_schema_file_is_valid_draft_2020_12(name: str) -> None:
@@ -82,3 +89,70 @@ def test_completed_events_reject_negative_size() -> None:
     payload = {"path": "notes/todo.txt", "sizeBytes": -1, "occurredAt": "2026-08-25T18:05:00Z"}
     with pytest.raises(ValidationError):
         Draft202012Validator(_load("events.files.FileWriteCompleted")).validate(payload)
+
+
+def test_file_read_requested_example_validates() -> None:
+    Draft202012Validator(_load("events.files.FileReadRequested")).validate(
+        {"path": "notes/todo.txt"}
+    )
+
+
+def test_file_read_completed_example_validates() -> None:
+    payload = {
+        "path": "notes/todo.txt",
+        "content": base64.b64encode(b"hello").decode(),
+        "sizeBytes": 5,
+        "occurredAt": "2026-08-25T18:04:00Z",
+    }
+    Draft202012Validator(_load("events.files.FileReadCompleted")).validate(payload)
+
+
+def test_file_list_requested_allows_empty_path() -> None:
+    """Empty path means watch_dir itself (Design.md §13 Step F3) —
+    deliberately not `minLength: 1` like every other command's path."""
+    Draft202012Validator(_load("events.files.FileListRequested")).validate({"path": ""})
+
+
+def test_file_list_completed_example_validates() -> None:
+    payload = {
+        "path": "notes",
+        "entries": [
+            {"name": "todo.txt", "isDirectory": False, "sizeBytes": 11},
+            {"name": "archive", "isDirectory": True, "sizeBytes": 0},
+        ],
+        "occurredAt": "2026-08-25T18:04:00Z",
+    }
+    Draft202012Validator(_load("events.files.FileListCompleted")).validate(payload)
+
+
+def test_file_delete_requested_example_validates() -> None:
+    Draft202012Validator(_load("events.files.FileDeleteRequested")).validate(
+        {"path": "notes/todo.txt"}
+    )
+
+
+def test_file_delete_completed_example_validates() -> None:
+    payload = {"path": "notes/todo.txt", "occurredAt": "2026-08-25T18:04:00Z"}
+    Draft202012Validator(_load("events.files.FileDeleteCompleted")).validate(payload)
+
+
+@pytest.mark.parametrize("operation", ["read", "list", "delete"])
+def test_file_operation_failed_example_validates(operation: str) -> None:
+    payload = {
+        "path": "notes/missing.txt",
+        "operation": operation,
+        "reason": "not_found",
+        "occurredAt": "2026-08-25T18:04:00Z",
+    }
+    Draft202012Validator(_load("events.files.FileOperationFailed")).validate(payload)
+
+
+def test_file_operation_failed_rejects_unknown_operation() -> None:
+    payload = {
+        "path": "notes/missing.txt",
+        "operation": "write",  # not a valid FileOperationFailed operation — write auto-creates
+        "reason": "not_found",
+        "occurredAt": "2026-08-25T18:04:00Z",
+    }
+    with pytest.raises(ValidationError):
+        Draft202012Validator(_load("events.files.FileOperationFailed")).validate(payload)

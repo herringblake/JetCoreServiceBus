@@ -3,13 +3,15 @@ Step E4). Mirrors the same _clean_state pattern used throughout
 libs/jetcore/tests and adapters/*/tests — re-implemented locally rather
 than imported, for the self-containment reasons those already explain.
 
-Also deletes the File Storage Adapter entrypoint's one FIXED (non-random)
-durable consumer name, same reasoning as
+Also deletes the File Storage Adapter entrypoint's FIXED (non-random)
+durable consumer names, same reasoning as
 adapters/file_storage_adapter/tests/conftest.py: a real deployment resumes
 its own cursor across restarts, so this test (which drives that real
-entrypoint) reuses the real name on purpose — which means a leftover
-consumer from an earlier run needs explicit cleanup, not just a stream
-purge.
+entrypoint) reuses the real names on purpose — which means leftover
+consumers from an earlier run need explicit cleanup, not just a stream
+purge. `run()` (Steps C6/F5) always starts all four command handlers
+together, so all four fixed names need cleaning here even though this
+test only exercises the write path.
 """
 
 from __future__ import annotations
@@ -26,7 +28,19 @@ CREDS_DIR = "infra/nats/operator/creds"
 WRITE_REQUESTED_SUBJECT = "events.files.FileWriteRequested"
 CREATE_COMPLETED_SUBJECT = "events.files.FileCreateCompleted"
 WRITE_COMPLETED_SUBJECT = "events.files.FileWriteCompleted"
-FIXED_ENTRYPOINT_DURABLE_NAME = "file-storage-01-write-handler"
+READ_REQUESTED_SUBJECT = "events.files.FileReadRequested"
+READ_COMPLETED_SUBJECT = "events.files.FileReadCompleted"
+LIST_REQUESTED_SUBJECT = "events.files.FileListRequested"
+LIST_COMPLETED_SUBJECT = "events.files.FileListCompleted"
+DELETE_REQUESTED_SUBJECT = "events.files.FileDeleteRequested"
+DELETE_COMPLETED_SUBJECT = "events.files.FileDeleteCompleted"
+OPERATION_FAILED_SUBJECT = "events.files.FileOperationFailed"
+FIXED_ENTRYPOINT_DURABLE_NAMES = (
+    "file-storage-01-write-handler",
+    "file-storage-01-read-handler",
+    "file-storage-01-list-handler",
+    "file-storage-01-delete-handler",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -34,12 +48,24 @@ async def _clean_state() -> AsyncGenerator[None]:
     nc = await nats.connect(NATS_URL, user_credentials=f"{CREDS_DIR}/jetcore-admin.creds")
     js = nc.jetstream()
     await js.purge_stream("EVENTS")
-    try:
-        await js.delete_consumer("EVENTS", FIXED_ENTRYPOINT_DURABLE_NAME)
-    except NotFoundError:
-        pass
+    for name in FIXED_ENTRYPOINT_DURABLE_NAMES:
+        try:
+            await js.delete_consumer("EVENTS", name)
+        except NotFoundError:
+            pass
     kv = await js.key_value("service-directory")
-    for subject in (WRITE_REQUESTED_SUBJECT, CREATE_COMPLETED_SUBJECT, WRITE_COMPLETED_SUBJECT):
+    for subject in (
+        WRITE_REQUESTED_SUBJECT,
+        CREATE_COMPLETED_SUBJECT,
+        WRITE_COMPLETED_SUBJECT,
+        READ_REQUESTED_SUBJECT,
+        READ_COMPLETED_SUBJECT,
+        LIST_REQUESTED_SUBJECT,
+        LIST_COMPLETED_SUBJECT,
+        DELETE_REQUESTED_SUBJECT,
+        DELETE_COMPLETED_SUBJECT,
+        OPERATION_FAILED_SUBJECT,
+    ):
         try:
             for key in await kv.keys(filters=[f"{subject}."]):
                 await kv.delete(key)

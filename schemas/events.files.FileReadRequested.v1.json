@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jetcoreservicebus.internal/schemas/events.files.FileReadRequested.v1.json",
+  "title": "FileReadRequested",
+  "description": "Command: read a file under the File Storage Adapter's watch_dir (Design.md §8, §13 Step F2). Logical, pre-encryption shape of eventPayload — the wire envelope wraps this per §5.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "File path, relative to watch_dir, to read. Must resolve to a location inside watch_dir — absolute paths, '..' traversal, and symlink escapes are rejected by the adapter (Design.md §12/§13), not by this schema."
+    }
+  }
+}

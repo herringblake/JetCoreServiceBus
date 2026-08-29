@@ -52,3 +52,11 @@ def test_path_equal_to_watch_dir_itself_is_allowed(watch_dir: Path) -> None:
     # Degenerate case (an empty-ish "." path) — should resolve to watch_dir
     # itself without raising, since it doesn't escape it.
     assert resolve_within(watch_dir, ".") == watch_dir.resolve()
+
+
+def test_empty_string_path_also_resolves_to_watch_dir_itself(watch_dir: Path) -> None:
+    """Design.md §13 Step F3: FileListRequested treats an empty `path` as
+    "list watch_dir itself" — confirmed here that resolve_within handles
+    it the same as "." (pathlib's `Path("/a") / ""` is a no-op join, not
+    an error), not assumed."""
+    assert resolve_within(watch_dir, "") == watch_dir.resolve()

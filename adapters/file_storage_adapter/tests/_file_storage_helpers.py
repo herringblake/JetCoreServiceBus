@@ -34,6 +34,13 @@ CREDS_DIR = "infra/nats/operator/creds"
 WRITE_REQUESTED_SUBJECT = "events.files.FileWriteRequested"
 CREATE_COMPLETED_SUBJECT = "events.files.FileCreateCompleted"
 WRITE_COMPLETED_SUBJECT = "events.files.FileWriteCompleted"
+READ_REQUESTED_SUBJECT = "events.files.FileReadRequested"
+READ_COMPLETED_SUBJECT = "events.files.FileReadCompleted"
+LIST_REQUESTED_SUBJECT = "events.files.FileListRequested"
+LIST_COMPLETED_SUBJECT = "events.files.FileListCompleted"
+DELETE_REQUESTED_SUBJECT = "events.files.FileDeleteRequested"
+DELETE_COMPLETED_SUBJECT = "events.files.FileDeleteCompleted"
+OPERATION_FAILED_SUBJECT = "events.files.FileOperationFailed"
 
 
 def settings(service_id: str) -> AdapterSettings:

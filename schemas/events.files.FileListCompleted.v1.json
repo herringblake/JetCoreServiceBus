@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jetcoreservicebus.internal/schemas/events.files.FileListCompleted.v1.json",
+  "title": "FileListCompleted",
+  "description": "Result: the immediate (non-recursive, Decision #23) contents of a directory under watch_dir, in reply to a FileListRequested (Design.md §13 Step F3). eventDetails.correlationId is set to that request's eventId.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "entries", "occurredAt"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Directory path, relative to watch_dir, that was listed."
+    },
+    "entries": {
+      "type": "array",
+      "description": "One entry per immediate child of `path` — files and subdirectories, not recursed into.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "isDirectory", "sizeBytes"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The entry's own name, not a full path (join with `path` to reconstruct one)."
+          },
+          "isDirectory": { "type": "boolean" },
+          "sizeBytes": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "0 for directories."
+          }
+        }
+      }
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp (RFC 3339 / ISO 8601) the listing completed."
+    }
+  }
+}

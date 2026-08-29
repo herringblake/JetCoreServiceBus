@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jetcoreservicebus.internal/schemas/events.files.FileReadCompleted.v1.json",
+  "title": "FileReadCompleted",
+  "description": "Result: a file under watch_dir was read successfully, in reply to a FileReadRequested (Design.md §13 Step F2). eventDetails.correlationId is set to that request's eventId. If the file doesn't exist, FileOperationFailed is published instead — not this event.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "content", "sizeBytes", "occurredAt"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "File path, relative to watch_dir, that was read."
+    },
+    "content": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "Raw file bytes, base64-encoded."
+    },
+    "sizeBytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Size of the file's content in bytes."
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp (RFC 3339 / ISO 8601) the read completed."
+    }
+  }
+}

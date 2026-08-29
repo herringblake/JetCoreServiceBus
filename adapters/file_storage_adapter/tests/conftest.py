@@ -15,22 +15,47 @@ import pytest
 from _file_storage_helpers import (
     CREATE_COMPLETED_SUBJECT,
     CREDS_DIR,
+    DELETE_COMPLETED_SUBJECT,
+    DELETE_REQUESTED_SUBJECT,
+    LIST_COMPLETED_SUBJECT,
+    LIST_REQUESTED_SUBJECT,
     NATS_URL,
+    OPERATION_FAILED_SUBJECT,
+    READ_COMPLETED_SUBJECT,
+    READ_REQUESTED_SUBJECT,
     WRITE_COMPLETED_SUBJECT,
     WRITE_REQUESTED_SUBJECT,
 )
 from nats.js.errors import NoKeysError, NotFoundError
 
-# The one fixed (non-random) durable consumer name in this whole test
-# suite — __main__.run() (Step C6) deliberately uses a stable
-# "{service_id}-write-handler" name, unlike every other test here's
-# randomized `durable_name` fixture, because that's what a real
-# deployment needs (resume its own cursor across restarts). Step C7's
-# entrypoint test reuses that same real name on purpose, which means it
-# — and only it — needs this consumer actively deleted between runs, not
-# just the stream purged: a leftover consumer from an earlier run
-# attaches to (doesn't replace) an existing one on `pull_subscribe`.
-FIXED_ENTRYPOINT_DURABLE_NAME = "file-storage-01-write-handler"
+_ALL_SUBJECTS = (
+    WRITE_REQUESTED_SUBJECT,
+    CREATE_COMPLETED_SUBJECT,
+    WRITE_COMPLETED_SUBJECT,
+    READ_REQUESTED_SUBJECT,
+    READ_COMPLETED_SUBJECT,
+    LIST_REQUESTED_SUBJECT,
+    LIST_COMPLETED_SUBJECT,
+    DELETE_REQUESTED_SUBJECT,
+    DELETE_COMPLETED_SUBJECT,
+    OPERATION_FAILED_SUBJECT,
+)
+
+# The fixed (non-random) durable consumer names in this whole test suite —
+# __main__.run() (Steps C6/F5) deliberately uses stable
+# "{service_id}-{command}-handler" names, unlike every other test here's
+# randomized `durable_name` fixture, because that's what a real deployment
+# needs (resume its own cursor across restarts). Step C7's entrypoint test
+# reuses these same real names on purpose, which means they — and only
+# they — need active deletion between runs, not just a stream purge: a
+# leftover consumer from an earlier run attaches to (doesn't replace) an
+# existing one on `pull_subscribe`.
+FIXED_ENTRYPOINT_DURABLE_NAMES = (
+    "file-storage-01-write-handler",
+    "file-storage-01-read-handler",
+    "file-storage-01-list-handler",
+    "file-storage-01-delete-handler",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -38,12 +63,13 @@ async def _clean_state() -> AsyncGenerator[None]:
     nc = await nats.connect(NATS_URL, user_credentials=f"{CREDS_DIR}/jetcore-admin.creds")
     js = nc.jetstream()
     await js.purge_stream("EVENTS")
-    try:
-        await js.delete_consumer("EVENTS", FIXED_ENTRYPOINT_DURABLE_NAME)
-    except NotFoundError:
-        pass
+    for name in FIXED_ENTRYPOINT_DURABLE_NAMES:
+        try:
+            await js.delete_consumer("EVENTS", name)
+        except NotFoundError:
+            pass
     kv = await js.key_value("service-directory")
-    for subject in (WRITE_REQUESTED_SUBJECT, CREATE_COMPLETED_SUBJECT, WRITE_COMPLETED_SUBJECT):
+    for subject in _ALL_SUBJECTS:
         try:
             for key in await kv.keys(filters=[f"{subject}."]):
                 await kv.delete(key)

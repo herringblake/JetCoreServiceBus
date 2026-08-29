@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jetcoreservicebus.internal/schemas/events.files.FileDeleteCompleted.v1.json",
+  "title": "FileDeleteCompleted",
+  "description": "Result: a file under watch_dir was deleted, in reply to a FileDeleteRequested (Design.md §13 Step F4). eventDetails.correlationId is set to that request's eventId. If the file didn't exist, FileOperationFailed is published instead — not this event.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "occurredAt"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "File path, relative to watch_dir, that was deleted."
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp (RFC 3339 / ISO 8601) the delete completed."
+    }
+  }
+}

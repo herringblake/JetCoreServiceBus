@@ -81,6 +81,10 @@ adapters:
         - events.files.FileReadCompleted
         - events.files.FileListCompleted
         - events.files.FileDeleteCompleted
+        - events.files.FileOperationFailed   # Design.md §13 Step F1,
+                                              # Decision #23 — shared
+                                              # "expected failure" result
+                                              # for read/list/delete
       subscribe:
         - events.files.FileWriteRequested
         - events.files.FileReadRequested
@@ -153,12 +157,23 @@ adapters:
     description: >
       Read-only observer used by integration tests to confirm an adapter's
       published output actually appears on the bus with the expected
-      metadata (Design.md §12 Step C4 onward). Subscribes to result
-      subjects only — never publishes, never triggers real adapter
-      behavior. Extend its subscribe list as new adapters' tests need to
+      metadata (Design.md §12 Step C4 onward). Primarily subscribes to
+      result subjects — never triggers *real* adapter behavior on its own
+      initiative. Extend its subscribe list as new adapters' tests need to
       observe new result subjects.
+
+      Also publishes the File Storage Adapter's read/list/delete request
+      subjects (Design.md §13 Step F6) — unlike FileWriteRequested
+      (webhook-listener-01, a real adapter), no real Phase 3 "front door"
+      publishes these yet (Track F is scoped to the File Storage
+      Adapter's own handling of them, not building one), so test suites
+      need a legitimate identity to trigger them with. Narrow, deliberate
+      scope creep from pure observation, not a general-purpose publisher.
     permissions:
-      publish: []
+      publish:
+        - events.files.FileReadRequested
+        - events.files.FileListRequested
+        - events.files.FileDeleteRequested
       subscribe:
         - events.files.FileWriteRequested    # lets a test independently
                                               # capture a request's real
@@ -169,3 +184,7 @@ adapters:
                                               # that *some* value is set)
         - events.files.FileCreateCompleted
         - events.files.FileWriteCompleted
+        - events.files.FileReadCompleted     # Design.md §13 Step F6
+        - events.files.FileListCompleted
+        - events.files.FileDeleteCompleted
+        - events.files.FileOperationFailed

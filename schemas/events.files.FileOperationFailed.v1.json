@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jetcoreservicebus.internal/schemas/events.files.FileOperationFailed.v1.json",
+  "title": "FileOperationFailed",
+  "description": "Result: an expected, non-security business failure for a read/list/delete command against watch_dir (Decision #23, Design.md §13) — e.g. the target doesn't exist. Published in reply to the triggering *Requested command; eventDetails.correlationId is set to that request's eventId. Deliberately NOT used for path-traversal or malformed-payload rejections — those stay a silent ack+log (Decision #22's posture), so a caller gets neither confirmation nor denial of what's really on disk for anything security-relevant. write has no equivalent failure case: FileWriteRequested auto-creates a missing file (Decision #19), so 'not found' never applies to it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "operation", "reason", "occurredAt"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "The path the failing command targeted."
+    },
+    "operation": {
+      "type": "string",
+      "enum": ["read", "list", "delete"],
+      "description": "Which command failed."
+    },
+    "reason": {
+      "type": "string",
+      "enum": ["not_found", "not_a_directory"],
+      "description": "not_found: the target doesn't exist (read/list/delete). not_a_directory: a list target exists but is a file, not a directory."
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp (RFC 3339 / ISO 8601) the failure was observed."
+    }
+  }
+}

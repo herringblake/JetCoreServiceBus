@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jetcoreservicebus.internal/schemas/events.files.FileListRequested.v1.json",
+  "title": "FileListRequested",
+  "description": "Command: list the immediate contents of a directory under the File Storage Adapter's watch_dir (Design.md §13 Step F3) — non-recursive, one directory level (Decision #23).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Directory path, relative to watch_dir, to list. Empty string means watch_dir itself. Must resolve to a location inside watch_dir, same rule as every other command here."
+    }
+  }
+}

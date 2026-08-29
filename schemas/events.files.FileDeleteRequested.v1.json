@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jetcoreservicebus.internal/schemas/events.files.FileDeleteRequested.v1.json",
+  "title": "FileDeleteRequested",
+  "description": "Command: delete a file under the File Storage Adapter's watch_dir (Design.md §13 Step F4).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "File path, relative to watch_dir, to delete. Must resolve to a location inside watch_dir, same rule as every other command here."
+    }
+  }
+}
