@@ -62,7 +62,10 @@ warn_unused_ignores = true
 plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
-testpaths = ["libs", "adapters"]
+# "tests" (root-level): cross-adapter integration tests (Design.md §12
+# Step E4) — no single package under libs/ or adapters/ is the right home
+# for a test that spans two of them.
+testpaths = ["libs", "adapters", "tests"]
 asyncio_mode = "auto"
 
 # nkeys and pyrage ship no type stubs / py.typed marker (confirmed via

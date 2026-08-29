@@ -1,0 +1,22 @@
+# Design.md §12 Step E2 — keeps adapter image build contexts small and,
+# more importantly, keeps real secrets (nsc's Operator/Account/User store,
+# generated .creds files) out of any image layer. Compose mounts the one
+# .creds file each adapter actually needs at runtime instead (Step E1) —
+# nothing under infra/nats/operator/ should ever be COPYed into an image.
+
+.git/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+infra/nats/operator/
+infra/nats/resolver.conf
+infra/files/
+
+.env
+.DS_Store

@@ -28,8 +28,8 @@ uv sync --all-packages
 uv run --all-packages pytest            # tests
 uv run ruff check .                     # lint
 uv run ruff format .                    # format
-uv run --all-packages mypy libs adapters   # type-check
-uv run bandit -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter # security static analysis (source only — add each new adapter's package dir here as it's scaffolded)
+uv run --all-packages mypy libs adapters tests   # type-check
+uv run bandit -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter adapters/webhook_listener/webhook_listener # security static analysis (source only — add each new adapter's package dir here as it's scaffolded)
 uv run pip-audit                        # dependency vulnerability scan
 ```
 

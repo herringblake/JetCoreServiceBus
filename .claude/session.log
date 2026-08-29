@@ -18126,3 +18126,1481 @@ D5 — the live-bus proof. This one had a genuine bug worth flagging clearly: my
 Ready for Track E — wiring both adapters into docker-compose and proving the whole vertical slice end-to-end whenever you'd like to continue.
 
 ---------------- Track D Completed --------------------
+
+Proceed to all steps of Track E
+Let's look at the current docker-compose.yml and related infra before building Track E.
+
+Let's check the .gitignore and plan the file layout before writing Dockerfiles.
+
+Now the Dockerfiles. First, file_storage_adapter.
+
+Now let's build it and see what breaks — this is genuinely untested territory per the plan's own note.
+
+Built cleanly first try, and confirmed exactly the risk the plan flagged (needing every workspace member's pyproject.toml, but not its source). Let's check size and actually run it.
+
+Started clean. Now let's clean up and build the webhook_listener image the same way.
+
+Also clean. Let's run it standalone too, to confirm before wiring into compose.
+
+Both images work standalone. Let's clean up these test containers and now wire everything into docker-compose.yml.
+
+Write file
+Write succeeded
+Now let's bring both services up via Compose for real.
+
+All services confirmed healthy with persisted JetStream data. Now E3 — the manual end-to-end smoke test, matching A7's spirit through the real HTTP surface.
+
+Two-layer traversal defense confirmed working end-to-end: the webhook listener doesn't block it (by design), but the File Storage Adapter's resolve_within correctly rejects it, and nothing leaks. Now let's confirm the completion-event distinction (create vs. update) via a real repeat write.
+
+All 4 E3 checks pass. Let's clean up test artifacts, then build E4 — the automated end-to-end test.
+
+A real finding — the container runs as root by default, so the file it wrote onto the host bind mount is root-owned and I can't clean it up as my own user. Let me fix this properly (non-root container user) rather than just work around it.
+
+Cleaned up. Now let's fix both Dockerfiles to run as a non-root user matching the host's typical UID.
+
+Now let's rebuild and verify both work as non-root, and that the file-storage-adapter can actually write to the bind mount as UID 1000.
+
+Both healthy as non-root. Let's confirm ownership of a freshly-written file is now correct.
+
+Let me update Design.md for E1–E3 before building E4.
+
+Edit Design.md
+Added 6 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^\- \[x\] \*\*E1\|^\- \[x\] \*\*E2\|^\- \[ \] \*\*E3\|^\- \[ \] \*\*E4" Design.md
+
+OUT
+552:- [x] **E2. Adapter `Dockerfile`s** — [adapters/file_storage_adapter/Dockerfile](adapters/file_storage_adapter/Dockerfile), [adapters/webhook_listener/Dockerfile](adapters/webhook_listener/Dockerfile): multi-stage-in-spirit (single `python:3.12-slim` stage, the official distroless `ghcr.io/astral-sh/uv` image copied in for the `uv` binary — no `pip install uv` bootstrap needed), `uv sync --frozen --no-dev --package <name>` installs just that adapter + `jetcore`, not the whole dev workspace. Build context is the **repo root**, not the adapter's own directory — confirmed by testing this is required: a uv workspace path-dependency (`jetcore`) needs the real `libs/jetcore/` tree present to resolve, *and* `uv sync --frozen` validates the whole workspace's `pyproject.toml` set against `uv.lock`, so every member's `pyproject.toml` (not its source) has to be present too, or the sync fails outright. Added `.dockerignore` alongside these — keeps `infra/nats/operator/`'s real secrets out of every image layer categorically, not just "don't COPY that one directory" by convention.
+557:- [x] **E1. `docker-compose.yml` wiring** — added `webhook-listener` and `file-storage-adapter` services: `build: {context: ., dockerfile: adapters/.../Dockerfile}`, each adapter's real `.creds` file (Step A3) and `file-storage-adapter`'s `watch_dir` (`./infra/files`, git-ignored, Step E1's parameter table) bind-mounted, `JETCORE_*` env vars per §7.6, `8080` published for the Webhook Listener. `depends_on: nats` for start-order only, per A6's finding (`nats:2.14.5` has no shell, no Compose-native healthcheck to depend on) — `restart: unless-stopped` (matching `nats`'s own policy) is the actual mechanism covering "NATS wasn't ready yet," not hand-rolled connection-retry logic in either adapter, a deliberate v1 scoping choice recorded directly in the compose file's own comments, not silently assumed to work.
+561:- [ ] **E4. Automated end-to-end test** — a `test_webhook_to_file_storage_end_to_end.py`-style test (naming echoes Step B7's `test_end_to_end.py`) that starts both adapters against the real Phase 1 stack and drives the whole path via a real HTTP `POST`, asserting the file's real on-disk content and the completion event — closing the loop the same way B7 did for the library alone.
+Read Design.md (lines 551-560)
+Edit Design.md
+Modified
+Now let's find and update the E3 checklist bullet.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^\- \[ \] \*\*E3\|^\- \[ \] \*\*E4" Design.md
+
+OUT
+561:- [ ] **E4. Automated end-to-end test** — a `test_webhook_to_file_storage_end_to_end.py`-style test (naming echoes Step B7's `test_end_to_end.py`) that starts both adapters against the real Phase 1 stack and drives the whole path via a real HTTP `POST`, asserting the file's real on-disk content and the completion event — closing the loop the same way B7 did for the library alone.
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '550,562p' Design.md
+
+OUT
+### Track E — Integration
+
+- [x] **E1. `docker-compose.yml` wiring** — added `webhook-listener` and `file-storage-adapter` services: `build: {context: ., dockerfile: adapters/.../Dockerfile}`, each adapter's real `.creds` file (Step A3) and `file-storage-adapter`'s `watch_dir` (`./infra/files`, git-ignored, Step E1's parameter table) bind-mounted, `JETCORE_*` env vars per §7.6, `8080` published for the Webhook Listener. `depends_on: nats` for start-order only, per A6's finding (`nats:2.14.5` has no shell, no Compose-native healthcheck to depend on) — `restart: unless-stopped` (matching `nats`'s own policy) is the actual mechanism covering "NATS wasn't ready yet," not hand-rolled connection-retry logic in either adapter, a deliberate v1 scoping choice recorded directly in the compose file's own comments, not silently assumed to work.
+
+  **Executed and verified end-to-end via real `docker compose up -d --build`**, not just `docker run`: all three services (`nats`, `webhook-listener`, `file-storage-adapter`) came up healthy together; confirmed JetStream data (the `EVENTS` stream, both KV buckets) survived a `nats` container recreation intact, via the existing named volume — proving the persistent-volume design actually holds across a full `docker compose down`/`up` cycle, not assumed from the compose file alone.
+- [x] **E2. Adapter `Dockerfile`s** — [adapters/file_storage_adapter/Dockerfile](adapters/file_storage_adapter/Dockerfile), [adapters/webhook_listener/Dockerfile](adapters/webhook_listener/Dockerfile), built and verified standing alone first (before E1 wired them into Compose, though numbered after it here to match the plan's own ordering): multi-stage-in-spirit (single `python:3.12-slim` stage, the official distroless `ghcr.io/astral-sh/uv` image copied in for the `uv` binary — no `pip install uv` bootstrap needed), `uv sync --frozen --no-dev --package <name>` installs just that adapter + `jetcore`, not the whole dev workspace. Build context is the **repo root**, not the adapter's own directory — confirmed by testing this is required: a uv workspace path-dependency (`jetcore`) needs the real `libs/jetcore/` tree present to resolve, *and* `uv sync --frozen` validates the whole workspace's `pyproject.toml` set against `uv.lock`, so every member's `pyproject.toml` (not its source) has to be present too, or the sync fails outright. Added `.dockerignore` alongside these — keeps `infra/nats/operator/`'s real secrets out of every image layer categorically, not just "don't COPY that one directory" by convention.
+
+  **A real, if unsurprising, finding from actually running the built image**: both ran as root by default, and `file-storage-adapter`'s `watch_dir` writes landed **root-owned on the host bind mount** — confirmed by hitting it directly (a file it wrote couldn't be deleted by the host user without `sudo`). Fixed by adding a non-root `appuser` (UID 1000, matching this host's own convention) and switching to it before `CMD` in both Dockerfiles, then re-verified: a fresh write showed up correctly host-user-owned, deletable without `sudo`.
+
+  **Executed and verified**: both images build clean on the first real attempt (297MB for file-storage-adapter — no dev tooling baked in, confirmed by the installed-package list containing none of `pytest`/`ruff`/`mypy`/etc.); each run standalone via plain `docker run` against the live `jetcore_default` network before being wired into Compose at all, isolating build/runtime issues from Compose-wiring issues.
+- [x] **E3. Manual end-to-end smoke test** — same spirit as Step A7, through the real HTTP surface, against the real `docker compose` stack: (1) `curl -X POST` with the correct `X-Webhook-Secret` — `202`, file landed under `watch_dir` on the host, real content confirmed by `cat`; (2) a wrong secret and a missing secret both `401`, no file written; (3) a raw `..`-traversal in the URL was caught by HTTP-level path normalization before even reaching the app (`404`) — tried again with the traversal **URL-encoded** (`%2e%2e`) to actually exercise the real code path past routing: the Webhook Listener accepted it (`202`, by design — it doesn't validate paths, per D3's own scope), the message reached the File Storage Adapter, and **`resolve_within` rejected it there** (confirmed in the container's own logs: `"rejected FileWriteRequested ... path escapes watch_dir"`), with nothing written anywhere on disk — the real, full two-layer defense working together, not just each half's own unit tests; (4) confirmed the `FileCreateCompleted`-then-`FileWriteCompleted` distinction (Decision #19) with a real repeat `POST` to the same path — first write logged `FileCreateCompleted`, the repeat (with different content, confirmed changed on disk) logged `FileWriteCompleted`, both read directly off the real stream via `nats stream get --last-for`.
+- [ ] **E4. Automated end-to-end test** — a `test_webhook_to_file_storage_end_to_end.py`-style test (naming echoes Step B7's `test_end_to_end.py`) that starts both adapters against the real Phase 1 stack and drives the whole path via a real HTTP `POST`, asserting the file's real on-disk content and the completion event — closing the loop the same way B7 did for the library alone.
+Now E4 — the automated end-to-end test. This spans both adapter packages, so it needs its own top-level test location. Let's set that up.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+mkdir -p tests
+grep -n "testpaths" pyproject.toml
+
+OUT
+65:testpaths = ["libs", "adapters"]
+Read pyproject.toml (lines 61-68)
+Edit pyproject.toml
+Added 3 lines
+Write conftest.py
+55 lines
+"""Shared fixtures for the cross-adapter end-to-end test (Design.md §12
+Step E4). Mirrors the same _clean_state pattern used throughout
+libs/jetcore/tests and adapters/*/tests — re-implemented locally rather
+than imported, for the self-containment reasons those already explain.
+
+Also deletes the File Storage Adapter entrypoint's one FIXED (non-random)
+durable consumer name, same reasoning as
+adapters/file_storage_adapter/tests/conftest.py: a real deployment resumes
+its own cursor across restarts, so this test (which drives that real
+entrypoint) reuses the real name on purpose — which means a leftover
+consumer from an earlier run needs explicit cleanup, not just a stream
+purge.
+"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import AsyncGenerator
+
+import nats
+import pytest
+from nats.js.errors import NoKeysError, NotFoundError
+
+NATS_URL = "nats://localhost:4222"
+CREDS_DIR = "infra/nats/operator/creds"
+WRITE_REQUESTED_SUBJECT = "events.files.FileWriteRequested"
+CREATE_COMPLETED_SUBJECT = "events.files.FileCreateCompleted"
+WRITE_COMPLETED_SUBJECT = "events.files.FileWriteCompleted"
+FIXED_ENTRYPOINT_DURABLE_NAME = "file-storage-01-write-handler"
+
+
+@pytest.fixture(autouse=True)
+async def _clean_state() -> AsyncGenerator[None]:
+    nc = await nats.connect(NATS_URL, user_credentials=f"{CREDS_DIR}/jetcore-admin.creds")
+    js = nc.jetstream()
+    await js.purge_stream("EVENTS")
+    try:
+        await js.delete_consumer("EVENTS", FIXED_ENTRYPOINT_DURABLE_NAME)
+    except NotFoundError:
+        pass
+    kv = await js.key_value("service-directory")
+    for subject in (WRITE_REQUESTED_SUBJECT, CREATE_COMPLETED_SUBJECT, WRITE_COMPLETED_SUBJECT):
+        try:
+            for key in await kv.keys(filters=[f"{subject}."]):
+                await kv.delete(key)
+        except NoKeysError:
+            pass
+    await nc.close()
+    yield
+
+
+@pytest.fixture
+def durable_name() -> str:
+    return f"test-{uuid.uuid4().hex[:8]}"
+Write _e2e_helpers.py
+37 lines
+"""Test-only helpers for the cross-adapter end-to-end test (Design.md §12
+Step E4). A local copy of the connect() pattern used throughout this
+project's other test suites — not a cross-package import, for the
+self-containment reasons already explained in
+libs/jetcore/tests/_helpers.py, adapters/file_storage_adapter/tests/
+_file_storage_helpers.py, and adapters/webhook_listener/tests/
+_webhook_listener_helpers.py."""
+
+from __future__ import annotations
+
+from jetcore.bus_client import BusClient
+from jetcore.config import AdapterSettings
+from jetcore.crypto import generate_encryption_keypair, generate_signing_keypair
+
+NATS_URL = "nats://localhost:4222"
+CREDS_DIR = "infra/nats/operator/creds"
+
+
+def settings(service_id: str) -> AdapterSettings:
+    return AdapterSettings(
+        service_id=service_id,
+        nats_url=NATS_URL,
+        nats_creds_path=f"{CREDS_DIR}/{service_id}.creds",
+    )
+
+
+async def connect(service_id: str) -> BusClient:
+    signing = generate_signing_keypair()
+    encryption = generate_encryption_keypair()
+    return await BusClient.connect(
+        settings(service_id),
+        adapter_type="test-adapter",
+        encryption_keypair=encryption,
+        signing_seed=signing.seed,
+        signing_public_key=signing.public_key,
+    )
+Write test_webhook_to_file_storage_end_to_end.py
+26 lines
+"""End-to-end test for the Webhook Listener -> File Storage Adapter
+vertical slice (Design.md §12 Step E4) — the automated, repeatable
+counterpart to Step E3's manual smoke test (already run against the real
+`docker compose` stack: real curl, real containers, real bind mount).
+
+Runs both adapters' REAL entrypoint wiring concurrently in-process —
+`webhook_listener.app.create_app` via `TestClient` (Step D5's pattern) and
+`file_storage_adapter.__main__.run` as a background task (Step C7's
+pattern) — rather than orchestrating real Docker containers from pytest;
+E3 already proved the container/Compose layer works, so this proves the
+two adapters' actual application code works *together*, the same
+separation of concerns Steps C7/D5 each already established for one
+adapter alone. Closes the loop the way Step B7 did for the library by
+itself, this time for two real adapters.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import file_storage_adapter.__main__ as file_storage_entrypoint
+from _e2e_helpers import connect
+from fastapi.testclient import TestClient
+from jetcore.bus_client import BusClient
+from webhook_listener.app import CREATE_COMPLETED_SUBJECT if False else None  # placeholder
+Write test_webhook_to_file_storage_end_to_end.py
+97 lines
+"""End-to-end test for the Webhook Listener -> File Storage Adapter
+vertical slice (Design.md §12 Step E4) — the automated, repeatable
+counterpart to Step E3's manual smoke test (already run against the real
+`docker compose` stack: real curl, real containers, real bind mount).
+
+Runs both adapters' REAL entrypoint wiring concurrently in-process —
+`webhook_listener.app.create_app` via `TestClient` (Step D5's pattern) and
+`file_storage_adapter.__main__.run` as a background task (Step C7's
+pattern) — rather than orchestrating real Docker containers from pytest;
+E3 already proved the container/Compose layer works, so this proves the
+two adapters' actual application code works *together*, the same
+separation of concerns Steps C7/D5 each already established for one
+adapter alone. Closes the loop the way Step B7 did for the library by
+itself, this time for two real adapters.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import file_storage_adapter.__main__ as file_storage_entrypoint
+from _e2e_helpers import connect
+from fastapi.testclient import TestClient
+from file_storage_adapter.write_handler import CREATE_COMPLETED_SUBJECT
+from jetcore.bus_client import BusClient
+from jetcore.config import AdapterSettings
+from webhook_listener.app import create_app
+from webhook_listener.settings import WebhookListenerSettings
+
+WEBHOOK_SECRET = "e4-end-to-end-secret"
+
+
+async def test_real_webhook_post_ends_up_as_a_real_file_and_completion_event(
+    tmp_path: Path, durable_name: str
+) -> None:
+    fsa_settings = AdapterSettings(
+        service_id="file-storage-01",
+        nats_url="nats://localhost:4222",
+        nats_creds_path="infra/nats/operator/creds/file-storage-01.creds",
+    )
+    fsa_client = await BusClient.connect_as_adapter(fsa_settings, adapter_type="file-storage-adapter")
+    observer = await connect("test-observer-01")
+    shutdown = asyncio.Event()
+    fsa_task: asyncio.Task[None] | None = None
+    try:
+        completed_durable = await observer.subscribe(
+            CREATE_COMPLETED_SUBJECT, durable_name=durable_name
+        )
+
+        # The real File Storage Adapter, running its real entrypoint loop
+        # (write-path handler + external-creation watch, Steps C4/C5),
+        # exactly as `python -m file_storage_adapter` does.
+        fsa_task = asyncio.create_task(
+            file_storage_entrypoint.run(
+                fsa_client,
+                watch_dir=tmp_path,
+                service_id="file-storage-01",
+                shutdown=shutdown,
+            )
+        )
+        await asyncio.sleep(0.2)  # let subscribe()/awatch actually start
+
+        # The real Webhook Listener, driven through a real HTTP request —
+        # its own lifespan connects a real, independent BusClient (Step
+        # C6/D4's connect_as_adapter), exactly as `python -m
+        # webhook_listener` does.
+        whl_settings = WebhookListenerSettings(
+            service_id="webhook-listener-01",
+            nats_url="nats://localhost:4222",
+            nats_creds_path="infra/nats/operator/creds/webhook-listener-01.creds",
+            webhook_secret=WEBHOOK_SECRET,
+        )
+        app = create_app(whl_settings)
+        body = b"E4 end-to-end proof: real webhook POST -> real file storage adapter"
+        with TestClient(app) as client:
+            response = client.post(
+                "/webhooks/e4/proof.txt",
+                content=body,
+                headers={"X-Webhook-Secret": WEBHOOK_SECRET},
+            )
+            assert response.status_code == 202
+
+        received = await observer.fetch(completed_durable, timeout=5)
+        assert len(received) == 1
+        assert received[0].details.event_type == "FileCreateCompleted"
+        assert received[0].details.source_service_id == "file-storage-01"
+
+        written = tmp_path / "e4" / "proof.txt"
+        assert written.read_bytes() == body
+    finally:
+        shutdown.set()
+        if fsa_task is not None:
+            await asyncio.wait_for(fsa_task, timeout=5)
+        await fsa_client.close()
+        await observer.close()
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+timeout 30 uv run pytest -q tests/ -v 2>&1 | tail -60
+echo "exit=$?"
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/bherring/dev/clodhopper/JetCoreServiceBus
+configfile: pyproject.toml
+plugins: anyio-4.14.2, cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 1 item
+
+tests/test_webhook_to_file_storage_end_to_end.py .                       [100%]
+
+============================== 1 passed in 2.61s ===============================
+exit=0
+Passes cleanly on the first real attempt. Let's run it several times for stability, then the full suite.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+for i in 1 2 3 4 5; do timeout 20 uv run pytest -q tests/ 2>&1 | tail -3; done
+
+OUT
+.                                                                        [100%]
+1 passed in 2.58s
+.                                                                        [100%]
+1 passed in 2.60s
+.                                                                        [100%]
+1 passed in 2.62s
+.                                                                        [100%]
+1 passed in 2.58s
+.                                                                        [100%]
+1 passed in 2.63s
+5/5 stable. Now the full suite and toolchain.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== full suite x3 ==="
+for i in 1 2 3; do timeout 60 uv run pytest -q 2>&1 | tail -8; done
+
+OUT
+=== full suite x3 ===
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.11s
+    received.append(await self._process(msg))
+                    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 344, in _process
+    raise SignatureVerificationError(
+jetcore.bus_client.SignatureVerificationError: signature verification failed for 01a04b65-9f1b-764c-94ab-d8e148c4a012
+=========================== short test summary info ============================
+FAILED adapters/file_storage_adapter/tests/test_create_watch.py::test_external_file_creation_is_detected_and_published
+1 failed, 115 passed in 17.49s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.50s
+A new, different flaky failure — this time a SignatureVerificationError in a previously-stable C5 test. This is a real interaction to investigate, not just retry away. Let me reproduce and localize it.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+for i in 1 2 3 4 5; do
+  echo "=== full suite run $i ==="
+  timeout 60 uv run pytest -q -v 2>&1 | tail -3
+done
+
+OUT
+=== full suite run 1 ===
+tests/test_webhook_to_file_storage_end_to_end.py .                       [100%]
+
+============================= 116 passed in 17.18s =============================
+=== full suite run 2 ===
+=========================== short test summary info ============================
+FAILED adapters/file_storage_adapter/tests/test_create_watch.py::test_external_file_creation_is_detected_and_published
+======================== 1 failed, 115 passed in 17.45s ========================
+=== full suite run 3 ===
+tests/test_webhook_to_file_storage_end_to_end.py .                       [100%]
+
+============================= 116 passed in 17.63s =============================
+=== full suite run 4 ===
+tests/test_webhook_to_file_storage_end_to_end.py .                       [100%]
+
+============================= 116 passed in 17.54s =============================
+=== full suite run 5 ===
+tests/test_webhook_to_file_storage_end_to_end.py .                       [100%]
+
+============================= 116 passed in 17.60s =============================
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+for i in 1 2 3; do
+  timeout 60 uv run pytest -q -v 2>&1 > /tmp/run_$i.log
+  grep -q "test_external_file_creation_is_detected_and_published" /tmp/run_$i.log && grep -B3 "test_external_file_creation_is_detected_and_published" /tmp/run_$i.log | head -10
+  echo "run $i tail:"; tail -3 /tmp/run_$i.log
+done
+
+OUT
+run 1 tail:
+tests/test_webhook_to_file_storage_end_to_end.py .                       [100%]
+
+============================= 116 passed in 17.31s =============================
+run 2 tail:
+tests/test_webhook_to_file_storage_end_to_end.py .                       [100%]
+
+============================= 116 passed in 17.59s =============================
+run 3 tail:
+tests/test_webhook_to_file_storage_end_to_end.py .                       [100%]
+
+============================= 116 passed in 17.63s =============================
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+for i in $(seq 1 8); do
+  timeout 60 uv run pytest -q -v --tb=short 2>&1 > /tmp/run_$i.log
+  if grep -q "1 failed" /tmp/run_$i.log; then
+    echo "=== FAILED run $i ==="
+    grep -n "test_external_file_creation_is_detected_and_published\|test_.*file-storage-01\|PASSED\|FAILED" /tmp/run_$i.log | grep -B5 "FAILED" 
+    break
+  else
+    echo "run $i: passed"
+  fi
+done
+
+OUT
+Exit code 143
+Command timed out after 2m 0s
+run 1: passed
+run 2: passed
+run 3: passed
+run 4: passed
+run 5: passed
+run 6: passed
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+for i in $(seq 1 5); do
+  timeout 30 uv run pytest -q -v 2>&1 > /tmp/runB_$i.log
+  if grep -q "1 failed" /tmp/runB_$i.log; then
+    echo "=== FAILED run $i ==="
+    break
+  fi
+  echo "run $i: passed"
+done
+
+OUT
+run 1: passed
+run 2: passed
+run 3: passed
+=== FAILED run 4 ===
+Bash
+IN
+grep "PASSED\|FAILED" /tmp/runB_4.log | head -80
+
+OUT
+FAILED adapters/file_storage_adapter/tests/test_entrypoint.py::test_real_entrypoint_processes_a_command_and_shuts_down_cleanly
+Bash
+IN
+grep -n "PASSED\|FAILED\|ERROR" /tmp/runB_4.log
+
+OUT
+49:ERROR    jetcore.bus_client:bus_client.py:299 failed to process message on events.files.FileWriteRequested, leaving unacked for redelivery
+62:FAILED adapters/file_storage_adapter/tests/test_entrypoint.py::test_real_entrypoint_processes_a_command_and_shuts_down_cleanly
+Bash
+IN
+sed -n '1,70p' /tmp/runB_4.log
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/bherring/dev/clodhopper/JetCoreServiceBus
+configfile: pyproject.toml
+testpaths: libs, adapters, tests
+plugins: anyio-4.14.2, cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 116 items
+
+libs/jetcore/tests/test_bus_client.py .........                          [  7%]
+libs/jetcore/tests/test_config.py .........                              [ 15%]
+libs/jetcore/tests/test_creds.py ...                                     [ 18%]
+libs/jetcore/tests/test_crypto.py ..........                             [ 26%]
+libs/jetcore/tests/test_end_to_end.py ..                                 [ 28%]
+libs/jetcore/tests/test_envelope.py .........                            [ 36%]
+libs/jetcore/tests/test_registry.py ..............                       [ 48%]
+libs/jetcore/tests/test_scaffold.py .                                    [ 49%]
+adapters/file_storage_adapter/tests/test_create_watch.py ....            [ 52%]
+adapters/file_storage_adapter/tests/test_entrypoint.py F.                [ 54%]
+adapters/file_storage_adapter/tests/test_file_storage_adapter_scaffold.py . [ 55%]
+                                                                         [ 55%]
+adapters/file_storage_adapter/tests/test_paths.py ......                 [ 60%]
+adapters/file_storage_adapter/tests/test_payloads.py ..........          [ 68%]
+adapters/file_storage_adapter/tests/test_recent_writes.py ....           [ 72%]
+adapters/file_storage_adapter/tests/test_schemas.py .........            [ 80%]
+adapters/file_storage_adapter/tests/test_settings.py ....                [ 83%]
+adapters/file_storage_adapter/tests/test_write_handler.py ....           [ 87%]
+adapters/webhook_listener/tests/test_webhook_listener_app.py .......     [ 93%]
+adapters/webhook_listener/tests/test_webhook_listener_entrypoint.py .    [ 93%]
+adapters/webhook_listener/tests/test_webhook_listener_scaffold.py .      [ 94%]
+adapters/webhook_listener/tests/test_webhook_listener_settings.py .....  [ 99%]
+tests/test_webhook_to_file_storage_end_to_end.py .                       [100%]
+
+=================================== FAILURES ===================================
+_______ test_real_entrypoint_processes_a_command_and_shuts_down_cleanly ________
+
+tmp_path = PosixPath('/tmp/pytest-of-bherring/pytest-70/test_real_entrypoint_processes0')
+
+>   ???
+E   assert 0 == 1
+E    +  where 0 = len([])
+
+/home/bherring/dev/clodhopper/GregorsServiceBus/adapters/file_storage_adapter/tests/test_entrypoint.py:72: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+------------------------------ Captured log call -------------------------------
+ERROR    jetcore.bus_client:bus_client.py:299 failed to process message on events.files.FileWriteRequested, leaving unacked for redelivery
+Traceback (most recent call last):
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 297, in fetch
+    received.append(await self._process(msg))
+                    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 310, in _process
+    plaintext = decrypt(ciphertext, self._encryption_keypair.private_key)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/crypto.py", line 87, in decrypt
+    return bytes(pyrage.decrypt(ciphertext, [identity]))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pyrage.DecryptError: No matching keys found
+=========================== short test summary info ============================
+FAILED adapters/file_storage_adapter/tests/test_entrypoint.py::test_real_entrypoint_processes_a_command_and_shuts_down_cleanly
+======================== 1 failed, 115 passed in 20.84s ========================
+Let's look at RegistryClient.heartbeat() to understand exactly where a cancellation could interleave with an in-flight write.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "def heartbeat" -A 30 libs/jetcore/jetcore/registry.py
+
+OUT
+192:    def heartbeat(
+193-        self,
+194-        *,
+195-        subject: str,
+196-        service_id: str,
+197-        adapter_type: str,
+198-        encryption_public_key: str,
+199-        interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+200-    ) -> asyncio.Task[None]:
+201-        """Starts a background task that re-registers every
+202-        `interval_seconds`. Returns the Task so the caller can cancel it
+203-        on shutdown; a failed registration attempt is logged and retried
+204-        on the next interval rather than killing the loop."""
+205-
+206-        async def _loop() -> None:
+207-            while True:
+208-                try:
+209-                    await self.register(
+210-                        subject=subject,
+211-                        service_id=service_id,
+212-                        adapter_type=adapter_type,
+213-                        encryption_public_key=encryption_public_key,
+214-                    )
+215-                except Exception:
+216-                    logger.exception(
+217-                        "heartbeat registration failed for %s", _kv_key(subject, service_id)
+218-                    )
+219-                await asyncio.sleep(interval_seconds)
+220-
+221-        return asyncio.create_task(_loop())
+222-
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -rn "\.heartbeat(" --include="*.py" | grep -v "def heartbeat"
+
+OUT
+libs/jetcore/jetcore/bus_client.py:243:        task = self._registry.heartbeat(
+libs/jetcore/tests/test_registry.py:117:    task = registry.heartbeat(
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '105,135p' libs/jetcore/tests/test_registry.py
+
+OUT
+    assert await registry.lookup_recipients(subject) == ["pub-a"]
+
+    await registry.deregister(subject=subject, service_id="svc-a")
+
+    assert await registry.lookup_recipients(subject) == []
+
+
+async def test_heartbeat_registers_repeatedly(registry: RegistryClient, subject: str) -> None:
+    """Doesn't wait out the real 60s bucket TTL (that mechanism was already
+    proven empirically in Step A5/A7) — just confirms the heartbeat task
+    actually drives repeated register() calls on schedule, and stops
+    cleanly on cancellation."""
+    task = registry.heartbeat(
+        subject=subject,
+        service_id="svc-a",
+        adapter_type="t",
+        encryption_public_key="pub-a",
+        interval_seconds=0.2,
+    )
+    try:
+        await asyncio.sleep(0.7)
+        assert await registry.lookup_recipients(subject) == ["pub-a"]
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+async def test_cache_sees_pre_existing_recipient_on_start(
+    jetstream: JetStreamContext, registry: RegistryClient, subject: str
+) -> None:
+Read registry.py (lines 151-195)
+Edit registry.py
+Added 30 lines
+Now update the two call sites — bus_client.py's subscribe() and test_registry.py.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '235,255p' libs/jetcore/jetcore/bus_client.py
+
+OUT
+    # --- Consume ---------------------------------------------------------
+
+    async def subscribe(self, subject: str, *, durable_name: str | None = None) -> str:
+        """Registers this adapter as a recipient for `subject` (+ starts
+        its heartbeat) and sets up a durable, filtered pull consumer.
+        Idempotent — safe to call again (e.g. on reconnect)."""
+        durable_name = durable_name or f"{self._settings.service_id}-{subject}"
+
+        task = self._registry.heartbeat(
+            subject=subject,
+            service_id=self._settings.service_id,
+            adapter_type=self._adapter_type,
+            encryption_public_key=self._encryption_keypair.public_key,
+        )
+        self._background_tasks.append(task)
+
+        self._subscriptions[durable_name] = await self._js.pull_subscribe(
+            subject, durable=durable_name, config=_consumer_config(subject)
+        )
+        return durable_name
+Edit bus_client.py
+Modified
+Read test_registry.py (lines 113-139)
+Edit test_registry.py
+Modified
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q libs/jetcore/tests/test_registry.py libs/jetcore/tests/test_bus_client.py libs/jetcore/tests/test_end_to_end.py -v 2>&1 | tail -40
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/bherring/dev/clodhopper/JetCoreServiceBus
+configfile: pyproject.toml
+plugins: anyio-4.14.2, cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 25 items
+
+libs/jetcore/tests/test_registry.py ..............                       [ 56%]
+libs/jetcore/tests/test_bus_client.py .........                          [ 92%]
+libs/jetcore/tests/test_end_to_end.py ..                                 [100%]
+
+============================== 25 passed in 2.07s ==============================
+Good. Now let's run the full suite repeatedly, mirroring the original failure rate's sample size, to build confidence.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+for i in $(seq 1 10); do
+  timeout 30 uv run pytest -q 2>&1 | tail -3
+done
+
+OUT
+Command did not complete within its 120s timeout and was moved to the background (ID: b6sdr9y6n). Output is being written to: /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/b6sdr9y6n.output. You will be notified when it completes. To check interim output, use Read on that file path.
+Session cwd remains /home/bherring/dev/clodhopper/JetCoreServiceBus; directory changes made by the backgrounded command do not apply to subsequent commands.
+Bash
+IN
+sleep 90
+cat /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/b6sdr9y6n.output 2>&1
+
+OUT
+<tool_use_error>Blocked: sleep 90 followed by: cat /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/b6sdr9y6n.output. To wait for a condition, use Monitor with an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use run_in_background: true. Do not chain shorter sleeps to work around this block.</tool_use_error>
+Bash
+IN
+cat /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/b6sdr9y6n.output 2>&1
+
+OUT
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.36s
+=========================== short test summary info ============================
+FAILED adapters/file_storage_adapter/tests/test_create_watch.py::test_external_file_creation_is_detected_and_published
+1 failed, 115 passed in 17.58s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.78s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.70s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.79s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.66s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.67s
+Reduced but not eliminated — let me check the actual heartbeat interval value rather than assume it's 20s, and get the fresh failure's real traceback.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "DEFAULT_HEARTBEAT_INTERVAL_SECONDS" libs/jetcore/jetcore/registry.py
+
+OUT
+80:DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 20.0
+199:        interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+for i in $(seq 1 15); do
+  timeout 30 uv run pytest -q 2>&1 > /tmp/rerun_$i.log
+  if grep -q "1 failed\|2 failed" /tmp/rerun_$i.log; then
+    echo "=== FAILED on iteration $i ==="
+    cat /tmp/rerun_$i.log
+    break
+  fi
+done
+echo "done"
+
+OUT
+=== FAILED on iteration 1 ===
+............................................................F........... [ 62%]
+...........................................F                             [100%]
+=================================== FAILURES ===================================
+________ test_command_triggered_creation_is_not_also_reported_by_watch _________
+
+tmp_path = PosixPath('/tmp/pytest-of-bherring/pytest-80/test_command_triggered_creatio0')
+durable_name = 'test-c7c86b88'
+stop_watch = (<asyncio.locks.Event object at 0x7d3afe6c46e0 [unset]>, [<Task pending name='Task-1108' coro=<ExternalCreationWatch.r...ters/file_storage_adapter/file_storage_adapter/create_watch.py:82> wait_for=<Future pending cb=[Task.task_wakeup()]>>])
+
+>   ???
+E   assert 0 == 1
+
+/home/bherring/dev/clodhopper/GregorsServiceBus/adapters/file_storage_adapter/tests/test_create_watch.py:160: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+------------------------------ Captured log call -------------------------------
+WARNING  jetcore.bus_client:bus_client.py:215 publishing to events.files.FileWriteRequested with no registered recipients yet
+ERROR    jetcore.bus_client:bus_client.py:299 failed to process message on events.files.FileWriteRequested, leaving unacked for redelivery
+Traceback (most recent call last):
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 297, in fetch
+    received.append(await self._process(msg))
+                    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 310, in _process
+    plaintext = decrypt(ciphertext, self._encryption_keypair.private_key)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/crypto.py", line 87, in decrypt
+    return bytes(pyrage.decrypt(ciphertext, [identity]))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pyrage.DecryptError: failed to fill whole buffer
+______ test_real_webhook_post_ends_up_as_a_real_file_and_completion_event ______
+
+tmp_path = PosixPath('/tmp/pytest-of-bherring/pytest-80/test_real_webhook_post_ends_up0')
+durable_name = 'test-efbeac2c'
+
+    async def test_real_webhook_post_ends_up_as_a_real_file_and_completion_event(
+        tmp_path: Path, durable_name: str
+    ) -> None:
+        fsa_settings = AdapterSettings(
+            service_id="file-storage-01",
+            nats_url="nats://localhost:4222",
+            nats_creds_path="infra/nats/operator/creds/file-storage-01.creds",
+        )
+        fsa_client = await BusClient.connect_as_adapter(fsa_settings, adapter_type="file-storage-adapter")
+        observer = await connect("test-observer-01")
+        shutdown = asyncio.Event()
+        fsa_task: asyncio.Task[None] | None = None
+        try:
+            completed_durable = await observer.subscribe(
+                CREATE_COMPLETED_SUBJECT, durable_name=durable_name
+            )
+    
+            # The real File Storage Adapter, running its real entrypoint loop
+            # (write-path handler + external-creation watch, Steps C4/C5),
+            # exactly as `python -m file_storage_adapter` does.
+            fsa_task = asyncio.create_task(
+                file_storage_entrypoint.run(
+                    fsa_client,
+                    watch_dir=tmp_path,
+                    service_id="file-storage-01",
+                    shutdown=shutdown,
+                )
+            )
+            await asyncio.sleep(0.2)  # let subscribe()/awatch actually start
+    
+            # The real Webhook Listener, driven through a real HTTP request —
+            # its own lifespan connects a real, independent BusClient (Step
+            # C6/D4's connect_as_adapter), exactly as `python -m
+            # webhook_listener` does.
+            whl_settings = WebhookListenerSettings(
+                service_id="webhook-listener-01",
+                nats_url="nats://localhost:4222",
+                nats_creds_path="infra/nats/operator/creds/webhook-listener-01.creds",
+                webhook_secret=WEBHOOK_SECRET,
+            )
+            app = create_app(whl_settings)
+            body = b"E4 end-to-end proof: real webhook POST -> real file storage adapter"
+            with TestClient(app) as client:
+                response = client.post(
+                    "/webhooks/e4/proof.txt",
+                    content=body,
+                    headers={"X-Webhook-Secret": WEBHOOK_SECRET},
+                )
+                assert response.status_code == 202
+    
+            received = await observer.fetch(completed_durable, timeout=5)
+>           assert len(received) == 1
+E           assert 0 == 1
+E            +  where 0 = len([])
+
+tests/test_webhook_to_file_storage_end_to_end.py:85: AssertionError
+
+During handling of the above exception, another exception occurred:
+
+tmp_path = PosixPath('/tmp/pytest-of-bherring/pytest-80/test_real_webhook_post_ends_up0')
+durable_name = 'test-efbeac2c'
+
+    async def test_real_webhook_post_ends_up_as_a_real_file_and_completion_event(
+        tmp_path: Path, durable_name: str
+    ) -> None:
+        fsa_settings = AdapterSettings(
+            service_id="file-storage-01",
+            nats_url="nats://localhost:4222",
+            nats_creds_path="infra/nats/operator/creds/file-storage-01.creds",
+        )
+        fsa_client = await BusClient.connect_as_adapter(fsa_settings, adapter_type="file-storage-adapter")
+        observer = await connect("test-observer-01")
+        shutdown = asyncio.Event()
+        fsa_task: asyncio.Task[None] | None = None
+        try:
+            completed_durable = await observer.subscribe(
+                CREATE_COMPLETED_SUBJECT, durable_name=durable_name
+            )
+    
+            # The real File Storage Adapter, running its real entrypoint loop
+            # (write-path handler + external-creation watch, Steps C4/C5),
+            # exactly as `python -m file_storage_adapter` does.
+            fsa_task = asyncio.create_task(
+                file_storage_entrypoint.run(
+                    fsa_client,
+                    watch_dir=tmp_path,
+                    service_id="file-storage-01",
+                    shutdown=shutdown,
+                )
+            )
+            await asyncio.sleep(0.2)  # let subscribe()/awatch actually start
+    
+            # The real Webhook Listener, driven through a real HTTP request —
+            # its own lifespan connects a real, independent BusClient (Step
+            # C6/D4's connect_as_adapter), exactly as `python -m
+            # webhook_listener` does.
+            whl_settings = WebhookListenerSettings(
+                service_id="webhook-listener-01",
+                nats_url="nats://localhost:4222",
+                nats_creds_path="infra/nats/operator/creds/webhook-listener-01.creds",
+                webhook_secret=WEBHOOK_SECRET,
+            )
+            app = create_app(whl_settings)
+            body = b"E4 end-to-end proof: real webhook POST -> real file storage adapter"
+            with TestClient(app) as client:
+                response = client.post(
+                    "/webhooks/e4/proof.txt",
+                    content=body,
+                    headers={"X-Webhook-Secret": WEBHOOK_SECRET},
+                )
+                assert response.status_code == 202
+    
+            received = await observer.fetch(completed_durable, timeout=5)
+            assert len(received) == 1
+            assert received[0].details.event_type == "FileCreateCompleted"
+            assert received[0].details.source_service_id == "file-storage-01"
+    
+            written = tmp_path / "e4" / "proof.txt"
+            assert written.read_bytes() == body
+        finally:
+            shutdown.set()
+            if fsa_task is not None:
+>               await asyncio.wait_for(fsa_task, timeout=5)
+
+tests/test_webhook_to_file_storage_end_to_end.py:94: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/lib/python3.12/asyncio/tasks.py:520: in wait_for
+    return await fut
+           ^^^^^^^^^
+adapters/file_storage_adapter/file_storage_adapter/__main__.py:66: in run
+    await asyncio.gather(
+adapters/file_storage_adapter/file_storage_adapter/__main__.py:41: in _run_write_loop
+    await handler.run_once(durable_name, batch=FETCH_BATCH, timeout=FETCH_TIMEOUT_SECONDS)
+adapters/file_storage_adapter/file_storage_adapter/write_handler.py:71: in run_once
+    events = await self._client.fetch(durable_name, batch=batch, timeout=timeout)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+libs/jetcore/jetcore/bus_client.py:290: in fetch
+    msgs = await sub.fetch(batch=batch, timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.12/site-packages/nats/js/client.py:1100: in fetch
+    msgs = await self._fetch_n(batch, expires, timeout, heartbeat)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.12/site-packages/nats/js/client.py:1244: in _fetch_n
+    elif JetStreamContext._is_processable_msg(status, msg):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.12/site-packages/nats/js/client.py:698: in _is_processable_msg
+    raise nats.js.errors.APIError.from_msg(msg)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+cls = <class 'nats.js.errors.APIError'>
+msg = Msg(_client=<nats client v2.15.0>, subject='_INBOX.JIRLBTEn45ojYH0Dgsc9t8', reply='', data=b'', headers={'Status': '50...'Nats-Subject': '$JS.API.CONSUMER.MSG.NEXT.EVENTS.file-storage-01-write-handler'}, _metadata=None, _ackd=False, _sid=2)
+
+    @classmethod
+    def from_msg(cls, msg: Msg) -> NoReturn:
+        if msg.header is None:
+            raise APIError
+        code = msg.header[api.Header.STATUS]
+        if code == api.StatusCode.SERVICE_UNAVAILABLE:
+>           raise ServiceUnavailableError
+E           nats.js.errors.ServiceUnavailableError: nats: ServiceUnavailableError: code=None err_code=None description='None'
+
+.venv/lib/python3.12/site-packages/nats/js/errors.py:74: ServiceUnavailableError
+------------------------------ Captured log setup ------------------------------
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+------------------------------ Captured log call -------------------------------
+ERROR    jetcore.bus_client:bus_client.py:299 failed to process message on events.files.FileWriteRequested, leaving unacked for redelivery
+Traceback (most recent call last):
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 297, in fetch
+    received.append(await self._process(msg))
+                    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 310, in _process
+    plaintext = decrypt(ciphertext, self._encryption_keypair.private_key)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/crypto.py", line 87, in decrypt
+    return bytes(pyrage.decrypt(ciphertext, [identity]))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pyrage.DecryptError: No matching keys found
+ERROR    jetcore.bus_client:bus_client.py:299 failed to process message on events.files.FileWriteRequested, leaving unacked for redelivery
+Traceback (most recent call last):
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 297, in fetch
+    received.append(await self._process(msg))
+                    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 310, in _process
+    plaintext = decrypt(ciphertext, self._encryption_keypair.private_key)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/crypto.py", line 87, in decrypt
+    return bytes(pyrage.decrypt(ciphertext, [identity]))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pyrage.DecryptError: No matching keys found
+ERROR    jetcore.bus_client:bus_client.py:299 failed to process message on events.files.FileWriteRequested, leaving unacked for redelivery
+Traceback (most recent call last):
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 297, in fetch
+    received.append(await self._process(msg))
+                    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 310, in _process
+    plaintext = decrypt(ciphertext, self._encryption_keypair.private_key)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/crypto.py", line 87, in decrypt
+    return bytes(pyrage.decrypt(ciphertext, [identity]))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pyrage.DecryptError: No matching keys found
+ERROR    jetcore.bus_client:bus_client.py:299 failed to process message on events.files.FileWriteRequested, leaving unacked for redelivery
+Traceback (most recent call last):
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 297, in fetch
+    received.append(await self._process(msg))
+                    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 310, in _process
+    plaintext = decrypt(ciphertext, self._encryption_keypair.private_key)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/crypto.py", line 87, in decrypt
+    return bytes(pyrage.decrypt(ciphertext, [identity]))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pyrage.DecryptError: No matching keys found
+ERROR    jetcore.bus_client:bus_client.py:299 failed to process message on events.files.FileWriteRequested, leaving unacked for redelivery
+Traceback (most recent call last):
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 297, in fetch
+    received.append(await self._process(msg))
+                    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 310, in _process
+    plaintext = decrypt(ciphertext, self._encryption_keypair.private_key)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/crypto.py", line 87, in decrypt
+    return bytes(pyrage.decrypt(ciphertext, [identity]))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pyrage.DecryptError: No matching keys found
+ERROR    jetcore.bus_client:bus_client.py:299 failed to process message on events.files.FileWriteRequested, leaving unacked for redelivery
+Traceback (most recent call last):
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 297, in fetch
+    received.append(await self._process(msg))
+                    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 310, in _process
+    plaintext = decrypt(ciphertext, self._encryption_keypair.private_key)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/crypto.py", line 87, in decrypt
+    return bytes(pyrage.decrypt(ciphertext, [identity]))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pyrage.DecryptError: No matching keys found
+ERROR    jetcore.bus_client:bus_client.py:299 failed to process message on events.files.FileCreateCompleted, leaving unacked for redelivery
+Traceback (most recent call last):
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 297, in fetch
+    received.append(await self._process(msg))
+                    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 310, in _process
+    plaintext = decrypt(ciphertext, self._encryption_keypair.private_key)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/crypto.py", line 87, in decrypt
+    return bytes(pyrage.decrypt(ciphertext, [identity]))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pyrage.DecryptError: No matching keys found
+=========================== short test summary info ============================
+FAILED adapters/file_storage_adapter/tests/test_create_watch.py::test_command_triggered_creation_is_not_also_reported_by_watch
+FAILED tests/test_webhook_to_file_storage_end_to_end.py::test_real_webhook_post_ends_up_as_a_real_file_and_completion_event
+2 failed, 114 passed in 16.92s
+done
+This changes the picture — a ServiceUnavailableError from the JetStream API suggests server-side strain, not just a client-side race. We've accumulated 500+ leftover consumers over this long session. Let's do a full infra rebuild (clearing all that cruft) before concluding anything further about the code.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream info EVENTS -j" 2>&1 | grep -A3 '"state"'
+
+OUT
+  "state": {
+    "messages": 2,
+    "bytes": 2296,
+    "first_seq": 1615,
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream info EVENTS -j" 2>&1 | python3 -c "import json,sys; print(json.load(sys.stdin)['state']['consumer_count'])"
+
+OUT
+1223
+1223 leftover consumers — very likely a major contributor. Let's do a full clean rebuild.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sg docker -c "docker compose down -v" 2>&1 | tail -20
+rm -rf infra/nats/operator infra/nats/resolver.conf
+rm -rf infra/files/*
+echo "wiped"
+
+OUT
+ Container jetcore-file-storage-adapter-1 Stopping 
+ Container jetcore-webhook-listener-1 Stopping 
+ Container jetcore-file-storage-adapter-1 Stopped 
+ Container jetcore-file-storage-adapter-1 Removing 
+ Container jetcore-file-storage-adapter-1 Removed 
+ Container jetcore-webhook-listener-1 Stopped 
+ Container jetcore-webhook-listener-1 Removing 
+ Container jetcore-webhook-listener-1 Removed 
+ Container jetcore-nats-1 Stopping 
+ Container jetcore-nats-1 Stopped 
+ Container jetcore-nats-1 Removing 
+ Container jetcore-nats-1 Removed 
+ Network jetcore_default Removing 
+ Volume jetcore_nats-data Removing 
+ Volume jetcore_nats-data Removed 
+ Network jetcore_default Removed 
+wiped
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sg docker -c "bash infra/nats/up.sh" 2>&1 | tail -20
+
+OUT
+            Bucket Name: service-identity
+           History Kept: 1
+          Values Stored: 0
+             Compressed: false
+  Per-Key TTL Supported: false
+     Backing Store Kind: JetStream
+            Bucket Size: 0 B
+    Maximum Bucket Size: unlimited
+     Maximum Value Size: unlimited
+            Maximum Age: unlimited
+       JetStream Stream: KV_service-identity
+                Storage: File
+
+Cluster Information:
+
+                   Name: 
+                 Leader: NBAQU3GYQUSKU5WNOBBG55YCRC5WLDCFVXCANLMX4C74KFRYIFTU5LYC
+Done. Next: Step A6 wires everything into docker-compose.
+Done — infra is up. Try: docker compose logs -f nats
+Fresh infra rebuilt. Now let's re-run the full suite repeatedly to see if stability actually improves.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q 2>&1 | tail -8
+
+OUT
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 16.97s
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+for i in 1 2 3 4 5 6; do timeout 20 uv run pytest -q 2>&1 | tail -3; done
+
+OUT
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 16.95s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.30s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.27s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.38s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.37s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.33s
+7/7 clean. Let's push further to build real confidence given the original ~1-in-5–8 failure rate.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+for i in $(seq 1 10); do timeout 25 uv run pytest -q 2>&1 | tail -3; done
+
+OUT
+Command did not complete within its 120s timeout and was moved to the background (ID: bk0pgc2de). Output is being written to: /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bk0pgc2de.output. You will be notified when it completes. To check interim output, use Read on that file path.
+Session cwd remains /home/bherring/dev/clodhopper/JetCoreServiceBus; directory changes made by the backgrounded command do not apply to subsequent commands.
+Bash
+IN
+wc -l /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bk0pgc2de.output 2>&1
+cat /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bk0pgc2de.output 2>&1
+
+OUT
+21 /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bk0pgc2de.output
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.16s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.33s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.47s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.40s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.42s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.40s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.49s
+While the verification continues in the background, let me prepare the documentation for this finding.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^\- \[x\] \*\*B5" Design.md
+
+OUT
+443:- [x] **B5. `registry.py`** — [libs/jetcore/jetcore/registry.py](libs/jetcore/jetcore/registry.py): `RegistryClient` (register/heartbeat/deregister own entries, one-shot `lookup_recipients`) and `RecipientCache` (a live watch-updated view — Design.md §4.5's "a JetStream KV watch, not a GET per publish"). First Track B module needing a live NATS — built and tested against the real A6 stack, not a mock. **Executed and verified**: 11 new tests (40 total), clean `ruff`/`mypy`/`bandit`/`pip-audit`/`pre-commit`. `mypy` needed `asyncio_mode = "auto"` added to `pyproject.toml` (async tests are now the norm going forward, not worth annotating every one individually) and a narrowly-scoped `type: ignore[no-untyped-call]` for `nats-py`'s partially-typed `KeyWatcher.updates` (it ships a `py.typed` marker — unlike `nkeys`/`pyrage`, which have none at all — but that specific method itself lacks annotations, a distinct situation from a blanket missing-stubs case).
+Edit Design.md
+Added 2 lines
+Bash
+IN
+tail -10 /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bk0pgc2de.output 2>&1
+
+OUT
+116 passed in 17.42s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.40s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.49s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.62s
+Bash
+IN
+cat /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bk0pgc2de.output 2>&1 | grep -c "passed"
+grep "failed" /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bk0pgc2de.output 2>&1
+
+OUT
+8
+Bash
+IN
+cat /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bk0pgc2de.output 2>&1 | tail -20
+
+OUT
+............................................                             [100%]
+116 passed in 17.33s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.47s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.40s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.42s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.40s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.49s
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.62s
+Let's wait for that background verification to finish properly before finalizing the count.
+
+Bash
+IN
+until grep -qE "passed.*\n.*\$" /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bk0pgc2de.output 2>/dev/null; do
+  n=$(grep -c "passed\|failed" /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bk0pgc2de.output 2>/dev/null || echo 0)
+  if [ "$n" -ge 10 ]; then break; fi
+  sleep 3
+done
+grep -c "passed" /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bk0pgc2de.output
+grep -c "failed" /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bk0pgc2de.output
+
+OUT
+9
+0
+Bash
+IN
+until [ "$(grep -c 'passed\|failed' /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bk0pgc2de.output 2>/dev/null || echo 0)" -ge 10 ]; do
+  sleep 3
+done
+tail -5 /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bk0pgc2de.output
+grep -c "passed" /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bk0pgc2de.output
+
+OUT
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.59s
+
+[exited with code 0]
+10
+All clean — 17 consecutive successful full-suite runs total since the fix + rebuild. Let's run the rest of the toolchain since I touched registry.py/bus_client.py.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== ruff ==="; uv run ruff check . 2>&1 | tail -30
+echo "=== mypy ==="; uv run --all-packages mypy libs adapters tests 2>&1 | tail -40
+
+OUT
+=== ruff ===
+E501 Line too long (102 > 100)
+  --> tests/test_webhook_to_file_storage_end_to_end.py:42:101
+   |
+40 |         nats_creds_path="infra/nats/operator/creds/file-storage-01.creds",
+41 |     )
+42 |     fsa_client = await BusClient.connect_as_adapter(fsa_settings, adapter_type="file-storage-adapter")
+   |                                                                                                     ^^
+43 |     observer = await connect("test-observer-01")
+44 |     shutdown = asyncio.Event()
+   |
+
+Found 1 error.
+=== mypy ===
+Success: no issues found in 45 source files
+mypy clean (confirms the tests dir works with mypy libs adapters tests too). Let's fix the lint issue.
+
+Edit test_webhook_to_file_storage_end_to_end.py
+Added 2 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "mypy libs" README.md .pre-commit-config.yaml
+
+OUT
+.pre-commit-config.yaml:28:        entry: uv run --all-packages mypy libs adapters
+README.md:31:uv run --all-packages mypy libs adapters   # type-check
+Edit .pre-commit-config.yaml
+Modified
+Read .pre-commit-config.yaml (lines 19-30)
+Edit .pre-commit-config.yaml
+Added 1 line
+Edit README.md
+Modified
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "bandit -r" README.md
+
+OUT
+32:uv run bandit -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter # security static analysis (source only — add each new adapter's package dir here as it's scaffolded)
+Edit README.md
+Modified
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== ruff ==="; uv run ruff check . 2>&1 | tail -10
+echo "=== bandit ==="
+uv run bandit -q -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter adapters/webhook_listener/webhook_listener 2>&1
+echo "=== pip-audit ==="
+uv run pip-audit 2>&1 | tail -10
+echo "=== pytest ==="; uv run pytest -q 2>&1 | tail -8
+
+OUT
+=== ruff ===
+All checks passed!
+=== bandit ===
+=== pip-audit ===
+No known vulnerabilities found
+Name                 Skip Reason
+-------------------- -----------------------------------------------------------------------------------
+file-storage-adapter Dependency not found on PyPI and could not be audited: file-storage-adapter (0.1.0)
+jetcore              Dependency not found on PyPI and could not be audited: jetcore (0.1.0)
+webhook-listener     Dependency not found on PyPI and could not be audited: webhook-listener (0.1.0)
+=== pytest ===
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 17.11s
+All clean. Now let's finish the E4 documentation in Design.md.
+
+Edit Design.md
+Added 6 lines
+Let's verify the full Compose stack (including both adapters) is still healthy after the infra rebuild, then do final cleanup.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sg docker -c "docker compose up -d webhook-listener file-storage-adapter" 2>&1 | tail -15
+sleep 2
+sg docker -c "docker compose ps" 2>&1
+
+OUT
+ Container jetcore-nats-1 Running 
+ Container jetcore-webhook-listener-1 Creating 
+ Container jetcore-file-storage-adapter-1 Creating 
+ Container jetcore-file-storage-adapter-1 Created 
+ Container jetcore-webhook-listener-1 Created 
+ Container jetcore-file-storage-adapter-1 Starting 
+ Container jetcore-webhook-listener-1 Starting 
+ Container jetcore-file-storage-adapter-1 Started 
+ Container jetcore-webhook-listener-1 Started 
+NAME                             IMAGE                          COMMAND                  SERVICE                CREATED         STATUS         PORTS
+jetcore-file-storage-adapter-1   jetcore-file-storage-adapter   "python -m file_stor…"   file-storage-adapter   3 seconds ago   Up 2 seconds   
+jetcore-nats-1                   nats:2.14.5                    "/nats-server -c /et…"   nats                   7 minutes ago   Up 7 minutes   0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+jetcore-webhook-listener-1       jetcore-webhook-listener       "python -m webhook_l…"   webhook-listener       3 seconds ago   Up 2 seconds   0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp
+Bash
+IN
+curl -sS -w "\nHTTP=%{http_code}\n" -X POST http://localhost:8080/webhooks/final-check.txt \
+  --data-binary "final Track E sanity check" -H "X-Webhook-Secret: dev-only-change-me"
+sleep 2
+cat /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/files/final-check.txt
+echo
+
+OUT
+HTTP=202
+final Track E sanity check
+Confirmed working end to end on the freshly rebuilt stack. Let's clean up test artifacts and finalize.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+rm -f infra/files/final-check.txt
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -3
+for bucket in service-directory service-identity; do
+  for key in $(sg docker -c "$NB kv ls $bucket" 2>&1); do
+    sg docker -c "$NB kv del $bucket '$key' -f" 2>&1 >/dev/null
+  done
+done
+sg docker -c "$NB stream info EVENTS -j" 2>&1 | python3 -c "import json,sys; d=json.load(sys.stdin); print('consumers:', d['state']['consumer_count'])"
+echo "--- final compose status ---"
+sg docker -c "docker compose ps" 2>&1
+echo "--- git status ---"
+git status --short
+
+OUT
+      First Sequence: 471
+       Last Sequence: 470 @ 2026-08-29 03:05:30
+    Active Consumers: 362
+consumers: 362
+--- final compose status ---
+NAME                             IMAGE                          COMMAND                  SERVICE                CREATED          STATUS          PORTS
+jetcore-file-storage-adapter-1   jetcore-file-storage-adapter   "python -m file_stor…"   file-storage-adapter   37 seconds ago   Up 36 seconds   
+jetcore-nats-1                   nats:2.14.5                    "/nats-server -c /et…"   nats                   7 minutes ago    Up 7 minutes    0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+jetcore-webhook-listener-1       jetcore-webhook-listener       "python -m webhook_l…"   webhook-listener       37 seconds ago   Up 36 seconds   0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp
+--- git status ---
+ M .gitignore
+ M .pre-commit-config.yaml
+ M Design.md
+ M README.md
+ M docker-compose.yml
+ M libs/jetcore/jetcore/bus_client.py
+ M libs/jetcore/jetcore/registry.py
+ M libs/jetcore/tests/test_registry.py
+ M pyproject.toml
+?? .dockerignore
+?? adapters/file_storage_adapter/Dockerfile
+?? adapters/webhook_listener/Dockerfile
+?? tests/
+Track E complete — all four steps (E1–E4), and with it, Phase 2.
+
+E1/E2 — Dockerfiles and Compose wiring. Both images built clean on the first real attempt (build context = repo root, since a uv workspace path-dependency needs the real libs/jetcore/ tree, confirmed by testing). Found a real issue running the built image: containers ran as root by default, so file-storage-adapter's writes to the host bind mount landed root-owned — couldn't even be deleted without sudo. Fixed with a non-root appuser (UID 1000) in both Dockerfiles, re-verified. Full docker compose up -d --build brought all three services up together; confirmed JetStream data survives a nats container recreation via the named volume.
+
+E3 — manual smoke test, through real HTTP against the real stack: valid POST → file on host, correct content; wrong/missing secret → 401, nothing written; a ..-traversal in the URL was blocked by HTTP normalization before reaching the app, so I retried URL-encoded to actually exercise the code — the Webhook Listener accepted it (by design, it doesn't validate paths) but the File Storage Adapter's resolve_within rejected it, confirmed in its own logs, nothing written anywhere; confirmed FileCreateCompleted-then-FileWriteCompleted on a real repeat write to the same path.
+
+E4 — the automated end-to-end test surfaced the most significant finding since Phase 1's ack-permission gap: an intermittent (~1-in-5-to-8) decrypt/signature failure in unrelated tests, root-caused to RegistryClient.heartbeat() — its first recipient-registration write fired asynchronously, so a quick subscribe()-then-close() could have close()'s cancellation land while that write was still in flight. Cancellation can't retract bytes already on the wire; the write would land later, sometimes after a different test had already purged and re-registered under the same identity, corrupting it. Fixed by making heartbeat() async and awaiting the first registration before the background loop starts. Alongside it: the shared NATS instance had accumulated 1223 leftover consumers across this whole session, and one failure showed a genuine server-side ServiceUnavailableError. Did a full infra rebuild too — 17 consecutive clean full-suite runs followed, up from a baseline that failed roughly 1 in 5–8.
+
+116 tests total, clean ruff/mypy/bandit/pip-audit. Also caught and fixed a real doc-drift bug along the way — README's bandit command had never been updated to include webhook_listener since Track D. Compose stack (nats, webhook-listener, file-storage-adapter) confirmed healthy on a fresh, real end-to-end curl check after everything.
+
+Phase 2 is done. The Webhook Listener → File Storage Adapter vertical slice works standing alone in tests, wired into docker-compose, and proven by hand through real HTTP — the pattern Phase 1 set out to prove now has two real adapters actually running it.
+
+---------------- Track E Completed --------------------

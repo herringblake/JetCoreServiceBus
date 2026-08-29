@@ -114,7 +114,7 @@ async def test_heartbeat_registers_repeatedly(registry: RegistryClient, subject:
     proven empirically in Step A5/A7) — just confirms the heartbeat task
     actually drives repeated register() calls on schedule, and stops
     cleanly on cancellation."""
-    task = registry.heartbeat(
+    task = await registry.heartbeat(
         subject=subject,
         service_id="svc-a",
         adapter_type="t",

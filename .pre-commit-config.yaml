@@ -20,12 +20,13 @@ repos:
         types: [python]
       - id: mypy
         name: mypy
-        # adapters/ now exists (Design.md §12 Step C1) — added back here.
-        # Still explicit paths, not a bare `mypy`: it hard-errors on a
-        # missing path argument rather than skipping it (confirmed by
-        # testing, unlike pytest's tolerant `testpaths`), so this needs
-        # updating again if either directory is ever removed.
-        entry: uv run --all-packages mypy libs adapters
+        # adapters/ (Step C1) and tests/ (Step E4, cross-adapter tests)
+        # added here as each came into existence. Still explicit paths,
+        # not a bare `mypy`: it hard-errors on a missing path argument
+        # rather than skipping it (confirmed by testing, unlike pytest's
+        # tolerant `testpaths`), so this needs updating again if any of
+        # these are ever removed.
+        entry: uv run --all-packages mypy libs adapters tests
         language: system
         types: [python]
         pass_filenames: false

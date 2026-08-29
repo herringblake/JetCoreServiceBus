@@ -240,7 +240,7 @@ class BusClient:
         Idempotent — safe to call again (e.g. on reconnect)."""
         durable_name = durable_name or f"{self._settings.service_id}-{subject}"
 
-        task = self._registry.heartbeat(
+        task = await self._registry.heartbeat(
             subject=subject,
             service_id=self._settings.service_id,
             adapter_type=self._adapter_type,

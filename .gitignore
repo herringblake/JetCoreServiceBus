@@ -17,6 +17,11 @@ __pycache__/
 .coverage
 htmlcov/
 
+# --- Adapter runtime data (Design.md §12 Step E1) ---
+# File Storage Adapter's watch_dir bind mount — real file content written
+# by/through the running stack, not part of the repo.
+infra/files/
+
 # --- General ---
 .env
 .DS_Store

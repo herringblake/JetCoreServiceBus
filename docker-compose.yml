@@ -1,7 +1,7 @@
 # Jet Core Service Bus — docker-compose
-# Phase 1, Step A6 (Design.md §11 Track A) — infra-only for now.
-#
-# Just the `nats` service. Adapters get added here in Phase 3 (Design.md §10).
+# Phase 1, Step A6 (Design.md §11 Track A); adapters added in Phase 2,
+# Design.md §12 Step E1 — the Webhook Listener -> File Storage Adapter
+# vertical slice.
 #
 # IMPORTANT — run order, not automated by this file:
 #   1. infra/nats/bootstrap_auth.sh   (Step A3 — generates resolver.conf and
@@ -11,7 +11,8 @@
 #   3. infra/nats/bootstrap_jetstream.sh   (Step A5 — needs a running,
 #      authenticated server to create the EVENTS stream + service-directory
 #      KV bucket against)
-# infra/nats/up.sh runs all three in order. See infra/nats/README.md for why
+#   4. docker compose up -d webhook-listener file-storage-adapter
+# infra/nats/up.sh runs 1-3 in order. See infra/nats/README.md for why
 # this isn't wired into Compose's own dependency graph (`depends_on` +
 # service_completed_successfully/service_healthy): both bootstrap scripts
 # already shell out to `docker run` themselves (Design.md §11's "no native
@@ -20,6 +21,16 @@
 # host's docker.sock into a container just to spawn sibling containers),
 # which is real added fragility for scripts that already work well as
 # host-level tooling. Revisit if that tradeoff stops being worth it.
+#
+# Both adapters' `depends_on: nats` controls start ORDER only, not
+# readiness (the same A6 finding: nats:2.14.5 has no shell, so no
+# Compose-native healthcheck exists to depend on with `condition:
+# service_healthy`) — `restart: unless-stopped` is what actually covers
+# "NATS wasn't ready yet when this adapter's own nats.connect() ran",
+# the same policy nats itself uses. Neither adapter has its own
+# connection-retry logic (Design.md §12, a deliberate v1 scoping choice,
+# not an oversight) — Compose restarting a crashed container until it
+# succeeds is the chosen mechanism instead.
 
 name: jetcore   # fixes the Compose project/network name (jetcore_default) regardless
             # of the checkout directory's name — infra/nats/up.sh depends on it
@@ -35,6 +46,44 @@ services:
       - ./infra/nats/nats-server.conf:/etc/nats/nats-server.conf:ro
       - ./infra/nats/resolver.conf:/etc/nats/resolver.conf:ro
       - nats-data:/data/jetstream
+    restart: unless-stopped
+
+  webhook-listener:
+    build:
+      context: .
+      dockerfile: adapters/webhook_listener/Dockerfile
+    depends_on:
+      - nats
+    ports:
+      - "8080:8080"
+    environment:
+      JETCORE_SERVICE_ID: webhook-listener-01
+      JETCORE_NATS_URL: nats://nats:4222
+      JETCORE_NATS_CREDS_PATH: /creds/webhook-listener-01.creds
+      # Dev-only placeholder (Decision #21 — a generic shared-secret
+      # mechanism, no real webhook source integrated yet). Real
+      # deployments must override this; it is deliberately not "secret"
+      # as checked into this file.
+      JETCORE_WEBHOOK_SECRET: dev-only-change-me
+      JETCORE_HTTP_PORT: "8080"
+    volumes:
+      - ./infra/nats/operator/creds/webhook-listener-01.creds:/creds/webhook-listener-01.creds:ro
+    restart: unless-stopped
+
+  file-storage-adapter:
+    build:
+      context: .
+      dockerfile: adapters/file_storage_adapter/Dockerfile
+    depends_on:
+      - nats
+    environment:
+      JETCORE_SERVICE_ID: file-storage-01
+      JETCORE_NATS_URL: nats://nats:4222
+      JETCORE_NATS_CREDS_PATH: /creds/file-storage-01.creds
+      JETCORE_WATCH_DIR: /data
+    volumes:
+      - ./infra/nats/operator/creds/file-storage-01.creds:/creds/file-storage-01.creds:ro
+      - ./infra/files:/data
     restart: unless-stopped
 
 volumes:

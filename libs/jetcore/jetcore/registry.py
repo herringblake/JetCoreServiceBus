@@ -189,7 +189,7 @@ class RegistryClient:
             logger.warning("skipping malformed service-identity entry %s", service_id)
             return None
 
-    def heartbeat(
+    async def heartbeat(
         self,
         *,
         subject: str,
@@ -198,13 +198,44 @@ class RegistryClient:
         encryption_public_key: str,
         interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     ) -> asyncio.Task[None]:
-        """Starts a background task that re-registers every
-        `interval_seconds`. Returns the Task so the caller can cancel it
-        on shutdown; a failed registration attempt is logged and retried
-        on the next interval rather than killing the loop."""
+        """Registers once, synchronously (awaited — see below for why),
+        then starts a background task that re-registers every
+        `interval_seconds` after that. Returns the Task so the caller can
+        cancel it on shutdown; a failed periodic registration attempt is
+        logged and retried on the next interval rather than killing the
+        loop (the initial one, awaited directly here, is NOT swallowed —
+        a caller relying on "subscribe() returned, so I'm registered"
+        should find out immediately if that first write failed).
+
+        The first registration is deliberately awaited here rather than
+        left to fire inside the background loop's first iteration —
+        confirmed by testing (an intermittent, hard-to-reproduce cross-
+        test failure during Design.md §12 Step E4) that a plain
+        `task.cancel()` arriving while that very first `register()` call
+        was still in flight doesn't — can't — retract the write bytes
+        already sent to the server: cancellation only stops the client
+        from waiting on the response, not the server from applying it.
+        The write would then land at some indeterminate later moment,
+        occasionally *after* a completely different, later caller had
+        already purged and re-registered under the same serviceId,
+        silently overwriting it with stale data. Awaiting the first call
+        here closes that window for the case that actually matters (a
+        caller that `subscribe()`s and shortly after `close()`s, exactly
+        every test in this project's suite) — the periodic re-heartbeat
+        loop below still uses plain cancellation, which is fine: a
+        production adapter's shutdown isn't immediately followed by a
+        *different* connection reusing its exact serviceId within
+        milliseconds, the specific scenario that makes the race land."""
+        await self.register(
+            subject=subject,
+            service_id=service_id,
+            adapter_type=adapter_type,
+            encryption_public_key=encryption_public_key,
+        )
 
         async def _loop() -> None:
             while True:
+                await asyncio.sleep(interval_seconds)
                 try:
                     await self.register(
                         subject=subject,
@@ -216,7 +247,6 @@ class RegistryClient:
                     logger.exception(
                         "heartbeat registration failed for %s", _kv_key(subject, service_id)
                     )
-                await asyncio.sleep(interval_seconds)
 
         return asyncio.create_task(_loop())
 
