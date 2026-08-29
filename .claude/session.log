@@ -19604,3 +19604,251 @@ E4 — the automated end-to-end test surfaced the most significant finding since
 Phase 2 is done. The Webhook Listener → File Storage Adapter vertical slice works standing alone in tests, wired into docker-compose, and proven by hand through real HTTP — the pattern Phase 1 set out to prove now has two real adapters actually running it.
 
 ---------------- Track E Completed --------------------
+
+================ Phase 2 Complete ======================
+
+
+================ Phase 3 Start ================
+
+Scope out Phase 3 and document break down of implementation steps.
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^## \|^### " Design.md
+
+OUT
+11:## 1. Goals & Non-Goals
+28:## 2. Key Decisions (resolved during design discussion)
+57:## 3. High-Level Architecture
+104:## 4. Security Model
+106:### 4.1 Two separate keypairs per service
+119:### 4.2 Connection authentication (nkeys + decentralized JWT)
+131:### 4.3 Payload confidentiality (hybrid / envelope encryption)
+159:### 4.4 Subject-level authorization (NATS permissions)
+170:### 4.5 Registry / recipient directory (JetStream KV)
+196:### 4.6 Identity / sender-authentication directory (JetStream KV) — Decision #20
+210:## 5. Event Envelope
+244:## 6. NATS JetStream Layout
+253:## 7. Python Project
+255:### 7.1 Repository layout
+306:### 7.2 Libraries (proposed)
+328:### 7.3 Required services (for `docker-compose`, described — not written yet)
+335:### 7.4 Development tooling
+350:### 7.5 Development environment setup
+357:### 7.6 Environment properties (docker-compose)
+371:## 8. Initial Adapters
+386:## 9. Open Questions Summary
+399:## 10. Proposed Implementation Plan (high-level, no code yet)
+410:## 11. Phase 1 — Detailed Breakdown
+423:### Track A — NATS / JetStream Infrastructure
+435:### Track B — `jetcore` Library
+470:### Suggested sequencing
+476:## 12. Phase 2 — Detailed Breakdown
+495:### Track C — File Storage Adapter
+532:### Track D — Webhook Listener
+552:### Track E — Integration
+573:### Suggested sequencing
+Read Design.md (lines 307-398)
+Read Design.md (lines 399-410)
+Read Design.md (lines 553-582)
+Now let's check the existing placeholder manifest entries for the remaining four adapter types.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '90,139p' infra/nats/adapter_identities.yaml
+
+OUT
+  # --- Remaining adapter types (Phase 3, Design.md §10) — one placeholder
+  #     instance each, so the manifest schema and bootstrap script get
+  #     exercised against all 6 types now, not just the Phase 2 pair. ---
+
+  - serviceId: http-adapter-01
+    adapterType: http-adapter
+    description: >
+      Calls a configured external REST API when triggered by a bus event;
+      publishes the response back as a correlated event (§8).
+    permissions:
+      publish:
+        - events.http.RequestCompleted
+      subscribe:
+        - events.orders.OrderCreated   # placeholder trigger subject
+
+  - serviceId: rest-api-service-01
+    adapterType: rest-api-service
+    description: >
+      "Front door" for external HTTP clients — translates inbound REST calls
+      into bus events (§8).
+    permissions:
+      publish:
+        - events.orders.OrderCreated   # placeholder published subject
+      subscribe: []
+
+  - serviceId: webhook-sender-01
+    adapterType: webhook-sender
+    description: >
+      Subscribes to configured subjects and POSTs to an external webhook URL,
+      best-effort, no retry (Decision #12). No result event published.
+    permissions:
+      publish: []
+      subscribe:
+        - events.orders.OrderCreated   # placeholder subject to relay outward
+
+  - serviceId: db-adapter-mysql-01
+    adapterType: database-adapter-mysql
+    description: >
+      Bidirectional (Decision #10). Write path persists bus events to MySQL;
+      CDC read path tails the binlog and publishes row changes. These two
+      paths deliberately use DIFFERENT subjects (see note below) so the
+      adapter never consumes its own CDC output as a write-path trigger.
+    permissions:
+      publish:
+        - events.db.orders.RowChanged   # CDC read path output — distinct
+                                         # namespace from the write-path
+                                         # input subject below, on purpose.
+      subscribe:
+        - events.orders.OrderCreated    # write path input
+Now let's design Phase 3's scope. First, a few real gaps need concrete decisions before I can write a coherent breakdown — most notably how the REST API Service's synchronous reply actually works, since nothing in the current design closes that loop.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '28,52p' Design.md
+
+OUT
+## 2. Key Decisions (resolved during design discussion)
+
+| # | Question | Decision |
+|---|----------|----------|
+| 1 | How does the bus authenticate a service's identity? | **NATS nkeys** (built-in Ed25519 challenge/response — functionally identical to SSH pubkey auth). No custom auth service for v1. |
+| 2 | Where does the "who is allowed to decrypt subject X" directory live? | **JetStream KV bucket** (`service-directory`) — reuses NATS infrastructure, no new datastore. |
+| 3 | Is adapter-level "PII encryption" a separate mechanism from payload encryption? | **No — same mechanism.** Whole-payload public-key encryption covers PII; no separate field-level scheme in v1. |
+| 4 | Should NATS subscribe permissions be wide open ("any connected adapter sees everything") or restricted per adapter? | **Restricted per adapter.** Each adapter gets an explicit subject allow-list. Encryption remains the confidentiality boundary regardless of what an adapter is permitted to subscribe to; permissions add defense-in-depth and reduce blast radius / noise. This is a deliberate refinement of the original notes' "open bus" framing — see §4.4. |
+| 5 | Should events be signed for authenticity independent of transport? | **Yes** — the sender signs a digest of the plaintext with its nkey (Ed25519); the signature travels in the envelope (§4.1, §5). |
+| 6 | Static NATS config or decentralized JWT for adapter onboarding? | **Decentralized JWT (`nsc`)** — adapters are provisioned/deprovisioned by issuing/revoking a User JWT, no server config edit or reload needed (§4.2, §4.4). |
+| 7 | Registry entry lifecycle? | **TTL/heartbeat** — adapters refresh their own KV entry on a heartbeat; a dead adapter's key ages out automatically (§4.5). |
+| 8 | Target Python version? | **3.12** — using the `uuid6` package for UUIDv7 (stdlib support arrives in 3.14) (§7.2). |
+| 9 | `EVENTS` stream retention? | **7 days** age limit, plus a size cap as backstop (§6). |
+| 10 | Database Adapter directionality? | **Bidirectional in v1** — write path (bus → MySQL) plus a CDC read path (MySQL → bus) via binlog streaming (§8). |
+| 11 | File Storage Adapter shape? | **Command-driven CRUD** (list/read/write/delete triggered by bus commands), not a passive archival sink; filesystem-change → bus events deferred (§8). |
+| 12 | Webhook Sender delivery guarantee? | **Best-effort** — single attempt, no retry/backoff (§8). |
+| 13 | CI platform? | **GitHub Actions** (§7.4, §10). |
+| 14 | Subject naming / bounded contexts? | **Placeholder pattern retained** — `events.<context>.<EventType>` with `orders` as a stand-in; real domain names to be supplied later (§5). |
+| 15 | CDC approach for the Database Adapter? | **Lightweight** — `python-mysql-replication` tails the binlog in-process; no Debezium/Kafka Connect for now (§8, §9). |
+| 16 | Python packaging/dependency-management tool? | **`uv`** — workspace mode handles `jetcore` as a shared local dependency across all 6 adapter packages cleanly (§7.5). |
+| 17 | Where does per-dependency version/release-date/source/security-vetting documentation live (per [DevelopmentGuidelines.md](DevelopmentGuidelines.md))? | **New [Dependencies.md](Dependencies.md) ledger** — keeps Design.md focused on architecture; the ledger is updated whenever a dependency is added, pinned, or reviewed (§7.2). |
+| 18 | Is the adapter identity manifest (§11 Step A2) keyed per adapter *type* or per *instance*? | **Per instance.** The service-directory KV's `<subject>.<serviceId>` key shape (§4.5) already implies instance-level identity (e.g. `file-storage-01`), so a deployment can run multiple independent instances of the same adapter type — e.g. two HTTP Adapter instances, each wired to a different external API, each with its own NATS identity and permissions. See [infra/nats/adapter_identities.yaml](infra/nats/adapter_identities.yaml). |
+| 19 | Does `FileWriteRequested` need a separate `FileCreateRequested` command, and does the File Storage Adapter watch for externally-created files? | **No separate command** — `FileWriteRequested` auto-creates a missing file. It emits `FileCreateCompleted` if the file was new, `FileWriteCompleted` if an existing file was updated. `FileCreateCompleted` is **also** published outside the command flow when the adapter notices a file created by an outside process (e.g. a shared/watched directory) — no preceding command, no `correlationId`. This is a deliberately narrow pull-forward of the folder-watch capability otherwise deferred (§8) — creation-detection only, not update-detection (§9). |
+| 20 | How is the sender-authentication gap found in Step B6 closed (§9 item #4)? | **New `service-identity` KV directory** (§4.6) — every adapter registers its own signing key once at connect time (not on a heartbeat, no TTL); a recipient verifies against the *trusted* looked-up key, not the message's own embedded `sourcePublicKey` claim. Accepted as a v1-scoped mechanism, not a full PKI (no revocation beyond overwrite). |
+| 21 | How does the Phase 2 Webhook Listener verify an inbound request is legitimate, given no specific real external source is chosen yet (§8's "TBD per integration")? | **Shared-secret header** (`X-Webhook-Secret`, constant-time compared against a per-adapter configured secret) — a generic, source-agnostic placeholder that proves "verify before trusting the bus with it" as a real step, same spirit as Decision #14's placeholder subjects. A real integration's actual scheme (HMAC-SHA256 signature header, etc.) is source-specific and deferred until a real source is picked (§12). |
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '52,54p' Design.md
+
+OUT
+| 21 | How does the Phase 2 Webhook Listener verify an inbound request is legitimate, given no specific real external source is chosen yet (§8's "TBD per integration")? | **Shared-secret header** (`X-Webhook-Secret`, constant-time compared against a per-adapter configured secret) — a generic, source-agnostic placeholder that proves "verify before trusting the bus with it" as a real step, same spirit as Decision #14's placeholder subjects. A real integration's actual scheme (HMAC-SHA256 signature header, etc.) is source-specific and deferred until a real source is picked (§12). |
+| 22 | What's the `FileWriteRequested` → HTTP mapping and command payload shape for Phase 2 (§9 item #1, write path only)? | **URL path segment → relative file `path`** (`POST /webhooks/{path:path}`, resolved and validated to stay inside `watch_dir`), **raw request body → `content`** (base64 in the payload). Deliberately generic — no real webhook source is being integrated yet, so this proves the pattern (HTTP in → verified → bus command out) rather than shaping around a specific vendor's schema. `list`/`read`/`delete` command shapes remain deferred to Phase 3 (§9). |
+Edit Design.md
+Added 5 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^## 9\. Open Questions" -A 12 Design.md
+
+OUT
+391:## 9. Open Questions Summary
+392-
+393-Architectural questions have been resolved and folded into §2–§8 above (Decisions #1–#20). What's left is deliberately deferred, not blocking:
+394-
+395-1. **File Storage Adapter command/response schema** — exact subject names and payload shape for the `list`/`read`/`write`/`delete` commands are TBD. **Partially resolved for Phase 2**: the write path (`FileWriteRequested` → `FileCreateCompleted`/`FileWriteCompleted`) is fully specified in §12 (Decision #22), since Phase 2 needs it to build the vertical slice. `list`/`read`/`delete` remain deferred to Phase 3, unchanged.
+396-2. **Subject naming** — real bounded-context names are deferred by choice; `events.<context>.<EventType>` stays a placeholder pattern (`orders` as stand-in) until real domains are known. Nothing else in the design depends on the specific names chosen. Reconfirmed still deferred, not blocking.
+397-3. **Externally-triggered file *updates*** — Decision #19 has the File Storage Adapter detect externally-created files (→ `FileCreateCompleted`), but not externally-triggered updates to existing files. Reconfirmed as deferred to Phase 3, when the real usage pattern (how chatty the watched directory actually is) will be clearer.
+398-4. **Encryption keypair persistence across restarts** — found while building Step C6. The *signing* identity is now stable across restarts (`BusClient.connect_as_adapter()`, derived from the adapter's own `.creds` file). The *encryption* keypair still isn't — generated fresh every process start, since Design.md has no answer yet for where a second, independent secret would live. Consequence: a message encrypted for this adapter and still unconsumed across a restart becomes permanently undecryptable. Low-stakes for Phase 2's command/response flow (a lost `FileWriteRequested` is retriable by its sender); deliberately not solved by deriving it from the signing seed (considered and rejected — undermines §4.1's "two independent keypairs" rationale). Worth resolving before any real production deployment; deferred, not blocking Phase 2.
+399-
+400-Item #4 in the original numbering here (the sender-authentication gap found in Step B6) is **resolved** — see Decision #20 and §4.6. It's noted there as a v1-scoped mechanism (trusts whoever registers first for a serviceId, no revocation beyond overwrite), not a fully solved problem for all time, but it's no longer an open design question — it's a documented, implemented, tested decision. (Renumbered above to avoid two different "item #4"s in this document — the encryption-keypair item is the new one.)
+401-
+402----
+403-
+Edit Design.md
+Modified
+Now let's write the full §13 breakdown. Let me find the exact insertion point.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+tail -15 Design.md
+
+OUT
+  **A genuine, harder-to-pin-down flake surfaced while stabilizing this test** — not a bug in E4's own code, but in `jetcore` itself, only exposed once two independently-connecting real adapters using the *same* fixed `serviceId`s were driven hard, back-to-back, across a long test session. Symptom: intermittent (~1-in-5-to-8 full-suite runs) `pyrage.DecryptError`/`SignatureVerificationError` failures in otherwise-unrelated tests. Root cause, confirmed by reading `RegistryClient.heartbeat()`'s implementation, not guessed: it returned a background `Task` whose *very first* recipient-registration write fired asynchronously inside the task, not before `subscribe()` returned to its caller — meaning a test that `subscribe()`s and `close()`s in quick succession could have `close()`'s `task.cancel()` land while that first write was still in flight. Cancelling a task can't retract bytes already sent to the server — the write would land anyway, at an indeterminate later moment, occasionally *after* a completely different, later test's `_clean_state` fixture had already purged and re-registered under the same `serviceId`, silently corrupting it with stale data. Fixed by making `heartbeat()` `async` and awaiting that first registration directly, before the background loop (for later, periodic re-registrations) even starts — closing the window for every test in this suite, all of which run far under the 20s heartbeat interval where the *original* design would still have been safe.
+
+  A second, compounding factor: by the time this was investigated, the shared dev NATS instance had accumulated **1223 leftover JetStream consumers** from this whole session's testing, and one failure's traceback showed a genuine `nats.js.errors.ServiceUnavailableError` from the JetStream API — real server-side strain, not just a client-side timing race. A full infra teardown/rebuild (`docker compose down -v`, wiped `infra/nats/operator/`, rebuilt via `up.sh`) was done alongside the `heartbeat()` fix; **17 consecutive full-suite runs passed cleanly afterward** (up from a baseline that failed roughly 1 in 5-8). Both changes are real and worth keeping regardless of which mattered more — the `heartbeat()` fix is a genuine correctness improvement on its own terms, not just a flakiness workaround, and periodic infra cleanup is good practice independent of this specific investigation.
+
+  **Executed and verified**: 116 tests total (1 new in `tests/`), full suite run 17× consecutively clean post-fix, clean `ruff`/`mypy`/`bandit`/`pip-audit` (`mypy` now also covers the new `tests/` directory). **Track E (E1-E4) is complete, and with it Phase 2 (Design.md §10, §12)** — the Webhook Listener → File Storage Adapter vertical slice works end-to-end: built, containerized, wired into `docker-compose`, manually smoke-tested through real HTTP against the real stack, and automatically verified. The pattern Phase 1 set out to prove (§10: "one vertical slice end-to-end to prove the pattern") now has two real adapters actually running it.
+
+**Exit criteria:** Track C passes standing alone, then Track D passes standing alone, then E3+E4 both pass against the fully wired `docker-compose` stack — mirroring Phase 1's "both tracks converge, then prove it end-to-end from a clean rebuild" pattern (§11's B7 checkpoint).
+
+### Suggested sequencing
+
+C1–C7 first (Track E's dependency note above explains why). D1–D5 follow, reusing C's schema/settings patterns. E1–E4 only make sense once both tracks pass independently.
+
+---
+
+*This document is a living draft — update it as open questions are resolved and the design evolves, rather than letting decisions drift into code undocumented.*
+Edit Design.md
+Added 81 lines
+Let's verify the document structure is intact.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^## \|^### " Design.md | tail -25
+echo "---"
+wc -l Design.md
+
+OUT
+311:### 7.2 Libraries (proposed)
+333:### 7.3 Required services (for `docker-compose`, described — not written yet)
+340:### 7.4 Development tooling
+355:### 7.5 Development environment setup
+362:### 7.6 Environment properties (docker-compose)
+376:## 8. Initial Adapters
+391:## 9. Open Questions Summary
+404:## 10. Proposed Implementation Plan (high-level, no code yet)
+415:## 11. Phase 1 — Detailed Breakdown
+428:### Track A — NATS / JetStream Infrastructure
+440:### Track B — `jetcore` Library
+475:### Suggested sequencing
+481:## 12. Phase 2 — Detailed Breakdown
+500:### Track C — File Storage Adapter
+537:### Track D — Webhook Listener
+557:### Track E — Integration
+578:### Suggested sequencing
+584:## 13. Phase 3 — Detailed Breakdown
+601:### Track F — File Storage Adapter: `list`/`read`/`delete`
+612:### Track G — Webhook Sender
+620:### Track H — HTTP Adapter
+628:### Track I — REST API Service
+638:### Track J — Database Adapter (MySQL)
+650:### Track K — Integration
+659:### Suggested sequencing
+---
+665 Design.md
+Read Design.md (lines 585-604)
+Reads cleanly. Phase 3 is fully scoped and documented.
+
+Phase 3 scoped — Design.md §13, five new Decisions (#23–27).
+
+Scoping this surfaced real gaps that needed resolving before a coherent breakdown was possible, not just adapter-by-adapter bullet points:
+
+REST API Service's "sync reply" was described in §8 but never actually mechanized. Decided against core NATS request-reply (the more obvious fit) because it would mean an unencrypted side-channel outside the uniform envelope/signing model every other event goes through — instead it reuses BusClient's existing pub/sub via an in-memory pending-request map, which requires a small, real jetcore addition: publish() needs to start returning the eventId it generates (currently discarded).
+File Storage's list/read/delete needed a real answer for "file not found," and I drew a deliberate line: an expected business failure (not found) gets a real FileOperationFailed event back to the caller, while a security-relevant one (path traversal) stays a silent ack+log — the caller doesn't get confirmation or denial either way.
+The Database Adapter needed an actual schema (one orders table, caller-supplied key so the write path can upsert without a round trip) and a way to close the loop back to a waiting REST API Service caller — a new OrderPersisted write-ack, deliberately separate from the CDC path's RowChanged output so "this request finished" and "the table changed" don't get conflated.
+Webhook Sender / HTTP Adapter both needed a decision on where their outbound target comes from — settled as one fixed target per instance, reusing Decision #18's existing per-instance-identity pattern rather than inventing dynamic routing.
+Six tracks (F–K): F extends the existing File Storage Adapter (no new infra), G/H are the two simple one-way adapters, I is the REST API Service (built against a fake replier so it doesn't need J to exist yet), J is the Database Adapter (the only track needing new infra — a real mysql service, binlog config, two least-privilege DB users), and K wires everything into docker-compose with a manual smoke test and one genuine cross-adapter automated test (REST API Service ↔ Database Adapter). Sequencing: F/G/H and J's infra can start in parallel; I's real end-to-end proof waits on J.
+
+Also went back and fixed §9: item #1 (File Storage's command schema) is now fully resolved rather than partially; item #3 (external update-detection) is explicitly reconfirmed as staying deferred past Phase 3, not silently expanded into it.
+
+Ready for "continue on to Step F1" (or wherever you'd like to start) whenever you are.
+
+---------------- Phase 3 Planning Complete -------------
