@@ -13030,3 +13030,3036 @@ One real correction caught while scoping, not building: §7.1's original repo la
 Sequencing is deliberately linear this time (C → D → E) rather than Phase 1's parallel tracks, since there's nothing for the Webhook Listener to prove against until the File Storage Adapter actually works. Ready for "continue on to Step C1" whenever you want to start building.
 
 ===============  Phase 2 Planning Completed ===============
+
+Let's proceed with the steps in Track C.
+session.log#13032-13032
+Sorry, please continue
+Continuing with Track C, Step C1 — package scaffold for the File Storage Adapter.
+
+Now sync the workspace and run the checks to verify the scaffold actually works, not just looks right.
+
+The workspace correctly picked up the new member and resolved jetcore as a workspace dependency. Now run the full toolchain.
+
+Real collision, confirmed by actually running it: both libs/jetcore/tests/test_scaffold.py and the new adapter's test_scaffold.py import as the bare top-level module test_scaffold under pytest's default (non-package, no __init__.py) test collection — a genuine multi-package naming clash, not a config issue. I checked whether --import-mode=importlib (pytest's own recommended fix for this) works here first — it doesn't, since it breaks the already-working bare from _helpers import ... pattern in libs/jetcore/tests/conftest.py. The safe fix is giving each adapter's scaffold test a unique filename.
+
+All 53 tests pass (52 existing + 1 new), clean ruff/mypy/bandit/pip-audit. Now update the .pre-commit-config.yaml mypy hook and the two stale "Phase 3" references, then verify pre-commit itself.
+
+Now verify pre-commit itself runs clean against the tracked+new files, and re-confirm the full toolchain once more with the updated bandit scope.
+
+C1 is done and fully verified. Now update Design.md to reflect it, matching the established reporting style.
+
+Now on to C2 — settings.py. Let me check jetcore.config for the exact subclassing shape to build on.
+
+57 tests pass. Fixing the two ruff findings (import order, line length).
+
+Good, ruff auto-fixed the import order. Now fix the line-length issue manually.
+
+C2 fully clean — 57 tests, all checks pass. Updating Design.md.
+
+Now C3 — JSON Schema files for the three subjects this slice touches.
+
+jsonschema 4.26.0 added to the shared dev group. Now write the schema-conformance tests.
+
+C3 fully verified — 66 tests, all clean. Now update Dependencies.md (two real new deps were added) and Design.md.
+
+Now update Design.md's C3 checklist item.
+
+Now C4 — the write-path command handler, the core of this adapter. Let me check BusClient's exact API first.
+
+Good, NATS is still up from Phase 1. Now let's write paths.py first — the pure path-safety module.
+
+Now write the command handler itself.
+
+Now add aiofiles as a real dependency of this adapter package.
+
+Now let's write the tests: unit tests for paths.py/payloads.py, and an integration test for WriteCommandHandler against real NATS.
+
+Now re-run the (idempotent) auth bootstrap to actually provision this identity's credentials.
+
+Confirmed — no server restart needed, new identity works live. Now write the integration test helpers and the test itself.
+
+Write conftest.py
+38 lines
+"""Shared fixtures for file_storage_adapter's live-NATS integration tests
+(Design.md §12 Step C4 onward). Mirrors libs/jetcore/tests/conftest.py's
+_clean_state fixture and its rationale exactly — same real bug documented
+there applies here too (subscribe()'s heartbeat outlives close() until its
+60s TTL expires), just re-implemented locally rather than imported, for
+the same self-containment reason _helpers.py explains."""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import AsyncGenerator
+
+import nats
+import pytest
+from _helpers import CREATE_COMPLETED_SUBJECT, CREDS_DIR, NATS_URL, WRITE_COMPLETED_SUBJECT
+from nats.js.errors import NoKeysError
+
+
+@pytest.fixture(autouse=True)
+async def _clean_state() -> AsyncGenerator[None]:
+    nc = await nats.connect(NATS_URL, user_credentials=f"{CREDS_DIR}/jetcore-admin.creds")
+    js = nc.jetstream()
+    await js.purge_stream("EVENTS")
+    kv = await js.key_value("service-directory")
+    for subject in (CREATE_COMPLETED_SUBJECT, WRITE_COMPLETED_SUBJECT):
+        try:
+            for key in await kv.keys(filters=[f"{subject}."]):
+                await kv.delete(key)
+        except NoKeysError:
+            pass
+    await nc.close()
+    yield
+
+
+@pytest.fixture
+def durable_name() -> str:
+    return f"test-{uuid.uuid4().hex[:8]}"
+Edit conftest.py
+Added 6 lines
+Edit adapter_identities.yaml
+Added 7 lines
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+sg docker -c "bash infra/nats/bootstrap_auth.sh" 2>&1 | tail -20
+
+OUT
+[ OK ] edited user "test-observer-01"
+wrote /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats/operator/creds/test-observer-01.creds
+== Admin identity: jetcore-admin ==
+already exists, skipping add
+[ OK ] added pub "$JS.API.>"
+[ OK ] added pub "$KV.service-directory.>"
+[ OK ] added pub "$KV.service-identity.>"
+[ OK ] added pub "_INBOX.>"
+[ OK ] added sub "$JS.API.>"
+[ OK ] added sub "$KV.service-directory.>"
+[ OK ] added sub "$KV.service-identity.>"
+[ OK ] added sub "_INBOX.>"
+[ OK ] generated user creds file `/nsc/keys/creds/JetCoreServiceBus/JETCORE/jetcore-admin.creds`
+[ OK ] edited user "jetcore-admin"
+wrote /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats/operator/creds/jetcore-admin.creds
+== Memory resolver config ==
+Success!! - generated `/workspace/resolver.conf`
+[ OK ] wrote server configuration to `/workspace/resolver.conf`
+wrote /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats/resolver.conf
+Done. Next: Step A4 wires resolver.conf into nats-server.conf.
+Now add the count-based wait helper and write the actual test.
+
+Edit _helpers.py
+Added 6 lines
+Edit _helpers.py
+Added 15 lines
+Now the actual integration test file.
+
+Write test_write_handler.py
+186 lines
+"""Integration tests for write_handler.py (Design.md §12 Step C4) — against
+the real Phase 1 stack, same discipline as libs/jetcore's own integration
+tests: no mocks, real NATS, real crypto, real files on disk.
+
+Uses test-observer-01 (infra/nats/adapter_identities.yaml) to independently
+confirm what actually lands on the bus — file-storage-01 can't watch its
+own published output (no adapter in this manifest does, matching the DB
+Adapter's own "don't consume your own result events" precedent), so
+without a separate observer identity there'd be no permitted way to check.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+from pathlib import Path
+
+from _helpers import (
+    CREATE_COMPLETED_SUBJECT,
+    WRITE_COMPLETED_SUBJECT,
+    WRITE_REQUESTED_SUBJECT,
+    connect,
+    wait_until_cache_has,
+)
+from file_storage_adapter.write_handler import WriteCommandHandler
+
+
+def _write_requested_payload(path: str, content: bytes) -> bytes:
+    return json.dumps({"path": path, "content": base64.b64encode(content).decode()}).encode()
+
+
+async def test_new_file_creates_and_publishes_file_create_completed(
+    tmp_path: Path, durable_name: str
+) -> None:
+    publisher = await connect("webhook-listener-01")
+    fs_client = await connect("file-storage-01")
+    observer = await connect("test-observer-01")
+    handler = WriteCommandHandler(fs_client, watch_dir=tmp_path)
+    try:
+        handler_durable = await handler.start(durable_name=durable_name)
+        request_durable = await observer.subscribe(
+            WRITE_REQUESTED_SUBJECT, durable_name=f"{durable_name}-req"
+        )
+        completed_durable = await observer.subscribe(
+            CREATE_COMPLETED_SUBJECT, durable_name=f"{durable_name}-created"
+        )
+
+        # Both file-storage-01 (the real consumer) and the observer must be
+        # registered before the publish, or one of them would miss it —
+        # not a race the test should tolerate silently.
+        await wait_until_cache_has(await publisher._cache_for(WRITE_REQUESTED_SUBJECT), 2)
+        await wait_until_cache_has(await fs_client._cache_for(CREATE_COMPLETED_SUBJECT), 1)
+
+        await publisher.publish(
+            WRITE_REQUESTED_SUBJECT,
+            _write_requested_payload("notes/todo.txt", b"hello world"),
+            event_type="FileWriteRequested",
+        )
+
+        [request_seen] = await observer.fetch(request_durable, timeout=3)
+        await request_seen.ack()
+
+        fetched = await handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1
+
+        assert (tmp_path / "notes" / "todo.txt").read_bytes() == b"hello world"
+
+        [result] = await observer.fetch(completed_durable, timeout=3)
+        assert result.details.event_type == "FileCreateCompleted"
+        assert result.details.source_service_id == "file-storage-01"
+        assert result.details.correlation_id == request_seen.details.event_id
+        assert json.loads(result.payload) == {
+            "path": "notes/todo.txt",
+            "sizeBytes": 11,
+            "occurredAt": json.loads(result.payload)["occurredAt"],  # shape check below
+        }
+        data = json.loads(result.payload)
+        assert data["path"] == "notes/todo.txt"
+        assert data["sizeBytes"] == 11
+        assert data["occurredAt"].endswith("Z")
+    finally:
+        await publisher.close()
+        await fs_client.close()
+        await observer.close()
+
+
+async def test_existing_file_updates_and_publishes_file_write_completed(
+    tmp_path: Path, durable_name: str
+) -> None:
+    existing = tmp_path / "notes" / "todo.txt"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"old content")
+
+    publisher = await connect("webhook-listener-01")
+    fs_client = await connect("file-storage-01")
+    observer = await connect("test-observer-01")
+    handler = WriteCommandHandler(fs_client, watch_dir=tmp_path)
+    try:
+        handler_durable = await handler.start(durable_name=durable_name)
+        completed_durable = await observer.subscribe(
+            WRITE_COMPLETED_SUBJECT, durable_name=f"{durable_name}-updated"
+        )
+
+        await wait_until_cache_has(await publisher._cache_for(WRITE_REQUESTED_SUBJECT), 1)
+        await wait_until_cache_has(await fs_client._cache_for(WRITE_COMPLETED_SUBJECT), 1)
+
+        await publisher.publish(
+            WRITE_REQUESTED_SUBJECT,
+            _write_requested_payload("notes/todo.txt", b"new content!"),
+            event_type="FileWriteRequested",
+        )
+
+        fetched = await handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1
+
+        assert existing.read_bytes() == b"new content!"
+
+        [result] = await observer.fetch(completed_durable, timeout=3)
+        assert result.details.event_type == "FileWriteCompleted"
+        data = json.loads(result.payload)
+        assert data["path"] == "notes/todo.txt"
+        assert data["sizeBytes"] == 12
+    finally:
+        await publisher.close()
+        await fs_client.close()
+        await observer.close()
+
+
+async def test_malformed_payload_is_acked_not_left_for_redelivery(
+    tmp_path: Path, durable_name: str
+) -> None:
+    publisher = await connect("webhook-listener-01")
+    fs_client = await connect("file-storage-01")
+    handler = WriteCommandHandler(fs_client, watch_dir=tmp_path)
+    try:
+        handler_durable = await handler.start(durable_name=durable_name)
+        await wait_until_cache_has(await publisher._cache_for(WRITE_REQUESTED_SUBJECT), 1)
+
+        await publisher.publish(
+            WRITE_REQUESTED_SUBJECT, b"not valid json at all", event_type="FileWriteRequested"
+        )
+
+        fetched = await handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1  # fetched and handled, even though handling meant "reject"
+
+        # Acked, not redelivered — a second fetch should find nothing left.
+        again = await handler.run_once(handler_durable, timeout=1)
+        assert again == 0
+
+        assert list(tmp_path.iterdir()) == []
+    finally:
+        await publisher.close()
+        await fs_client.close()
+
+
+async def test_path_traversal_is_rejected_without_writing_outside_watch_dir(
+    tmp_path: Path, durable_name: str
+) -> None:
+    watch_dir = tmp_path / "watch"
+    watch_dir.mkdir()
+
+    publisher = await connect("webhook-listener-01")
+    fs_client = await connect("file-storage-01")
+    handler = WriteCommandHandler(fs_client, watch_dir=watch_dir)
+    try:
+        handler_durable = await handler.start(durable_name=durable_name)
+        await wait_until_cache_has(await publisher._cache_for(WRITE_REQUESTED_SUBJECT), 1)
+
+        await publisher.publish(
+            WRITE_REQUESTED_SUBJECT,
+            _write_requested_payload("../escape.txt", b"malicious"),
+            event_type="FileWriteRequested",
+        )
+
+        fetched = await handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1
+
+        assert not (tmp_path / "escape.txt").exists()
+        assert list(watch_dir.iterdir()) == []
+
+        again = await handler.run_once(handler_durable, timeout=1)
+        assert again == 0
+    finally:
+        await publisher.close()
+        await fs_client.close()
+Edit test_write_handler.py
+Removed 5 lines
+Now let's run everything.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv sync --all-packages 2>&1 | tail -10
+echo "=== pytest (unit-only, paths+payloads) ==="
+uv run pytest -q adapters/file_storage_adapter/tests/test_paths.py adapters/file_storage_adapter/tests/test_payloads.py 2>&1 | tail -30
+
+OUT
+Resolved 75 packages in 1ms
+Checked 73 packages in 0.93ms
+=== pytest (unit-only, paths+payloads) ===
+................                                                         [100%]
+16 passed in 0.24s
+Unit tests pass. Now the integration test against live NATS.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q adapters/file_storage_adapter/tests/test_write_handler.py -v 2>&1 | tail -80
+
+OUT
+            await publisher.publish(
+                WRITE_REQUESTED_SUBJECT,
+                _write_requested_payload("../escape.txt", b"malicious"),
+                event_type="FileWriteRequested",
+            )
+    
+            fetched = await handler.run_once(handler_durable, timeout=3)
+            assert fetched == 1
+    
+            assert not (tmp_path / "escape.txt").exists()
+            assert list(watch_dir.iterdir()) == []
+    
+>           again = await handler.run_once(handler_durable, timeout=1)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+adapters/file_storage_adapter/tests/test_write_handler.py:176: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+adapters/file_storage_adapter/file_storage_adapter/write_handler.py:59: in run_once
+    events = await self._client.fetch(durable_name, batch=batch, timeout=timeout)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+libs/jetcore/jetcore/bus_client.py:226: in fetch
+    msgs = await sub.fetch(batch=batch, timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.12/site-packages/nats/js/client.py:1100: in fetch
+    msgs = await self._fetch_n(batch, expires, timeout, heartbeat)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.12/site-packages/nats/js/client.py:1229: in _fetch_n
+    msg = await self._sub.next_msg(timeout)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <nats.aio.subscription.Subscription object at 0x7c176830f290>
+timeout = 1
+
+    async def next_msg(self, timeout: Optional[float] = 1.0) -> Msg:
+        """
+        :params timeout: Time in seconds to wait for next message before timing out.
+        :raises nats.errors.TimeoutError:
+    
+        next_msg can be used to retrieve the next message from a stream of messages using
+        await syntax, this only works when not passing a callback on `subscribe`::
+    
+            sub = await nc.subscribe('hello')
+            msg = await sub.next_msg(timeout=1)
+    
+        """
+    
+        async def timed_get() -> Msg:
+            return await asyncio.wait_for(self._pending_queue.get(), timeout)
+    
+        if self._conn.is_closed:
+            raise errors.ConnectionClosedError
+    
+        if self._cb:
+            raise errors.Error("nats: next_msg cannot be used in async subscriptions")
+    
+        task_name = str(uuid4())
+        try:
+            future = asyncio.create_task(timed_get())
+            self._pending_next_msgs_calls[task_name] = future
+            msg = await future
+        except asyncio.TimeoutError:
+            if self._conn.is_closed:
+                raise errors.ConnectionClosedError
+>           raise errors.TimeoutError
+E           nats.errors.TimeoutError: nats: timeout
+
+.venv/lib/python3.12/site-packages/nats/aio/subscription.py:191: TimeoutError
+------------------------------ Captured log setup ------------------------------
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+------------------------------ Captured log call -------------------------------
+WARNING  file_storage_adapter.write_handler:write_handler.py:81 rejected FileWriteRequested for event 01a03b2d-76d0-7ab0-8834-2c366f6e816f: path '../escape.txt' escapes watch_dir — acking, not retrying
+ERROR    nats.aio.client:client.py:239 nats: encountered error
+nats.errors.Error: nats: permissions violation for publish to "$js.ack.events.test-b7b6f7b5.1.116.1.1787699230416803092.0"
+=========================== short test summary info ============================
+FAILED adapters/file_storage_adapter/tests/test_write_handler.py::test_malformed_payload_is_acked_not_left_for_redelivery
+FAILED adapters/file_storage_adapter/tests/test_write_handler.py::test_path_traversal_is_rejected_without_writing_outside_watch_dir
+========================= 2 failed, 2 passed in 2.40s ==========================
+This surfaced two real, separate bugs — let me dig into each properly rather than patching around them. First, the ack permission issue.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+sg docker -c "docker run --rm -v $(pwd)/infra/nats/operator/nsc:/nsc -e NSC_HOME=/nsc -e NKEYS_PATH=/nsc/keys natsio/nats-box:0.19.7-nonroot nsc edit user --help" 2>&1 | grep -i "resp\|ack" 
+
+OUT
+# When added this way, the corresponding remove command needs to be presented with the exact same string
+# To dynamically allow publishing to reply subjects, this works well for service responders:
+nsc edit user --name <n> --allow-pub-response
+# A permission to publish a response can be removed after a duration from when
+nsc edit user --name <n> --allow-pub-response --response-ttl 5s
+# If the service publishes multiple response messages, you can specify:
+nsc edit user --name <n> --allow-pub-response=5
+# See 'nsc edit export --response-type --help' to enable multiple
+# responses between accounts.
+# To remove response settings:
+nsc edit user --name <n> --rm-response-perms
+      --allow-pub-response int[=1]   permissions to limit how often a client can publish to reply subjects [with an optional count, --allow-pub-response=n] (global)
+      --response-ttl string          the amount of time the permissions is valid (global) - [#ms(millis) | #s(econds) | m(inutes) | h(ours)] - Default is no time limit.
+      --rm-response-perms            remove response settings from permissions
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+python3 -c "
+import nats.aio.msg as m
+import inspect
+print(inspect.getsource(m.Msg.ack))
+" 2>&1 | head -30
+
+OUT
+Traceback (most recent call last):
+  File "<string>", line 2, in <module>
+ModuleNotFoundError: No module named 'nats'
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run python3 -c "
+import nats.aio.msg as m
+import inspect
+print(inspect.getsource(m.Msg._ack))
+" 2>&1 | head -30
+echo "---"
+uv run python3 -c "
+import nats.aio.msg as m
+import inspect
+print(inspect.getsource(m.Msg.ack))
+" 2>&1 | head -30
+
+OUT
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+AttributeError: type object 'Msg' has no attribute '_ack'. Did you mean: '_ackd'?
+---
+    async def ack(self) -> None:
+        """
+        ack acknowledges a message delivered by JetStream.
+        """
+        self._check_reply()
+        await self._client.publish(self.reply)
+        self._ackd = True
+Real infra-layer permission gap, not just a test bug — every adapter identity was missing publish-response permission for JetStream acks. This is a Track A fix (bootstrap_auth.sh), verified with nsc's proper mechanism rather than a blunt $JS.ACK.> grant.
+
+Read bootstrap_auth.sh (lines 181-210)
+Edit bootstrap_auth.sh
+Added 1 line
+Edit bootstrap_auth.sh
+Added 1 line
+Read bootstrap_auth.sh (lines 61-74)
+Edit bootstrap_auth.sh
+Added 16 lines
+Now re-run the bootstrap to apply this to all identities, and verify idempotency isn't broken.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+sg docker -c "bash infra/nats/bootstrap_auth.sh" 2>&1 | tail -60
+
+OUT
+[ OK ] added sub "events.orders.OrderCreated"
+[ OK ] added sub "$JS.API.>"
+[ OK ] added sub "_INBOX.>"
+[ OK ] added sub "$KV.service-directory.>"
+[ OK ] added sub "$KV.service-identity.>"
+[ OK ] generated user creds file `/nsc/keys/creds/JetCoreServiceBus/JETCORE/webhook-sender-01.creds`
+[ OK ] edited user "webhook-sender-01"
+wrote /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats/operator/creds/webhook-sender-01.creds
+-- db-adapter-mysql-01 (database-adapter-mysql) --
+already exists, skipping add
+[ OK ] set max responses to 1
+[ OK ] added pub "events.db.orders.RowChanged"
+[ OK ] added pub "$JS.API.>"
+[ OK ] added pub "$KV.service-directory.events.orders.OrderCreated.db-adapter-mysql-01"
+[ OK ] added pub "$KV.service-identity.db-adapter-mysql-01"
+[ OK ] added sub "events.orders.OrderCreated"
+[ OK ] added sub "$JS.API.>"
+[ OK ] added sub "_INBOX.>"
+[ OK ] added sub "$KV.service-directory.>"
+[ OK ] added sub "$KV.service-identity.>"
+[ OK ] generated user creds file `/nsc/keys/creds/JetCoreServiceBus/JETCORE/db-adapter-mysql-01.creds`
+[ OK ] edited user "db-adapter-mysql-01"
+wrote /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats/operator/creds/db-adapter-mysql-01.creds
+-- test-observer-01 (test-observer) --
+already exists, skipping add
+[ OK ] set max responses to 1
+[ OK ] added pub "$JS.API.>"
+[ OK ] added pub "$KV.service-directory.events.files.FileWriteRequested.test-observer-01"
+[ OK ] added pub "$KV.service-directory.events.files.FileCreateCompleted.test-observer-01"
+[ OK ] added pub "$KV.service-directory.events.files.FileWriteCompleted.test-observer-01"
+[ OK ] added pub "$KV.service-identity.test-observer-01"
+[ OK ] added sub "events.files.FileWriteRequested"
+[ OK ] added sub "events.files.FileCreateCompleted"
+[ OK ] added sub "events.files.FileWriteCompleted"
+[ OK ] added sub "$JS.API.>"
+[ OK ] added sub "_INBOX.>"
+[ OK ] added sub "$KV.service-directory.>"
+[ OK ] added sub "$KV.service-identity.>"
+[ OK ] generated user creds file `/nsc/keys/creds/JetCoreServiceBus/JETCORE/test-observer-01.creds`
+[ OK ] edited user "test-observer-01"
+wrote /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats/operator/creds/test-observer-01.creds
+== Admin identity: jetcore-admin ==
+already exists, skipping add
+[ OK ] set max responses to 1
+[ OK ] added pub "$JS.API.>"
+[ OK ] added pub "$KV.service-directory.>"
+[ OK ] added pub "$KV.service-identity.>"
+[ OK ] added pub "_INBOX.>"
+[ OK ] added sub "$JS.API.>"
+[ OK ] added sub "$KV.service-directory.>"
+[ OK ] added sub "$KV.service-identity.>"
+[ OK ] added sub "_INBOX.>"
+[ OK ] generated user creds file `/nsc/keys/creds/JetCoreServiceBus/JETCORE/jetcore-admin.creds`
+[ OK ] edited user "jetcore-admin"
+wrote /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats/operator/creds/jetcore-admin.creds
+== Memory resolver config ==
+Success!! - generated `/workspace/resolver.conf`
+[ OK ] wrote server configuration to `/workspace/resolver.conf`
+wrote /home/bherring/dev/clodhopper/GregorsServiceBus/infra/nats/resolver.conf
+Done. Next: Step A4 wires resolver.conf into nats-server.conf.
+"set max responses to 1" confirms --allow-pub-response applied. Let's verify idempotency (run again — should be a no-op) before moving on.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+sg docker -c "bash infra/nats/bootstrap_auth.sh" 2>&1 | grep -c "already exists\|already"
+sg docker -c "bash infra/nats/bootstrap_auth.sh" 2>&1 | grep -i "added\|set max" | head -20
+
+OUT
+10
+[ OK ] set max responses to 1
+[ OK ] added pub "events.files.FileWriteRequested"
+[ OK ] added pub "$JS.API.>"
+[ OK ] added pub "$KV.service-identity.webhook-listener-01"
+[ OK ] added sub "$JS.API.>"
+[ OK ] added sub "_INBOX.>"
+[ OK ] added sub "$KV.service-directory.>"
+[ OK ] added sub "$KV.service-identity.>"
+[ OK ] set max responses to 1
+[ OK ] added pub "events.files.FileCreateCompleted"
+[ OK ] added pub "events.files.FileWriteCompleted"
+[ OK ] added pub "events.files.FileReadCompleted"
+[ OK ] added pub "events.files.FileListCompleted"
+[ OK ] added pub "events.files.FileDeleteCompleted"
+[ OK ] added pub "$JS.API.>"
+[ OK ] added pub "$KV.service-directory.events.files.FileWriteRequested.file-storage-01"
+[ OK ] added pub "$KV.service-directory.events.files.FileReadRequested.file-storage-01"
+[ OK ] added pub "$KV.service-directory.events.files.FileListRequested.file-storage-01"
+[ OK ] added pub "$KV.service-directory.events.files.FileDeleteRequested.file-storage-01"
+[ OK ] added pub "$KV.service-identity.file-storage-01"
+Now the second bug — sub.fetch() raising TimeoutError on an empty pull rather than returning []. Let's confirm it's still present now that acks actually work, then fix at the jetcore.bus_client layer since every future consumer will hit this.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q adapters/file_storage_adapter/tests/test_write_handler.py 2>&1 | tail -50
+
+OUT
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <nats.aio.subscription.Subscription object at 0x7da9385bd610>
+timeout = 1
+
+    async def next_msg(self, timeout: Optional[float] = 1.0) -> Msg:
+        """
+        :params timeout: Time in seconds to wait for next message before timing out.
+        :raises nats.errors.TimeoutError:
+    
+        next_msg can be used to retrieve the next message from a stream of messages using
+        await syntax, this only works when not passing a callback on `subscribe`::
+    
+            sub = await nc.subscribe('hello')
+            msg = await sub.next_msg(timeout=1)
+    
+        """
+    
+        async def timed_get() -> Msg:
+            return await asyncio.wait_for(self._pending_queue.get(), timeout)
+    
+        if self._conn.is_closed:
+            raise errors.ConnectionClosedError
+    
+        if self._cb:
+            raise errors.Error("nats: next_msg cannot be used in async subscriptions")
+    
+        task_name = str(uuid4())
+        try:
+            future = asyncio.create_task(timed_get())
+            self._pending_next_msgs_calls[task_name] = future
+            msg = await future
+        except asyncio.TimeoutError:
+            if self._conn.is_closed:
+                raise errors.ConnectionClosedError
+>           raise errors.TimeoutError
+E           nats.errors.TimeoutError: nats: timeout
+
+.venv/lib/python3.12/site-packages/nats/aio/subscription.py:191: TimeoutError
+------------------------------ Captured log setup ------------------------------
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+------------------------------ Captured log call -------------------------------
+WARNING  file_storage_adapter.write_handler:write_handler.py:81 rejected FileWriteRequested for event 01a03b30-eecb-75e0-994a-f9b29adab460: path '../escape.txt' escapes watch_dir — acking, not retrying
+=========================== short test summary info ============================
+FAILED adapters/file_storage_adapter/tests/test_write_handler.py::test_malformed_payload_is_acked_not_left_for_redelivery
+FAILED adapters/file_storage_adapter/tests/test_write_handler.py::test_path_traversal_is_rejected_without_writing_outside_watch_dir
+2 failed, 2 passed in 2.34s
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run python3 -c "
+import nats.errors as e
+print(e.TimeoutError.__mro__)
+"
+
+OUT
+(<class 'nats.errors.TimeoutError'>, <class 'nats.errors.Error'>, <class 'TimeoutError'>, <class 'OSError'>, <class 'Exception'>, <class 'BaseException'>, <class 'object'>)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+grep -n "TimeoutError\|from nats" libs/jetcore/jetcore/registry.py
+
+OUT
+51:  - `KeyWatcher.updates(timeout=...)` *raises* `nats.errors.TimeoutError`
+66:from nats.js.errors import KeyNotFoundError, NoKeysError
+67:from nats.js.kv import KV_DEL, KV_PURGE
+70:    from nats.js import JetStreamContext
+71:    from nats.js.kv import KeyValue
+289:            except nats.errors.TimeoutError:
+Good, matches the exact precedent (nats.errors.TimeoutError, already imported via import nats). Let's apply the fix to BusClient.fetch().
+
+Edit bus_client.py
+Added 14 lines
+Now re-run everything — the adapter's tests, and the full jetcore suite (since this touches shared library behavior that Phase 1 tests depend on).
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== full pytest suite (x2 for stability) ==="
+uv run pytest -q 2>&1 | tail -15
+uv run pytest -q 2>&1 | tail -15
+
+OUT
+=== full pytest suite (x2 for stability) ===
+<frozen importlib._bootstrap>:1360: in _find_and_load
+    ???
+<frozen importlib._bootstrap>:1331: in _find_and_load_unlocked
+    ???
+<frozen importlib._bootstrap>:935: in _load_unlocked
+    ???
+.venv/lib/python3.12/site-packages/_pytest/assertion/rewrite.py:188: in exec_module
+    exec(co, module.__dict__)
+adapters/file_storage_adapter/tests/conftest.py:15: in <module>
+    from _helpers import (
+E   ImportError: cannot import name 'CREATE_COMPLETED_SUBJECT' from '_helpers' (/home/bherring/dev/clodhopper/GregorsServiceBus/libs/jetcore/tests/_helpers.py)
+=========================== short test summary info ============================
+ERROR adapters/file_storage_adapter/tests - ImportError: cannot import name '...
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.25s
+<frozen importlib._bootstrap>:1360: in _find_and_load
+    ???
+<frozen importlib._bootstrap>:1331: in _find_and_load_unlocked
+    ???
+<frozen importlib._bootstrap>:935: in _load_unlocked
+    ???
+.venv/lib/python3.12/site-packages/_pytest/assertion/rewrite.py:188: in exec_module
+    exec(co, module.__dict__)
+adapters/file_storage_adapter/tests/conftest.py:15: in <module>
+    from _helpers import (
+E   ImportError: cannot import name 'CREATE_COMPLETED_SUBJECT' from '_helpers' (/home/bherring/dev/clodhopper/GregorsServiceBus/libs/jetcore/tests/_helpers.py)
+=========================== short test summary info ============================
+ERROR adapters/file_storage_adapter/tests - ImportError: cannot import name '...
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.24s
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+mv adapters/file_storage_adapter/tests/_helpers.py adapters/file_storage_adapter/tests/_file_storage_helpers.py
+
+OUT
+(Bash completed with no output)
+Read _file_storage_helpers.py (lines 2-13)
+Edit _file_storage_helpers.py
+Added 9 lines
+Now update the two importers.
+
+Edit conftest.py
+Modified
+Edit test_write_handler.py
+Modified
+Now re-run the full suite.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== full pytest suite (x3 for stability) ==="
+for i in 1 2 3; do uv run pytest -q 2>&1 | tail -8; done
+
+OUT
+=== full pytest suite (x3 for stability) ===
+........................................................................ [ 83%]
+..............                                                           [100%]
+86 passed in 4.70s
+........................................................................ [ 83%]
+..............                                                           [100%]
+86 passed in 4.77s
+........................................................................ [ 83%]
+..............                                                           [100%]
+86 passed in 4.82s
+All 86 tests pass, 3 runs for stability. Now the rest of the toolchain.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== ruff ==="; uv run ruff check . 2>&1 | tail -30
+
+OUT
+=== ruff ===
+20 |     raw = json.dumps({"path": "notes/todo.txt", "content": base64.b64encode(b"hello").decode()}).encode()
+   |                                                                                                     ^^^^^
+21 |
+22 |     request = decode_write_requested(raw)
+   |
+
+E501 Line too long (104 > 100)
+  --> adapters/file_storage_adapter/tests/test_payloads.py:37:101
+   |
+35 |         json.dumps({"content": base64.b64encode(b"hello").decode()}).encode(),  # missing path
+36 |         json.dumps({"path": "notes/todo.txt"}).encode(),  # missing content
+37 |         json.dumps({"path": "", "content": base64.b64encode(b"hello").decode()}).encode(),  # empty path
+   |                                                                                                     ^^^^
+38 |         json.dumps({"path": "notes/todo.txt", "content": "not-base64!!"}).encode(),  # bad base64
+39 |         json.dumps({"path": 5, "content": base64.b64encode(b"hello").decode()}).encode(),  # wrong type
+   |
+
+E501 Line too long (103 > 100)
+  --> adapters/file_storage_adapter/tests/test_payloads.py:39:101
+   |
+37 |         json.dumps({"path": "", "content": base64.b64encode(b"hello").decode()}).encode(),  # empty path
+38 |         json.dumps({"path": "notes/todo.txt", "content": "not-base64!!"}).encode(),  # bad base64
+39 |         json.dumps({"path": 5, "content": base64.b64encode(b"hello").decode()}).encode(),  # wrong type
+   |                                                                                                     ^^^
+40 |     ],
+41 | )
+   |
+
+Found 6 errors.
+[*] 1 fixable with the `--fix` option.
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check --fix . 2>&1 | tail -40
+
+OUT
+  --> adapters/file_storage_adapter/file_storage_adapter/payloads.py:68:101
+   |
+68 | def encode_write_completed(*, path: str, size_bytes: int, occurred_at: datetime | None = None) -> bytes:
+   |                                                                                                     ^^^^
+69 |     return _encode_completed(path=path, size_bytes=size_bytes, occurred_at=occurred_at)
+   |
+
+E501 Line too long (105 > 100)
+  --> adapters/file_storage_adapter/tests/test_payloads.py:20:101
+   |
+19 | def test_decode_write_requested_round_trips() -> None:
+20 |     raw = json.dumps({"path": "notes/todo.txt", "content": base64.b64encode(b"hello").decode()}).encode()
+   |                                                                                                     ^^^^^
+21 |
+22 |     request = decode_write_requested(raw)
+   |
+
+E501 Line too long (104 > 100)
+  --> adapters/file_storage_adapter/tests/test_payloads.py:37:101
+   |
+35 |         json.dumps({"content": base64.b64encode(b"hello").decode()}).encode(),  # missing path
+36 |         json.dumps({"path": "notes/todo.txt"}).encode(),  # missing content
+37 |         json.dumps({"path": "", "content": base64.b64encode(b"hello").decode()}).encode(),  # empty path
+   |                                                                                                     ^^^^
+38 |         json.dumps({"path": "notes/todo.txt", "content": "not-base64!!"}).encode(),  # bad base64
+39 |         json.dumps({"path": 5, "content": base64.b64encode(b"hello").decode()}).encode(),  # wrong type
+   |
+
+E501 Line too long (103 > 100)
+  --> adapters/file_storage_adapter/tests/test_payloads.py:39:101
+   |
+37 |         json.dumps({"path": "", "content": base64.b64encode(b"hello").decode()}).encode(),  # empty path
+38 |         json.dumps({"path": "notes/todo.txt", "content": "not-base64!!"}).encode(),  # bad base64
+39 |         json.dumps({"path": 5, "content": base64.b64encode(b"hello").decode()}).encode(),  # wrong type
+   |                                                                                                     ^^^
+40 |     ],
+41 | )
+   |
+
+Found 6 errors (1 fixed, 5 remaining).
+[This command modified 1 file you've previously read: adapters/file_storage_adapter/file_storage_adapter/write_handler.py. Call Read before editing.]
+Let me fix the remaining line-length issues manually.
+
+Read payloads.py (lines 61-70)
+Edit payloads.py
+Added 4 lines
+Read test_payloads.py (lines 18-42)
+Edit test_payloads.py
+Added 2 lines
+Edit test_payloads.py
+Added 2 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== ruff ==="; uv run ruff check . 2>&1 | tail -30
+echo "=== ruff format ==="; uv run ruff format --check . 2>&1 | tail -30
+
+OUT
+=== ruff ===
+All checks passed!
+=== ruff format ===
+34 files already formatted
+Now mypy, bandit, pip-audit, and the final full-suite reruns.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== mypy ==="; uv run --all-packages mypy libs adapters 2>&1 | tail -40
+
+OUT
+=== mypy ===
+adapters/file_storage_adapter/tests/conftest.py: error: Duplicate module named "conftest" (also at "libs/jetcore/tests/conftest.py")
+adapters/file_storage_adapter/tests/conftest.py: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#mapping-file-paths-to-modules for more info
+adapters/file_storage_adapter/tests/conftest.py: note: Common resolutions include:
+adapters/file_storage_adapter/tests/conftest.py: note:     a) using `--exclude` to avoid checking one of them,
+adapters/file_storage_adapter/tests/conftest.py: note:     b) adding `__init__.py` somewhere,
+adapters/file_storage_adapter/tests/conftest.py: note:     c) using `--explicit-package-bases` or adjusting `MYPYPATH`
+Found 1 error in 1 file (errors prevented further checking)
+The conftest.py filename is pytest-mandated (can't rename it like I did with test_scaffold.py), so this needs a different fix — excluding it from mypy's file-walk, which is mypy's own documented resolution for this exact collision.
+
+Read pyproject.toml (lines 38-47)
+Edit pyproject.toml
+Added 12 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages mypy libs adapters 2>&1 | tail -40
+
+OUT
+adapters/file_storage_adapter/file_storage_adapter/write_handler.py:25: error: Library stubs not installed for "aiofiles"  [import-untyped]
+adapters/file_storage_adapter/file_storage_adapter/write_handler.py:25: note: Hint: "python3 -m pip install types-aiofiles"
+adapters/file_storage_adapter/file_storage_adapter/write_handler.py:25: note: (or run "mypy --install-types" to install all missing stub packages)
+adapters/file_storage_adapter/file_storage_adapter/write_handler.py:25: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports
+Found 1 error in 1 file (checked 26 source files)
+The conftest.py collision is fixed. Now install the missing type stubs for aiofiles.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv add --dev types-aiofiles 2>&1 | tail -10
+echo "=== mypy ==="; uv run --all-packages mypy libs adapters 2>&1 | tail -20
+
+OUT
+Resolved 76 packages in 379ms
+Prepared 1 package in 57ms
+Installed 1 package in 2ms
+ + types-aiofiles==25.1.0.20260518
+=== mypy ===
+Success: no issues found in 26 source files
+mypy clean. Now bandit, pip-audit, and a final full re-run of everything for stability.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== bandit ==="
+uv run bandit -q -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter 2>&1
+echo "=== pip-audit ==="
+uv run pip-audit 2>&1 | tail -10
+echo "=== pytest x3 ==="
+for i in 1 2 3; do uv run pytest -q 2>&1 | tail -6; done
+
+OUT
+=== bandit ===
+=== pip-audit ===
+No known vulnerabilities found
+Name                 Skip Reason
+-------------------- -----------------------------------------------------------------------------------
+file-storage-adapter Dependency not found on PyPI and could not be audited: file-storage-adapter (0.1.0)
+jetcore              Dependency not found on PyPI and could not be audited: jetcore (0.1.0)
+=== pytest x3 ===
+........................................................................ [ 83%]
+..............                                                           [100%]
+86 passed in 4.77s
+........................................................................ [ 83%]
+..............                                                           [100%]
+86 passed in 4.77s
+........................................................................ [ 83%]
+..............                                                           [100%]
+86 passed in 4.80s
+Let's clean up test state on the shared bus, then update the documentation.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -3
+for bucket in service-directory service-identity; do
+  echo "--- $bucket ---"
+  for key in $(sg docker -c "$NB kv ls $bucket" 2>&1); do
+    sg docker -c "$NB kv del $bucket '$key' -f" 2>&1 | tail -1
+  done
+done
+sg docker -c "$NB kv ls service-directory" 2>&1
+sg docker -c "$NB kv ls service-identity" 2>&1
+
+OUT
+      First Sequence: 225
+       Last Sequence: 224 @ 2026-08-25 23:14:36
+    Active Consumers: 168
+--- service-directory ---
+--- service-identity ---
+No keys found in bucket
+No keys found in bucket
+Edit Dependencies.md
+Modified
+Edit Dependencies.md
+Added 1 line
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+grep -n "^#\|^##" infra/nats/README.md
+
+OUT
+1:# NATS Toolchain — Phase 1, Step A1
+7:## Pinned versions
+19:## Running `nsc` / `nats` CLI via Docker
+37:## Additional pinned tools (Step A3)
+43:## Step A3 — Auth bootstrap
+53:## Step A4 — `nats-server.conf`
+61:## Step A5 — JetStream objects
+76:## Step A6 — docker-compose
+89:## Step A7 — Manual smoke test
+103:### Reproducing this by hand
+117:# 1. Allowed publish
+120:# 2. Confirm the stream captured it
+123:# 3. Durable pull consumer — the real delivery mechanism adapters use
+129:# 4. Denied publish (expect: Permissions Violation for Publish)
+132:# 5. KV write scoping: allowed on your own key, denied on someone else's
+133:#    (the second one hangs a few seconds then times out — KV denials don't
+134:#    fail fast the way pub/sub denials do)
+138:# 6. Confirm #5 was a real permission denial, not a typo — same key, admin creds
+141:# Cleanup
+148:## Track A: complete
+Read README.md (lines 44-61)
+Edit README.md
+Added 4 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+grep -n "A2\. Adapter identity manifest" Design.md
+
+OUT
+425:- [x] **A2. Adapter identity manifest** — [infra/nats/adapter_identities.yaml](infra/nats/adapter_identities.yaml): one entry per adapter *instance* (Decision #18), with `serviceId`, `adapterType`, and a publish/subscribe subject allow-list. Populated with the Phase 2 pair (`webhook-listener-01`, `file-storage-01`) plus one placeholder instance for each of the other 4 adapter types. KV read/write permissions are derived from the subscribe list by the bootstrap script (A3), not hand-authored per entry.
+Edit Design.md
+Modified
+Now the A3 entry:
+
+Edit Design.md
+Added 2 lines
+Now the main C4 entry itself.
+
+Edit Design.md
+Added 9 lines
+Let's do one final full verification pass before wrapping up C4.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== pytest ==="; uv run pytest -q 2>&1 | tail -6
+echo "=== ruff ==="; uv run ruff check . 2>&1 | tail -10
+echo "=== mypy ==="; uv run --all-packages mypy libs adapters 2>&1 | tail -10
+echo "=== bandit ==="; uv run bandit -q -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter 2>&1
+echo "=== pip-audit ==="; uv run pip-audit 2>&1 | tail -6
+echo "=== git status ==="
+git status --short | head -50
+
+OUT
+=== pytest ===
+........................................................................ [ 83%]
+..............                                                           [100%]
+86 passed in 4.77s
+=== ruff ===
+All checks passed!
+=== mypy ===
+Success: no issues found in 26 source files
+=== bandit ===
+=== pip-audit ===
+No known vulnerabilities found
+Name                 Skip Reason
+-------------------- -----------------------------------------------------------------------------------
+file-storage-adapter Dependency not found on PyPI and could not be audited: file-storage-adapter (0.1.0)
+jetcore              Dependency not found on PyPI and could not be audited: jetcore (0.1.0)
+=== git status ===
+ M .pre-commit-config.yaml
+ M Dependencies.md
+ M Design.md
+ M README.md
+ M infra/nats/README.md
+ M infra/nats/adapter_identities.yaml
+ M infra/nats/bootstrap_auth.sh
+ M libs/jetcore/jetcore/bus_client.py
+ M pyproject.toml
+ M uv.lock
+?? adapters/
+?? schemas/
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -3
+for bucket in service-directory service-identity; do
+  for key in $(sg docker -c "$NB kv ls $bucket" 2>&1); do
+    sg docker -c "$NB kv del $bucket '$key' -f" 2>&1 >/dev/null
+  done
+done
+sg docker -c "$NB kv ls service-directory" 2>&1
+sg docker -c "$NB kv ls service-identity" 2>&1
+sg docker -c "docker compose -f /home/bherring/dev/clodhopper/GregorsServiceBus/docker-compose.yml ps" 2>&1
+
+OUT
+      First Sequence: 242
+       Last Sequence: 241 @ 2026-08-25 23:17:02
+    Active Consumers: 182
+No keys found in bucket
+No keys found in bucket
+NAME             IMAGE         COMMAND                  SERVICE   CREATED        STATUS        PORTS
+jetcore-nats-1   nats:2.14.5   "/nats-server -c /et…"   nats      22 hours ago   Up 22 hours   0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+Clean, and the server's healthy. C1–C4 are all done and verified. Here's the summary:
+
+Track C, Steps C1–C4 complete.
+
+C1 — adapters/file_storage_adapter scaffold, wired into the uv workspace. Found a real pytest/mypy collision immediately: two files both named test_scaffold.py in different packages collide as bare top-level modules. Fixed by uniquely naming each adapter's scaffold test (test_file_storage_adapter_scaffold.py), not by changing import mode (that broke _helpers.py's existing pattern when I tried it).
+C2 — FileStorageSettings(watch_dir: DirectoryPath), the exact subclassing pattern B4 had already proven, now used for real.
+C3 — Draft 2020-12 JSON Schema for all three subjects this slice touches, additionalProperties: false so drift fails loudly. Added jsonschema/types-jsonschema as dev dependencies and actually validated the schema files (not just parsed as JSON) plus example payloads against them.
+C4 — the write-path handler itself (paths.py for traversal safety, payloads.py for the wire shape, write_handler.py tying it to BusClient). This step found the real substance:
+A project-wide bug dating back to Phase 1: every identity was missing publish permission for JetStream ack replies, so ack() had been silently failing server-side since B6/B7 — nats-py's ack doesn't await a response, so it never surfaced as an exception, only in an async error log nothing was checking. Fixed in bootstrap_auth.sh with nsc's --allow-pub-response, applied to every identity, verified live.
+BusClient.fetch() raised TimeoutError instead of returning [] when nothing was pending — fixed at the shared jetcore layer so it's not a per-adapter workaround.
+The naming-collision problem recurred twice more (_helpers.py, then conftest.py in mypy specifically) — fixed each properly rather than papering over it, and documented the pattern so it doesn't get rediscovered from scratch next time.
+A path-traversal edge case (Path silently discarding a join's left side for an absolute right side) confirmed by test, not assumed.
+Also added a test-observer-01 NATS identity since no real adapter is allowed to watch its own published output, needed to actually verify completion events land on the bus.
+
+Verified: 86 tests (up from 52 at end of Phase 1), run 3× for stability, clean ruff/mypy/bandit/pip-audit throughout. Design.md, Dependencies.md, and infra/nats/README.md all updated with the real findings. Bus state cleaned up; jetcore-nats-1 left healthy.
+
+Ready for C5 — the external-creation watch whenever you want to continue.
+
+Design.md
+Proceed to step C5
+Now C5 — the external-creation watch. Let me think through one thing Design.md's own C5 bullet didn't fully resolve: since C4's write handler also creates files, the raw filesystem watch would otherwise double-publish FileCreateCompleted for every command-triggered creation too. I need a way to distinguish "we just wrote this" from "this appeared from outside" before writing the watch itself.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv add --package file-storage-adapter watchfiles 2>&1 | tail -10
+
+OUT
+Resolved 78 packages in 1.01s
+   Building file-storage-adapter @ file:///home/bherring/dev/clodhopper/GregorsServiceBus/adapters/file_storage_adapter
+      Built file-storage-adapter @ file:///home/bherring/dev/clodhopper/GregorsServiceBus/adapters/file_storage_adapter
+Prepared 1 package in 571ms
+Uninstalled 1 package in 0.83ms
+Installed 3 packages in 4ms
+ + anyio==4.14.2
+ ~ file-storage-adapter==0.1.0 (from file:///home/bherring/dev/clodhopper/GregorsServiceBus/adapters/file_storage_adapter)
+ + watchfiles==1.2.0
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run python3 -c "
+import watchfiles, inspect
+print(watchfiles.__all__ if hasattr(watchfiles,'__all__') else dir(watchfiles))
+print(inspect.signature(watchfiles.awatch))
+from watchfiles import Change
+print(list(Change))
+"
+
+OUT
+('watch', 'awatch', 'run_process', 'arun_process', 'Change', 'BaseFilter', 'DefaultFilter', 'PythonFilter', 'VERSION')
+(*paths: pathlib.Path | str, watch_filter: collections.abc.Callable[[watchfiles.main.Change, str], bool] | None = DefaultFilter(_ignore_dirs={'.svn', '.hg', '.mypy_cache', '.idea', 'node_modules', '.hypothesis', '.git', '.venv', '.tox', '.pytest_cache', '__pycache__'}, _ignore_entity_regexes=(re.compile('\\.py[cod]$'), re.compile('\\.___jb_...___$'), re.compile('\\.sw.$'), re.compile('~$'), re.compile('^\\.\\#'), re.compile('^\\.DS_Store$'), re.compile('^flycheck_')), _ignore_paths=()), debounce: int = 1600, step: int = 50, stop_event: 'AnyEvent | None' = None, rust_timeout: int | None = None, yield_on_timeout: bool = False, debug: bool | None = None, raise_interrupt: bool | None = None, force_polling: bool | None = None, poll_delay_ms: int = 300, recursive: bool = True, ignore_permission_denied: bool | None = None) -> collections.abc.AsyncGenerator[set[tuple[watchfiles.main.Change, str]], None]
+[<Change.added: 1>, <Change.modified: 2>, <Change.deleted: 3>]
+Write recent_writes.py
+41 lines
+"""Coordination between write_handler.py (Step C4) and create_watch.py
+(Step C5) — both watch the same watch_dir, for different reasons, and a
+raw filesystem event can't tell "a file the write-path handler just
+created via a command" apart from "a file that genuinely appeared from
+outside" (Decision #19's actual distinction). Without this, every
+command-triggered creation would ALSO trip the external-creation watch and
+publish a second, spurious FileCreateCompleted with no correlationId.
+
+A short TTL, not a permanent record: this only needs to bridge the gap
+between the write finishing and watchfiles' own debounced event for it
+arriving (default debounce 1600ms, confirmed via `watchfiles.awatch`'s
+signature) — not track write history in general.
+"""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+DEFAULT_TTL_SECONDS = 5.0  # comfortably above watchfiles' 1600ms default
+# debounce + step, with margin for scheduling jitter under load.
+
+
+class RecentWrites:
+    def __init__(self, *, ttl_seconds: float = DEFAULT_TTL_SECONDS) -> None:
+        self._ttl_seconds = ttl_seconds
+        self._marked_at: dict[Path, float] = {}
+
+    def mark(self, path: Path) -> None:
+        self._marked_at[path] = time.monotonic()
+
+    def was_recent(self, path: Path) -> bool:
+        self._prune()
+        return path in self._marked_at
+
+    def _prune(self) -> None:
+        cutoff = time.monotonic() - self._ttl_seconds
+        expired = [p for p, marked_at in self._marked_at.items() if marked_at < cutoff]
+        for p in expired:
+            del self._marked_at[p]
+Now update write_handler.py to mark writes.
+
+Edit write_handler.py
+Edit failed
+Read write_handler.py
+Edit write_handler.py
+Added 1 line
+Edit write_handler.py
+Added 11 lines
+Edit write_handler.py
+Added 6 lines
+Now let's write create_watch.py, the actual external-creation watch.
+
+Write create_watch.py
+105 lines
+"""External-creation watch (Design.md §12 Step C5, Decision #19) — watches
+watch_dir for files that appear with NO preceding FileWriteRequested
+command (e.g. a shared/remote directory another process writes into
+directly) and publishes FileCreateCompleted for them, with no
+correlationId since there's no request to correlate against. Creation-
+detection only — externally-triggered *updates* to already-existing files
+remain out of scope (Design.md §9), unchanged by this step.
+
+Runs concurrently with write_handler.py's consume loop (Step C6 wires
+both via asyncio.gather, the shape Step B7 already proved), not instead
+of it. See recent_writes.py for why a command-triggered creation doesn't
+also get reported here.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from pathlib import Path
+
+from watchfiles import Change, awatch
+
+from file_storage_adapter.payloads import encode_create_completed
+from file_storage_adapter.recent_writes import RecentWrites
+from jetcore.bus_client import BusClient
+
+logger = logging.getLogger(__name__)
+
+CREATE_COMPLETED_SUBJECT = "events.files.FileCreateCompleted"
+
+# A raw "added" filesystem event fires when a file is first created, not
+# necessarily when whatever's writing it is done — confirmed by testing
+# with a deliberately slow multi-chunk write (watchfiles' own docs make no
+# "settled" guarantee either way). Polls st_size until it stops changing
+# for a few consecutive reads before treating the file as done.
+_SETTLE_POLL_INTERVAL_SECONDS = 0.2
+_SETTLE_STABLE_READS = 3
+
+
+async def wait_until_settled(
+    path: Path,
+    *,
+    poll_interval: float = _SETTLE_POLL_INTERVAL_SECONDS,
+    stable_reads: int = _SETTLE_STABLE_READS,
+) -> int | None:
+    """Polls `path`'s size until it's unchanged across `stable_reads`
+    consecutive checks, returning the final size — or None if the file
+    disappeared before settling (e.g. a genuinely transient temp file)."""
+    last_size = -1
+    consecutive_matches = 0
+    while consecutive_matches < stable_reads:
+        await asyncio.sleep(poll_interval)
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError:
+            return None
+        if size == last_size:
+            consecutive_matches += 1
+        else:
+            consecutive_matches = 0
+            last_size = size
+    return last_size
+
+
+class ExternalCreationWatch:
+    def __init__(
+        self,
+        client: BusClient,
+        *,
+        watch_dir: Path,
+        recent_writes: RecentWrites,
+    ) -> None:
+        self._client = client
+        self._watch_dir = watch_dir
+        self._recent_writes = recent_writes
+
+    async def run_forever(self, *, stop_event: asyncio.Event | None = None) -> None:
+        """Runs until `stop_event` is set (or the enclosing task is
+        cancelled). `watchfiles.awatch`'s own `stop_event` parameter is the
+        documented clean-shutdown mechanism — used here rather than relying
+        solely on task cancellation reaching its internal watcher thread."""
+        async for changes in awatch(self._watch_dir, stop_event=stop_event):
+            for change, raw_path in changes:
+                if change is not Change.added:
+                    continue
+                path = Path(raw_path)
+                if not path.is_file():
+                    continue  # a new directory (e.g. from mkdir) is not a file creation
+                if self._recent_writes.was_recent(path):
+                    continue  # our own write_handler created this — not "external"
+                await self._handle_new_file(path)
+
+    async def _handle_new_file(self, path: Path) -> None:
+        size = await wait_until_settled(path)
+        if size is None:
+            logger.info("file %s disappeared before settling — skipping", path)
+            return
+
+        relative = path.relative_to(self._watch_dir)
+        await self._client.publish(
+            CREATE_COMPLETED_SUBJECT,
+            encode_create_completed(path=str(relative), size_bytes=size),
+            event_type="FileCreateCompleted",
+        )
+Write test_recent_writes.py
+43 lines
+"""Tests for recent_writes.py (Design.md §12 Step C5) — pure logic, no
+NATS or filesystem watching needed for the class itself (this test module
+still runs under the directory's live-NATS autouse fixture like every
+other test here, same as test_paths.py/test_payloads.py already do)."""
+
+import time
+from pathlib import Path
+
+from file_storage_adapter.recent_writes import RecentWrites
+
+
+def test_unmarked_path_is_not_recent(tmp_path: Path) -> None:
+    recent = RecentWrites()
+    assert recent.was_recent(tmp_path / "never-marked.txt") is False
+
+
+def test_marked_path_is_recent(tmp_path: Path) -> None:
+    recent = RecentWrites()
+    path = tmp_path / "marked.txt"
+
+    recent.mark(path)
+
+    assert recent.was_recent(path) is True
+
+
+def test_mark_expires_after_ttl(tmp_path: Path) -> None:
+    recent = RecentWrites(ttl_seconds=0.05)
+    path = tmp_path / "marked.txt"
+
+    recent.mark(path)
+    assert recent.was_recent(path) is True
+
+    time.sleep(0.1)
+
+    assert recent.was_recent(path) is False
+
+
+def test_marking_one_path_does_not_affect_another(tmp_path: Path) -> None:
+    recent = RecentWrites()
+    recent.mark(tmp_path / "a.txt")
+
+    assert recent.was_recent(tmp_path / "b.txt") is False
+Write test_create_watch.py
+177 lines
+"""Tests for create_watch.py (Design.md §12 Step C5).
+
+wait_until_settled is tested standalone first (pure asyncio + filesystem,
+no bus involved). The rest are live-NATS integration tests, including the
+one that matters most for this step: a command-triggered creation must
+NOT also be reported by the external watch (recent_writes.py's whole
+reason for existing) — proven with a second, empty fetch after the
+correlated one, the same "confirm no redelivery" idiom Step C4's
+malformed-payload/path-traversal tests already use, reused here to prove
+"confirm no *extra* publish" instead.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+import aiofiles
+import pytest
+from _file_storage_helpers import (
+    CREATE_COMPLETED_SUBJECT,
+    WRITE_REQUESTED_SUBJECT,
+    connect,
+    wait_until_cache_has,
+)
+from file_storage_adapter.create_watch import ExternalCreationWatch, wait_until_settled
+from file_storage_adapter.recent_writes import RecentWrites
+from file_storage_adapter.write_handler import WriteCommandHandler
+
+
+def _write_requested_payload(path: str, content: bytes) -> bytes:
+    import base64
+
+    return json.dumps({"path": path, "content": base64.b64encode(content).decode()}).encode()
+
+
+async def test_wait_until_settled_waits_for_a_slow_multi_chunk_write(tmp_path: Path) -> None:
+    target = tmp_path / "slow.bin"
+
+    async def slow_write() -> None:
+        async with aiofiles.open(target, "wb") as f:
+            await f.write(b"a" * 10)
+            await f.flush()
+            await asyncio.sleep(0.5)
+            await f.write(b"b" * 10)
+            await f.flush()
+            await asyncio.sleep(0.5)
+            await f.write(b"c" * 10)
+            await f.flush()
+
+    writer = asyncio.create_task(slow_write())
+    await asyncio.sleep(0.05)  # let the file actually exist before polling starts
+
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    size = await wait_until_settled(target)
+    elapsed = loop.time() - start
+
+    await writer
+
+    assert size == 30
+    assert elapsed >= 0.9, "settled on an intermediate chunk instead of waiting for the write to finish"
+
+
+async def test_wait_until_settled_returns_none_if_file_disappears(tmp_path: Path) -> None:
+    target = tmp_path / "ephemeral.txt"
+    target.write_bytes(b"here briefly")
+
+    async def delete_it() -> None:
+        await asyncio.sleep(0.1)
+        target.unlink()
+
+    asyncio.create_task(delete_it())
+
+    result = await wait_until_settled(target, poll_interval=0.05, stable_reads=2)
+
+    assert result is None
+
+
+@pytest.fixture
+async def stop_watch() -> tuple[asyncio.Event, list[asyncio.Task[None]]]:
+    """Yields (stop_event, tasks) — tests append their watch task to
+    `tasks`; this fixture signals shutdown and awaits it afterward, so a
+    forgotten cleanup can't leave a background watcher running past its
+    test."""
+    stop_event = asyncio.Event()
+    tasks: list[asyncio.Task[None]] = []
+    yield stop_event, tasks
+    stop_event.set()
+    for task in tasks:
+        await asyncio.wait_for(task, timeout=3)
+
+
+async def test_external_file_creation_is_detected_and_published(
+    tmp_path: Path, durable_name: str, stop_watch: tuple[asyncio.Event, list[asyncio.Task[None]]]
+) -> None:
+    stop_event, tasks = stop_watch
+    fs_client = await connect("file-storage-01")
+    observer = await connect("test-observer-01")
+    try:
+        completed_durable = await observer.subscribe(
+            CREATE_COMPLETED_SUBJECT, durable_name=f"{durable_name}-ext"
+        )
+        await wait_until_cache_has(await fs_client._cache_for(CREATE_COMPLETED_SUBJECT), 1)
+
+        watch = ExternalCreationWatch(
+            fs_client, watch_dir=tmp_path, recent_writes=RecentWrites()
+        )
+        tasks.append(asyncio.create_task(watch.run_forever(stop_event=stop_event)))
+        await asyncio.sleep(0.1)  # let awatch actually start observing before we create anything
+
+        (tmp_path / "appeared.txt").write_bytes(b"from outside")
+
+        received = await observer.fetch(completed_durable, timeout=8)
+
+        assert len(received) == 1
+        result = received[0]
+        assert result.details.event_type == "FileCreateCompleted"
+        assert result.details.correlation_id is None
+        data = json.loads(result.payload)
+        assert data["path"] == "appeared.txt"
+        assert data["sizeBytes"] == len(b"from outside")
+    finally:
+        await fs_client.close()
+        await observer.close()
+
+
+async def test_command_triggered_creation_is_not_also_reported_by_watch(
+    tmp_path: Path, durable_name: str, stop_watch: tuple[asyncio.Event, list[asyncio.Task[None]]]
+) -> None:
+    stop_event, tasks = stop_watch
+    publisher = await connect("webhook-listener-01")
+    fs_client = await connect("file-storage-01")
+    observer = await connect("test-observer-01")
+    try:
+        recent_writes = RecentWrites()
+        write_handler = WriteCommandHandler(
+            fs_client, watch_dir=tmp_path, recent_writes=recent_writes
+        )
+        watch = ExternalCreationWatch(fs_client, watch_dir=tmp_path, recent_writes=recent_writes)
+
+        handler_durable = await write_handler.start(durable_name=durable_name)
+        completed_durable = await observer.subscribe(
+            CREATE_COMPLETED_SUBJECT, durable_name=f"{durable_name}-created"
+        )
+        await wait_until_cache_has(await publisher._cache_for(WRITE_REQUESTED_SUBJECT), 1)
+        await wait_until_cache_has(await fs_client._cache_for(CREATE_COMPLETED_SUBJECT), 1)
+
+        tasks.append(asyncio.create_task(watch.run_forever(stop_event=stop_event)))
+        await asyncio.sleep(0.1)
+
+        await publisher.publish(
+            WRITE_REQUESTED_SUBJECT,
+            _write_requested_payload("notes/todo.txt", b"hello"),
+            event_type="FileWriteRequested",
+        )
+
+        fetched = await write_handler.run_once(handler_durable, timeout=3)
+        assert fetched == 1
+
+        first = await observer.fetch(completed_durable, timeout=3)
+        assert len(first) == 1
+        assert first[0].details.correlation_id is not None  # the real, command-triggered one
+
+        # The important assertion: if recent_writes hadn't suppressed it,
+        # the external watch's own (uncorrelated) publish would show up
+        # within its debounce+settle window (up to ~2.2s) — wait past
+        # that and confirm nothing else arrives, using bus_client.fetch()'s
+        # Step C4 fix (returns [] on idle rather than raising) directly.
+        second = await observer.fetch(completed_durable, timeout=4)
+        assert second == []
+    finally:
+        await publisher.close()
+        await fs_client.close()
+        await observer.close()
+Edit test_create_watch.py
+Added 2 lines
+Edit test_create_watch.py
+Modified
+Edit test_create_watch.py
+Modified
+Now let's run everything.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv sync --all-packages 2>&1 | tail -10
+echo "=== unit-only (paths/payloads/recent_writes) ==="
+uv run pytest -q adapters/file_storage_adapter/tests/test_recent_writes.py 2>&1 | tail -20
+
+OUT
+Resolved 78 packages in 3ms
+Checked 76 packages in 3ms
+=== unit-only (paths/payloads/recent_writes) ===
+....                                                                     [100%]
+4 passed in 0.26s
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q adapters/file_storage_adapter/tests/test_create_watch.py -v 2>&1 | tail -100
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/bherring/dev/clodhopper/GregorsServiceBus
+configfile: pyproject.toml
+plugins: anyio-4.14.2, cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 4 items
+
+adapters/file_storage_adapter/tests/test_create_watch.py ....            [100%]
+
+============================== 4 passed in 7.29s ===============================
+All C5 tests pass, including the critical no-double-publish proof. Now the full suite and toolchain.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== full pytest ==="; uv run pytest -q 2>&1 | tail -15
+echo "=== ruff ==="; uv run ruff check . 2>&1 | tail -40
+
+OUT
+=== full pytest ===
+........................................................................ [ 76%]
+......................                                                   [100%]
+94 passed in 14.24s
+=== ruff ===
+  --> adapters/file_storage_adapter/file_storage_adapter/create_watch.py:15:1
+   |
+13 |   """
+14 |
+15 | / from __future__ import annotations
+16 | |
+17 | | import asyncio
+18 | | import logging
+19 | | from pathlib import Path
+20 | |
+21 | | from watchfiles import Change, awatch
+22 | |
+23 | | from file_storage_adapter.payloads import encode_create_completed
+24 | | from file_storage_adapter.recent_writes import RecentWrites
+25 | | from jetcore.bus_client import BusClient
+   | |________________________________________^
+26 |
+27 |   logger = logging.getLogger(__name__)
+   |
+help: Organize imports
+   |
+20 |
+21 + from jetcore.bus_client import BusClient
+22 | from watchfiles import Change, awatch
+23 |
+24 | from file_storage_adapter.payloads import encode_create_completed
+25 | from file_storage_adapter.recent_writes import RecentWrites
+   - from jetcore.bus_client import BusClient
+26 |
+   |
+
+E501 Line too long (104 > 100)
+  --> adapters/file_storage_adapter/tests/test_create_watch.py:65:101
+   |
+64 |     assert size == 30
+65 |     assert elapsed >= 0.9, "settled on an intermediate chunk instead of waiting for the write to finish"
+   |                                                                                                     ^^^^
+
+Found 2 errors.
+[*] 1 fixable with the `--fix` option.
+94 tests pass (up from 86). Just two lint fixes needed.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check --fix . 2>&1 | tail -20
+
+OUT
+E501 Line too long (104 > 100)
+  --> adapters/file_storage_adapter/tests/test_create_watch.py:65:101
+   |
+64 |     assert size == 30
+65 |     assert elapsed >= 0.9, "settled on an intermediate chunk instead of waiting for the write to finish"
+   |                                                                                                     ^^^^
+
+Found 2 errors (1 fixed, 1 remaining).
+[This command modified 1 file you've previously read: adapters/file_storage_adapter/file_storage_adapter/create_watch.py. Call Read before editing.]
+Edit test_create_watch.py
+Modified
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== ruff ==="; uv run ruff check . 2>&1 | tail -10
+echo "=== ruff format ==="; uv run ruff format --check . 2>&1 | tail -10
+echo "=== mypy ==="; uv run --all-packages mypy libs adapters 2>&1 | tail -40
+
+OUT
+=== ruff ===
+All checks passed!
+=== ruff format ===
+    |
+108 |
+    -         watch = ExternalCreationWatch(
+    -             fs_client, watch_dir=tmp_path, recent_writes=RecentWrites()
+    -         )
+109 +         watch = ExternalCreationWatch(fs_client, watch_dir=tmp_path, recent_writes=RecentWrites())
+110 |         tasks.append(asyncio.create_task(watch.run_forever(stop_event=stop_event)))
+    |
+
+1 file would be reformatted, 37 files already formatted
+=== mypy ===
+Success: no issues found in 30 source files
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff format . 2>&1 | tail -10
+echo "=== mypy ==="; uv run --all-packages mypy libs adapters 2>&1 | tail -10
+echo "=== ruff check ==="; uv run ruff check . 2>&1 | tail -10
+
+OUT
+1 file reformatted, 37 files left unchanged
+=== mypy ===
+Success: no issues found in 30 source files
+=== ruff check ===
+All checks passed!
+[This command modified 1 file you've previously read: adapters/file_storage_adapter/tests/test_create_watch.py. Call Read before editing.]
+Now run everything once more for final verification.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== pytest x2 ==="
+uv run pytest -q 2>&1 | tail -8
+uv run pytest -q 2>&1 | tail -8
+echo "=== bandit ==="
+uv run bandit -q -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter 2>&1
+echo "=== pip-audit ==="
+uv run pip-audit 2>&1 | tail -10
+
+OUT
+=== pytest x2 ===
+........................................................................ [ 76%]
+......................                                                   [100%]
+94 passed in 14.40s
+........................................................................ [ 76%]
+......................                                                   [100%]
+94 passed in 14.59s
+=== bandit ===
+=== pip-audit ===
+No known vulnerabilities found
+Name                 Skip Reason
+-------------------- -----------------------------------------------------------------------------------
+file-storage-adapter Dependency not found on PyPI and could not be audited: file-storage-adapter (0.1.0)
+jetcore              Dependency not found on PyPI and could not be audited: jetcore (0.1.0)
+All clean. Now update Dependencies.md (watchfiles' real version) and Design.md.
+
+Edit Dependencies.md
+Modified
+Now the Design.md C5 entry.
+
+Edit Design.md
+Edit failed
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+grep -n "C5\. External-creation watch" Design.md
+
+OUT
+508:- [ ] **C5. External-creation watch** — `watchfiles` watching `watch_dir` for files that appear with no preceding command; publishes `FileCreateCompleted` with no `correlationId` (Decision #19's narrow pull-forward). Runs concurrently with C4's consume loop (`asyncio.gather`, the same concurrency shape B7 proved). Debounce/settle behavior (a file mid-write shouldn't fire before it's stable) is flagged as something to verify empirically against real `watchfiles` behavior, not assume.
+Edit Design.md
+Added 6 lines
+Let's clean up the test bus state, confirm the container's still healthy, and do a final check.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -3
+for bucket in service-directory service-identity; do
+  for key in $(sg docker -c "$NB kv ls $bucket" 2>&1); do
+    sg docker -c "$NB kv del $bucket '$key' -f" 2>&1 >/dev/null
+  done
+done
+sg docker -c "$NB kv ls service-directory" 2>&1
+sg docker -c "$NB kv ls service-identity" 2>&1
+sg docker -c "docker compose -f /home/bherring/dev/clodhopper/GregorsServiceBus/docker-compose.yml ps" 2>&1
+echo "--- git status ---"
+git status --short
+
+OUT
+      First Sequence: 305
+       Last Sequence: 304 @ 2026-08-29 01:04:43
+    Active Consumers: 236
+No keys found in bucket
+No keys found in bucket
+NAME             IMAGE         COMMAND                  SERVICE   CREATED      STATUS       PORTS
+jetcore-nats-1   nats:2.14.5   "/nats-server -c /et…"   nats      4 days ago   Up 6 hours   0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+--- git status ---
+ M .pre-commit-config.yaml
+ M Dependencies.md
+ M Design.md
+ M README.md
+ M infra/nats/README.md
+ M infra/nats/adapter_identities.yaml
+ M infra/nats/bootstrap_auth.sh
+ M libs/jetcore/jetcore/bus_client.py
+ M pyproject.toml
+ M uv.lock
+?? adapters/
+?? schemas/
+Step C5 complete.
+
+Built create_watch.py (ExternalCreationWatch, wait_until_settled) and recent_writes.py (RecentWrites) — the external-creation watch from Decision #19, plus the coordination piece it needed.
+
+The real work here was a design gap I caught before writing any code, thinking through the plan rather than discovering it via a failing test: running C4's write handler and C5's raw filesystem watch concurrently on the same directory means C4's own command-triggered creations would also trip C5's watch — a second, spurious, uncorrelated FileCreateCompleted for every ordinary write. Fixed with RecentWrites, a short-TTL (5s) shared record that WriteCommandHandler marks into and ExternalCreationWatch checks against — long enough to bridge watchfiles' own ~1.6s debounce window, not a general write-history log.
+
+Then verified two things empirically that the plan had flagged as open risks rather than assumed:
+
+Settle behavior — watchfiles' "added" event fires on file creation, not when a slow write finishes (confirmed via awatch's own signature: 1600ms default debounce, no "settled" guarantee documented). A 3-chunk slow-write test proves wait_until_settled waits for the real end, asserting on elapsed time so a lucky-but-wrong early return can't pass.
+The suppression actually works — the test that matters most here publishes a real FileWriteRequested, confirms the correlated completion arrives, then does a second fetch timed to outlast the full debounce+settle window and asserts it comes back empty — directly reusing the BusClient.fetch() idle-returns-[] fix from C4.
+94 tests total (up from 86), run twice for stability, clean ruff/mypy/bandit/pip-audit. watchfiles added as a real dependency (deferred from C1 as planned). Design.md and Dependencies.md updated; bus state cleaned up; jetcore-nats-1 still healthy.
+
+Ready for C6 — entrypoint + graceful shutdown whenever you'd like to continue.
+
+complete steps C6 & C7
+Building C6, I need to resolve one real gap first: nothing in jetcore currently gives an adapter's real entrypoint a way to get signing/encryption keys — every existing connect() (in test helpers) generates fresh random ones every call, which is fine for test isolation but wrong for a process that needs a stable identity. Let me check what exists before deciding.
+
+Read crypto.py
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run python3 -c "
+import nats
+import inspect
+print(inspect.signature(nats.connect))
+" 2>&1 | head -5
+echo "---"
+uv run python3 -c "
+import nkeys
+print([n for n in dir(nkeys) if 'seed' in n.lower() or 'cred' in n.lower()])
+"
+echo "--- search nats-py for creds parsing ---"
+uv run python3 -c "
+import nats.aio.client as c
+import inspect
+src = inspect.getsource(c)
+import re
+for m in re.finditer(r'def (\w*(cred|jwt|seed)\w*)', src, re.I):
+    print(m.group(1))
+"
+
+OUT
+(servers: 'Union[str, List[str]]' = 'nats://localhost:4222', **options) -> 'NATS'
+---
+['ErrInvalidSeed', 'ErrInvalidSeedLen', 'PREFIX_BYTE_SEED', 'decode_seed', 'encode_seed', 'from_seed']
+--- search nats-py for creds parsing ---
+_setup_nkeys_jwt_connect
+_read_creds_user_nkey
+get_user_seed
+_read_creds_user_jwt
+get_user_jwt
+_setup_nkeys_seed_connect
+_get_nkeys_seed
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run python3 -c "
+import nats.aio.client as c
+import inspect
+print(inspect.getsource(c.NATS._read_creds_user_nkey))
+print('---')
+print(inspect.getsource(c.NATS.get_user_seed))
+" 2>&1 | head -60
+
+OUT
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+AttributeError: module 'nats.aio.client' has no attribute 'NATS'
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run python3 -c "
+import nats.aio.client as c
+print([n for n in dir(c) if not n.startswith('_')][:20])
+import re
+src = open(c.__file__).read()
+i = src.find('_read_creds_user_nkey')
+print(src[i-200:i+1500])
+"
+
+OUT
+['AUTHORIZATION_VIOLATION', 'Any', 'Awaitable', 'BytesIO', 'CONNECT_OP', 'CTRL_STATUS', 'Callable', 'Callback', 'Client', 'Credentials', 'DEFAULT_BUFFER_SIZE', 'DEFAULT_CONNECT_TIMEOUT', 'DEFAULT_DRAIN_TIMEOUT', 'DEFAULT_FLUSH_TIMEOUT', 'DEFAULT_INBOX_PREFIX', 'DEFAULT_MAX_FLUSHER_QUEUE_SIZE', 'DEFAULT_MAX_OUTSTANDING_PINGS', 'DEFAULT_MAX_PAYLOAD_SIZE', 'DEFAULT_MAX_RECONNECT_ATTEMPTS', 'DEFAULT_PENDING_SIZE']
+user_cb() -> bytearray:
+                return self._read_creds_user_jwt(creds)
+
+            self._user_jwt_cb = user_cb
+
+            def sig_cb(nonce: str) -> bytes:
+                user_seed = self._read_creds_user_nkey(creds)
+                kp = nkeys.from_seed(user_seed)
+                raw_signed = kp.sign(nonce.encode())
+                sig = base64.b64encode(raw_signed)
+
+                # Delete all state related to the keys.
+                kp.wipe()
+                del user_seed
+                del kp
+                return sig
+
+            self._signature_cb = sig_cb
+
+    def _read_creds_user_nkey(self, creds: str | UserString | Path) -> bytearray:
+        def get_user_seed(f):
+            for line in f:
+                # Detect line where the NKEY would start and end,
+                # then seek and read into a fixed bytearray that
+                # can be wiped.
+                if b"BEGIN USER NKEY SEED" in line:
+                    nkey_start_pos = f.tell()
+                    try:
+                        next(f)
+                    except StopIteration:
+                        raise ErrInvalidUserCredentials
+                    nkey_end_pos = f.tell()
+                    nkey_size = nkey_end_pos - nkey_start_pos - 1
+                    f.seek(nkey_start_pos)
+
+                    # Only gather enough bytes for the user seed
+                    # into the pre allocated bytearray.
+                    user_seed = bytearray(nkey_size)
+                    f.readinto(user_seed)  # type: ignore[attr-defined]
+                    return user_seed
+
+        if isinstance(creds, UserString):
+            return get_user_seed(BytesIO(creds.data.encode()))
+
+        with op
+Let me settle the identity question properly. crypto.py's own docstring already states the intended design ("real adapters use the nkey nsc already generated... the same keypair serves both connection auth and event signing") — so the signing key should come from the .creds file, not be generated fresh. The encryption keypair has no such answer yet; I'll resolve the signing half properly and explicitly defer the encryption half as a documented limitation rather than quietly inventing a new secrets-storage scheme mid-step.
+
+Write creds.py
+46 lines
+"""Parses the nkey seed out of a .creds file (Design.md §12 Step C6).
+
+.creds bundles a JWT + nkey seed together (`nsc generate creds`, Step A3)
+— the standard NATS client connection artifact. nats-py parses this
+internally to sign the connection handshake, but doesn't expose that
+parsing as public API (`Client._read_creds_user_nkey` is a private
+method, confirmed by reading nats-py's source) — this is a small,
+independent implementation of the same well-documented .creds block
+format, so a real adapter entrypoint can reuse the SAME nkey for event
+signing that its connection already authenticates with, rather than
+generating an unrelated one every process start (Design.md §4.1: "the
+same keypair serves both connection auth and event signing", per
+crypto.py's own `generate_signing_keypair` docstring; see also B7's
+finding about what goes wrong when a signing identity isn't stable).
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+from jetcore.crypto import SigningKeyPair, _keypair_from_seed
+
+
+class CredsParseError(ValueError):
+    """`creds_path` doesn't contain a recognizable USER NKEY SEED block."""
+
+
+_SEED_BLOCK = re.compile(
+    rb"-----BEGIN USER NKEY SEED-----[ \t]*\r?\n"
+    rb"(?P<seed>[^\r\n]+)\r?\n"
+    rb"-----END USER NKEY SEED-----"
+)
+
+
+def load_signing_keypair(creds_path: Path) -> SigningKeyPair:
+    """Extracts the nkey seed embedded in `creds_path` and derives its
+    public key, returning both as a SigningKeyPair — the identity a real
+    adapter should sign events with (Step C6), not a freshly generated one."""
+    data = creds_path.read_bytes()
+    match = _SEED_BLOCK.search(data)
+    if match is None:
+        raise CredsParseError(f"no USER NKEY SEED block found in {creds_path}")
+    seed = match.group("seed").decode().strip()
+    return _keypair_from_seed(seed)
+Edit crypto.py
+Added 9 lines
+Now add the higher-level connect convenience to BusClient itself.
+
+Read bus_client.py (lines 109-148)
+Edit bus_client.py
+Added 32 lines
+Read bus_client.py (lines 27-41)
+Edit bus_client.py
+Added 8 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+cat infra/nats/operator/creds/webhook-listener-01.creds
+
+OUT
+-----BEGIN NATS USER JWT-----
+eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.eyJqdGkiOiIyWUNFVEtFN0FRVzYzREhFQkJaU1pLRVBYNElIUVNGWVpUUFVIRzZJQzIyUUpVUzU1WUZBIiwiaWF0IjoxNzg3Njk5NDI0LCJpc3MiOiJBRE1PQ0FWQlBMWkVRS0RWUVBRQkg2NzJQVzZVM0dCN1RJRVBNWE5TMjI0VVlQUFdJQ05RVkJPUSIsIm5hbWUiOiJ3ZWJob29rLWxpc3RlbmVyLTAxIiwic3ViIjoiVURaQVZUWDVCTlhJWVdCNERPTEFBNkVVRUFWN1BFRk9VQldHQTJCRFlSWkc0S1JDT00zVFZLNkIiLCJuYXRzIjp7InB1YiI6eyJhbGxvdyI6WyIkSlMuQVBJLlx1MDAzZSIsIiRLVi5zZXJ2aWNlLWlkZW50aXR5LndlYmhvb2stbGlzdGVuZXItMDEiLCJldmVudHMuZmlsZXMuRmlsZVdyaXRlUmVxdWVzdGVkIl19LCJzdWIiOnsiYWxsb3ciOlsiJEpTLkFQSS5cdTAwM2UiLCIkS1Yuc2VydmljZS1kaXJlY3RvcnkuXHUwMDNlIiwiJEtWLnNlcnZpY2UtaWRlbnRpdHkuXHUwMDNlIiwiX0lOQk9YLlx1MDAzZSJdfSwicmVzcCI6eyJtYXgiOjEsInR0bCI6MH0sInN1YnMiOi0xLCJkYXRhIjotMSwicGF5bG9hZCI6LTEsInR5cGUiOiJ1c2VyIiwidmVyc2lvbiI6Mn19.hZXj7dytr18OiQHfLK7zs8fuP4xLxWbKqq7b9r-CfKS4sIVj8yVb3kaQLXWCKkIZ1G1qopp0t6FDaPJtfaFUBQ
+------END NATS USER JWT------
+
+************************* IMPORTANT *************************
+NKEY Seed printed below can be used to sign and prove identity.
+NKEYs are sensitive and should be treated as secrets.
+
+-----BEGIN USER NKEY SEED-----
+SUAESYV3QZVFS46ZLC2CDJBU6BGSWSVOL2RQL7V7OIOHDJH2ZSATZL2LJQ
+------END USER NKEY SEED------
+
+*************************************************************
+Good catch needed — the real .creds file uses asymmetric dash counts (-----BEGIN...----- vs ------END...------, 5 vs 6 dashes). Let me fix the regex to be robust rather than hardcode an exact count.
+
+Edit creds.py
+Added 4 lines
+Now let's write tests for creds.py and connect_as_adapter, in libs/jetcore/tests/.
+
+Write test_creds.py
+50 lines
+"""Tests for creds.py (Design.md §12 Step C6)."""
+
+from pathlib import Path
+
+import pytest
+from jetcore.creds import CredsParseError, load_signing_keypair
+from jetcore.crypto import sign, verify
+
+REAL_CREDS = Path("infra/nats/operator/creds/webhook-listener-01.creds")
+
+
+def test_loads_real_seed_from_a_real_creds_file() -> None:
+    """Against an actual nsc-generated .creds file (Step A3's output),
+    not a hand-crafted fixture — proves the parser handles the real
+    template's asymmetric dash counts (5 for BEGIN, 6 for END), not just
+    a symmetric one this test invented."""
+    keypair = load_signing_keypair(REAL_CREDS)
+
+    assert keypair.seed.startswith("SU")  # nkey seed encoding for a User
+    assert keypair.public_key.startswith("U")  # nkey public encoding for a User
+
+    # The derived keypair must actually work for signing/verification —
+    # not just look like plausible strings.
+    signature = sign(keypair.seed, b"hello")
+    assert verify(keypair.public_key, b"hello", signature)
+
+
+def test_missing_seed_block_raises(tmp_path: Path) -> None:
+    creds = tmp_path / "no-seed.creds"
+    creds.write_text("-----BEGIN NATS USER JWT-----\nnot a real jwt\n------END NATS USER JWT------\n")
+
+    with pytest.raises(CredsParseError):
+        load_signing_keypair(creds)
+
+
+def test_symmetric_dash_variant_also_parses(tmp_path: Path) -> None:
+    """The regex is deliberately dash-count-agnostic (not hardcoded to
+    the real template's asymmetry) — confirm a plain 5-dashes-both-sides
+    PEM-style block works too, not just the exact real-world quirk."""
+    creds = tmp_path / "symmetric.creds"
+    creds.write_text(
+        "-----BEGIN USER NKEY SEED-----\n"
+        "SUAESYV3QZVFS46ZLC2CDJBU6BGSWSVOL2RQL7V7OIOHDJH2ZSATZL2LJQ\n"
+        "-----END USER NKEY SEED-----\n"
+    )
+
+    keypair = load_signing_keypair(creds)
+
+    assert keypair.seed == "SUAESYV3QZVFS46ZLC2CDJBU6BGSWSVOL2RQL7V7OIOHDJH2ZSATZL2LJQ"
+Read test_bus_client.py (lines 2-33)
+Edit test_bus_client.py
+Added 1 line
+Read test_bus_client.py (lines 261-275)
+Edit test_bus_client.py
+Added 44 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q libs/jetcore/tests/test_creds.py -v 2>&1 | tail -30
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/bherring/dev/clodhopper/GregorsServiceBus
+configfile: pyproject.toml
+plugins: anyio-4.14.2, cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 3 items
+
+libs/jetcore/tests/test_creds.py ...                                     [100%]
+
+============================== 3 passed in 0.10s ===============================
+Real .creds parsing confirmed working. Now the connect_as_adapter integration tests.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q libs/jetcore/tests/test_bus_client.py -k "connect_as_adapter" -v 2>&1 | tail -60
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/bherring/dev/clodhopper/GregorsServiceBus
+configfile: pyproject.toml
+plugins: anyio-4.14.2, cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 9 items / 7 deselected / 2 selected
+
+libs/jetcore/tests/test_bus_client.py ..                                 [100%]
+
+======================= 2 passed, 7 deselected in 0.15s ========================
+Now the full suite, then continue with C6's actual entrypoint.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q 2>&1 | tail -10
+echo "=== ruff ==="; uv run ruff check . 2>&1 | tail -30
+
+OUT
+........................................................................ [ 72%]
+...........................                                              [100%]
+99 passed in 14.16s
+=== ruff ===
+278 |     serviceId must agree on the same signing public key."""
+279 |     client_a = await BusClient.connect_as_adapter(settings("webhook-listener-01"), adapter_type="test")
+    |                                                                                                     ^^^
+280 |     client_b = await BusClient.connect_as_adapter(settings("webhook-listener-01"), adapter_type="test")
+281 |     try:
+    |
+
+E501 Line too long (103 > 100)
+   --> libs/jetcore/tests/test_bus_client.py:280:101
+    |
+278 |     serviceId must agree on the same signing public key."""
+279 |     client_a = await BusClient.connect_as_adapter(settings("webhook-listener-01"), adapter_type="test")
+280 |     client_b = await BusClient.connect_as_adapter(settings("webhook-listener-01"), adapter_type="test")
+    |                                                                                                     ^^^
+281 |     try:
+282 |         assert client_a._signing_public_key == client_b._signing_public_key
+    |
+
+E501 Line too long (102 > 100)
+  --> libs/jetcore/tests/test_creds.py:30:101
+   |
+28 | def test_missing_seed_block_raises(tmp_path: Path) -> None:
+29 |     creds = tmp_path / "no-seed.creds"
+30 |     creds.write_text("-----BEGIN NATS USER JWT-----\nnot a real jwt\n------END NATS USER JWT------\n")
+   |                                                                                                     ^^
+31 |
+32 |     with pytest.raises(CredsParseError):
+   |
+
+Found 3 errors.
+99 tests pass. Fixing the lint issues.
+
+Edit test_bus_client.py
+Added 1 line
+Edit test_creds.py
+Added 2 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check . 2>&1 | tail -20
+echo "=== mypy ==="; uv run --all-packages mypy libs adapters 2>&1 | tail -30
+
+OUT
+All checks passed!
+=== mypy ===
+Success: no issues found in 32 source files
+Clean. Now let's build the actual C6 entrypoint.
+
+Write __main__.py
+91 lines
+"""Entrypoint for the File Storage Adapter (Design.md §12 Step C6). Wires
+settings -> a real BusClient -> the write-path handler (C4) and the
+external-creation watch (C5) running concurrently — the same
+asyncio.gather-of-two-independent-pieces shape Step B7 proved with two
+separate fake adapters, this time both halves of one real adapter process.
+
+Run via: python -m file_storage_adapter
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import signal
+
+from jetcore.bus_client import BusClient
+
+from file_storage_adapter.create_watch import ExternalCreationWatch
+from file_storage_adapter.recent_writes import RecentWrites
+from file_storage_adapter.settings import FileStorageSettings
+from file_storage_adapter.write_handler import WriteCommandHandler
+
+logger = logging.getLogger(__name__)
+
+ADAPTER_TYPE = "file-storage-adapter"
+
+# How long a single fetch() poll blocks waiting for a command before the
+# write loop re-checks the shutdown event — the real bound on shutdown
+# latency (a signal only takes effect between fetch() calls, not during
+# one). Short enough to stay well inside Docker's default 10s stop grace
+# period; long enough not to hammer NATS with pointless round trips.
+FETCH_TIMEOUT_SECONDS = 2.0
+FETCH_BATCH = 10
+
+
+async def _run_write_loop(
+    handler: WriteCommandHandler, durable_name: str, shutdown: asyncio.Event
+) -> None:
+    while not shutdown.is_set():
+        await handler.run_once(durable_name, batch=FETCH_BATCH, timeout=FETCH_TIMEOUT_SECONDS)
+
+
+async def main() -> None:
+    logging.basicConfig(level=logging.INFO)
+
+    settings = FileStorageSettings()  # type: ignore[call-arg]  # pydantic-settings loads from env
+    client = await BusClient.connect_as_adapter(settings, adapter_type=ADAPTER_TYPE)
+
+    recent_writes = RecentWrites()
+    write_handler = WriteCommandHandler(
+        client, watch_dir=settings.watch_dir, recent_writes=recent_writes
+    )
+    watch = ExternalCreationWatch(
+        client, watch_dir=settings.watch_dir, recent_writes=recent_writes
+    )
+
+    # One durable name per service_id, not a random one — a real deployment
+    # restarts this same consumer across process restarts and expects to
+    # resume its own cursor, unlike tests, which want a fresh one every run
+    # (Design.md §11 Track B test rationale).
+    durable_name = f"{settings.service_id}-write-handler"
+    await write_handler.start(durable_name=durable_name)
+
+    shutdown = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _request_shutdown(sig: signal.Signals) -> None:
+        logger.info("received %s, shutting down", sig.name)
+        shutdown.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _request_shutdown, sig)
+
+    logger.info(
+        "file storage adapter started (service_id=%s, watch_dir=%s)",
+        settings.service_id,
+        settings.watch_dir,
+    )
+    try:
+        await asyncio.gather(
+            _run_write_loop(write_handler, durable_name, shutdown),
+            watch.run_forever(stop_event=shutdown),
+        )
+    finally:
+        await client.close()
+        logger.info("file storage adapter stopped")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+Let's verify this actually works — mypy, ruff, and a real supervised run against the live bus.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages mypy libs adapters 2>&1 | tail -30
+echo "=== ruff ==="; uv run ruff check . 2>&1 | tail -20
+
+OUT
+adapters/file_storage_adapter/file_storage_adapter/__main__.py:46: error: Unused "type: ignore" comment  [unused-ignore]
+Found 1 error in 1 file (checked 33 source files)
+=== ruff ===
+All checks passed!
+Good, mypy confirms it wasn't needed (it correctly understands pydantic-settings). Let's remove it.
+
+Edit __main__.py
+Modified
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages mypy libs adapters 2>&1 | tail -10
+
+OUT
+Success: no issues found in 33 source files
+Now let's actually run this against the live stack — not just trust it typechecks.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+mkdir -p /tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6-watch-dir
+ls /tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6-watch-dir
+
+OUT
+(Bash completed with no output)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+export JETCORE_SERVICE_ID=file-storage-01
+export JETCORE_NATS_URL=nats://localhost:4222
+export JETCORE_NATS_CREDS_PATH=infra/nats/operator/creds/file-storage-01.creds
+export JETCORE_WATCH_DIR=/tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6-watch-dir
+uv run --all-packages python -m file_storage_adapter > /tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6.log 2>&1 &
+echo "PID=$!"
+sleep 2
+cat /tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6.log
+
+OUT
+PID=41548
+INFO:__main__:file storage adapter started (service_id=file-storage-01, watch_dir=/tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6-watch-dir)
+ERROR:jetcore.bus_client:failed to process message on events.files.FileWriteRequested, leaving unacked for redelivery
+Traceback (most recent call last):
+  File "/home/bherring/dev/clodhopper/GregorsServiceBus/libs/jetcore/jetcore/bus_client.py", line 285, in fetch
+    received.append(await self._process(msg))
+                    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/GregorsServiceBus/libs/jetcore/jetcore/bus_client.py", line 298, in _process
+    plaintext = decrypt(ciphertext, self._encryption_keypair.private_key)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/GregorsServiceBus/libs/jetcore/jetcore/crypto.py", line 87, in decrypt
+    return bytes(pyrage.decrypt(ciphertext, [identity]))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pyrage.DecryptError: No matching keys found
+Bash
+IN
+kill %1 2>/dev/null; wait 2>/dev/null
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -3
+for bucket in service-directory service-identity; do
+  for key in $(sg docker -c "$NB kv ls $bucket" 2>&1); do
+    sg docker -c "$NB kv del $bucket '$key' -f" 2>&1 >/dev/null
+  done
+done
+echo "cleaned"
+
+OUT
+      First Sequence: 327
+       Last Sequence: 326 @ 2026-08-29 01:11:29
+    Active Consumers: 256
+cleaned
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB consumer rm EVENTS file-storage-01-write-handler -f" 2>&1 | tail -5
+
+OUT
+(Bash completed with no output)
+Now retry the entrypoint run with a clean bus.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+rm -rf /tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6-watch-dir
+mkdir -p /tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6-watch-dir
+export JETCORE_SERVICE_ID=file-storage-01
+export JETCORE_NATS_URL=nats://localhost:4222
+export JETCORE_NATS_CREDS_PATH=infra/nats/operator/creds/file-storage-01.creds
+export JETCORE_WATCH_DIR=/tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6-watch-dir
+uv run --all-packages python -m file_storage_adapter > /tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6.log 2>&1 &
+echo "PID=$!"
+sleep 2
+cat /tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6.log
+
+OUT
+PID=42806
+INFO:__main__:file storage adapter started (service_id=file-storage-01, watch_dir=/tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6-watch-dir)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages python3 -c "
+import asyncio, base64, json
+from jetcore.bus_client import BusClient
+from jetcore.config import AdapterSettings
+
+async def main():
+    settings = AdapterSettings(
+        service_id='webhook-listener-01',
+        nats_url='nats://localhost:4222',
+        nats_creds_path='infra/nats/operator/creds/webhook-listener-01.creds',
+    )
+    client = await BusClient.connect_as_adapter(settings, adapter_type='test-publisher')
+    cache = await client._cache_for('events.files.FileWriteRequested')
+    for _ in range(50):
+        if cache.current():
+            break
+        await asyncio.sleep(0.1)
+    payload = json.dumps({'path': 'hello/from-c6.txt', 'content': base64.b64encode(b'hello from a real running adapter process').decode()}).encode()
+    await client.publish('events.files.FileWriteRequested', payload, event_type='FileWriteRequested')
+    await client.close()
+    print('published')
+
+asyncio.run(main())
+"
+
+OUT
+published
+Bash
+IN
+sleep 3
+WD=/tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6-watch-dir
+find "$WD" -type f
+echo "--- content ---"
+cat "$WD/hello/from-c6.txt" 2>&1
+echo
+echo "--- log tail ---"
+tail -20 /tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6.log
+
+OUT
+/tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6-watch-dir/hello/from-c6.txt
+--- content ---
+hello from a real running adapter process
+--- log tail ---
+INFO:__main__:file storage adapter started (service_id=file-storage-01, watch_dir=/tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6-watch-dir)
+WARNING:jetcore.bus_client:publishing to events.files.FileCreateCompleted with no registered recipients yet
+INFO:watchfiles.main:2 changes detected
+Excellent — real end-to-end proof, including confirming RecentWrites suppression works in the actual running process (only one FileCreateCompleted, not two). Now let's test the external-creation path and graceful shutdown.
+
+Bash
+IN
+WD=/tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6-watch-dir
+echo "dropped from outside" > "$WD/outside-file.txt"
+sleep 3
+tail -10 /tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6.log
+
+OUT
+INFO:__main__:file storage adapter started (service_id=file-storage-01, watch_dir=/tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6-watch-dir)
+WARNING:jetcore.bus_client:publishing to events.files.FileCreateCompleted with no registered recipients yet
+INFO:watchfiles.main:2 changes detected
+INFO:watchfiles.main:1 change detected
+WARNING:jetcore.bus_client:publishing to events.files.FileCreateCompleted with no registered recipients yet
+External creation was detected and published too. Now graceful shutdown.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+PID=$(pgrep -f "file_storage_adapter" | head -1)
+echo "sending SIGTERM to $PID"
+time kill -TERM "$PID"
+for i in $(seq 1 20); do
+  if ! kill -0 "$PID" 2>/dev/null; then echo "process exited after ${i}00ms polls"; break; fi
+  sleep 0.5
+done
+kill -0 "$PID" 2>/dev/null && echo "STILL RUNNING" || echo "confirmed exited"
+tail -10 /tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6.log
+
+OUT
+sending SIGTERM to 42806
+
+real	0m0.000s
+user	0m0.000s
+sys	0m0.000s
+process exited after 400ms polls
+confirmed exited
+INFO:__main__:file storage adapter started (service_id=file-storage-01, watch_dir=/tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6-watch-dir)
+WARNING:jetcore.bus_client:publishing to events.files.FileCreateCompleted with no registered recipients yet
+INFO:watchfiles.main:2 changes detected
+INFO:watchfiles.main:1 change detected
+WARNING:jetcore.bus_client:publishing to events.files.FileCreateCompleted with no registered recipients yet
+INFO:__main__:received SIGTERM, shutting down
+INFO:__main__:file storage adapter stopped
+That manual run gave me real confidence, but for C7 I want this level of proof to be a permanent, automated test — not a one-off manual check. Let me refactor __main__.py slightly to separate the run loop from signal/env wiring, so a test can drive the real thing directly.
+
+Edit __main__.py
+Added 11 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run python3 -c "
+from nats.js.client import JetStreamContext
+print([m for m in dir(JetStreamContext) if 'consumer' in m.lower()])
+"
+
+OUT
+['add_consumer', 'consumer_info', 'consumers_info', 'delete_consumer', 'pause_consumer', 'resume_consumer']
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run python3 -c "
+import inspect
+from nats.js.client import JetStreamContext
+print(inspect.getsource(JetStreamContext.delete_consumer))
+"
+
+OUT
+    async def delete_consumer(self, stream: str, consumer: str) -> bool:
+        """
+        Delete a consumer from a given stream.
+
+        :param stream: The name of the stream from which the consumer should be deleted.
+        :param consumer: The name of the consumer to be deleted.
+        """
+        _validate_stream_name(stream)
+        _validate_consumer_name(consumer)
+        resp = await self._api_request(
+            f"{self._prefix}.CONSUMER.DELETE.{stream}.{consumer}",
+            b"",
+            timeout=self._timeout,
+        )
+        return resp["success"]
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run python3 -c "
+import nats.js.errors as e
+print([n for n in dir(e) if 'not' in n.lower() or 'error' in n.lower()])
+"
+
+OUT
+['APIError', 'BadBucketError', 'BadObjectMetaError', 'BadRequestError', 'BucketNotFoundError', 'ConsumerSequenceMismatchError', 'DigestMismatchError', 'Error', 'FetchTimeoutError', 'InvalidBucketNameError', 'InvalidKeyError', 'InvalidObjectNameError', 'KeyDeletedError', 'KeyHistoryTooLargeError', 'KeyNotFoundError', 'KeyValueError', 'KeyValueLimitMarkerTTLNotSupportedError', 'KeyWrongLastSequenceError', 'LinkIsABucketError', 'NoKeysError', 'NoStreamResponseError', 'NotFoundError', 'ObjectDeletedError', 'ObjectNotFoundError', 'ServerError', 'ServiceUnavailableError', 'TooManyStalledMsgsError', 'annotations']
+nats.js.errors.NotFoundError exists. Let's add this cleanup to the shared conftest fixture.
+
+Read conftest.py
+Edit conftest.py
+Added 15 lines
+Now write the C7 entrypoint integration test.
+
+Write test_entrypoint.py
+121 lines
+"""Integration test for the real entrypoint wiring (Design.md §12 Step
+C7) — drives file_storage_adapter.__main__.run() directly: a real
+BusClient (via connect_as_adapter, the real identity path Step C6 built,
+not the test connect() helper's ephemeral-key shortcut), a real
+watch_dir, a real shutdown handshake. C4/C5's own tests already prove
+WriteCommandHandler and ExternalCreationWatch work individually; this is
+the one test that proves they still work wired together exactly the way
+`python -m file_storage_adapter` actually runs them.
+
+This is Track C's exit criterion (Design.md §12): the adapter must work
+standing alone, driven by test code publishing FileWriteRequested
+directly, before Track D gives it a real producer.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+from pathlib import Path
+
+import file_storage_adapter.__main__ as entrypoint
+from _file_storage_helpers import (
+    CREATE_COMPLETED_SUBJECT,
+    WRITE_REQUESTED_SUBJECT,
+    connect,
+    wait_until_cache_has,
+)
+from jetcore.bus_client import BusClient
+from jetcore.config import AdapterSettings
+
+
+def _write_requested_payload(path: str, content: bytes) -> bytes:
+    return json.dumps({"path": path, "content": base64.b64encode(content).decode()}).encode()
+
+
+async def test_real_entrypoint_processes_a_command_and_shuts_down_cleanly(
+    tmp_path: Path,
+) -> None:
+    settings = AdapterSettings(
+        service_id="file-storage-01",
+        nats_url="nats://localhost:4222",
+        nats_creds_path="infra/nats/operator/creds/file-storage-01.creds",
+    )
+    fs_client = await BusClient.connect_as_adapter(settings, adapter_type="file-storage-adapter")
+    publisher = await connect("webhook-listener-01")
+    observer = await connect("test-observer-01")
+    shutdown = asyncio.Event()
+    run_task: asyncio.Task[None] | None = None
+    try:
+        completed_durable = await observer.subscribe(
+            CREATE_COMPLETED_SUBJECT, durable_name="test-entrypoint-observer"
+        )
+
+        run_task = asyncio.create_task(
+            entrypoint.run(
+                fs_client, watch_dir=tmp_path, service_id="file-storage-01", shutdown=shutdown
+            )
+        )
+        await asyncio.sleep(0.2)  # let subscribe()/awatch startup actually happen
+
+        await wait_until_cache_has(await publisher._cache_for(WRITE_REQUESTED_SUBJECT), 1)
+        await wait_until_cache_has(await fs_client._cache_for(CREATE_COMPLETED_SUBJECT), 1)
+
+        await publisher.publish(
+            WRITE_REQUESTED_SUBJECT,
+            _write_requested_payload("proof/from-real-entrypoint.txt", b"C7 end-to-end proof"),
+            event_type="FileWriteRequested",
+        )
+
+        received = await observer.fetch(completed_durable, timeout=5)
+        assert len(received) == 1
+        assert received[0].details.event_type == "FileCreateCompleted"
+        assert received[0].details.source_service_id == "file-storage-01"
+
+        written = tmp_path / "proof" / "from-real-entrypoint.txt"
+        assert written.read_bytes() == b"C7 end-to-end proof"
+
+        # Graceful shutdown: setting the event must make run() actually
+        # return within a bounded time, not hang — the other half of this
+        # step's own name.
+        shutdown.set()
+        await asyncio.wait_for(run_task, timeout=5)
+        run_task = None
+    finally:
+        if run_task is not None:
+            run_task.cancel()
+        await fs_client.close()
+        await publisher.close()
+        await observer.close()
+
+
+async def test_connect_as_adapter_identity_survives_a_simulated_restart(
+    tmp_path: Path,
+) -> None:
+    """Design.md §12 Step C6's whole point, proven at the entrypoint
+    level: two separate `run()` invocations for the same service_id (a
+    stand-in for "the adapter restarted") must sign with the same key,
+    so a recipient's trust in this serviceId doesn't need re-establishing
+    every restart. libs/jetcore/tests/test_bus_client.py already proves
+    connect_as_adapter() returns the same key twice; this confirms it
+    holds for the actual entrypoint wiring, not just the bare classmethod."""
+    settings = AdapterSettings(
+        service_id="file-storage-01",
+        nats_url="nats://localhost:4222",
+        nats_creds_path="infra/nats/operator/creds/file-storage-01.creds",
+    )
+    first = await BusClient.connect_as_adapter(settings, adapter_type="file-storage-adapter")
+    try:
+        first_key = first._signing_public_key
+    finally:
+        await first.close()
+
+    second = await BusClient.connect_as_adapter(settings, adapter_type="file-storage-adapter")
+    try:
+        second_key = second._signing_public_key
+    finally:
+        await second.close()
+
+    assert first_key == second_key
+Now let's clean up the leftover manual verification state and run the full toolchain.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -3
+sg docker -c "$NB consumer rm EVENTS file-storage-01-write-handler -f" 2>&1 | tail -3
+for bucket in service-directory service-identity; do
+  for key in $(sg docker -c "$NB kv ls $bucket" 2>&1); do
+    sg docker -c "$NB kv del $bucket '$key' -f" 2>&1 >/dev/null
+  done
+done
+echo cleaned
+
+OUT
+      First Sequence: 330
+       Last Sequence: 329 @ 2026-08-29 01:13:27
+    Active Consumers: 256
+cleaned
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q adapters/file_storage_adapter/tests/test_entrypoint.py -v 2>&1 | tail -60
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/bherring/dev/clodhopper/GregorsServiceBus
+configfile: pyproject.toml
+plugins: anyio-4.14.2, cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 2 items
+
+adapters/file_storage_adapter/tests/test_entrypoint.py ..                [100%]
+
+============================== 2 passed in 2.45s ===============================
+Both entrypoint tests pass, driving the real run() wiring. Now the full suite and toolchain.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== full pytest x2 ==="
+uv run pytest -q 2>&1 | tail -10
+uv run pytest -q 2>&1 | tail -10
+echo "=== ruff ==="; uv run ruff check . 2>&1 | tail -40
+
+OUT
+=== full pytest x2 ===
+........................................................................ [ 71%]
+.............................                                            [100%]
+101 passed in 17.04s
+E           TimeoutError
+
+.venv/lib/python3.12/site-packages/nats/js/client.py:1289: TimeoutError
+------------------------------ Captured log setup ------------------------------
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+=========================== short test summary info ============================
+FAILED adapters/file_storage_adapter/tests/test_entrypoint.py::test_real_entrypoint_processes_a_command_and_shuts_down_cleanly
+1 failed, 100 passed in 17.47s
+=== ruff ===
+All checks passed!
+A flaky failure — let's dig into it rather than just retry blindly.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+export JETCORE_SERVICE_ID=file-storage-01
+for i in 1 2 3 4 5; do
+  echo "=== run $i ==="
+  uv run pytest -q adapters/file_storage_adapter/tests/test_entrypoint.py -x 2>&1 | tail -40
+done
+
+OUT
+=== run 1 ===
+..                                                                       [100%]
+2 passed in 2.44s
+=== run 2 ===
+..                                                                       [100%]
+2 passed in 2.42s
+=== run 3 ===
+                        continue
+                    elif JetStreamContext._is_processable_msg(status, msg):
+                        needed -= 1
+                        msgs.append(msg)
+            except asyncio.TimeoutError:
+                # Ignore any timeout errors at this point since
+                # at least one message has already arrived.
+                pass
+    
+        # Stop if have some messages.
+        if len(msgs) > 0:
+            return msgs
+    
+        # Second request: lingering request that will block until new messages
+        # are made available and delivered to the client.
+        #
+        # Use the *remaining* deadline as the request's expires rather than
+        # the original full timeout.  The original expires was computed at
+        # the very start of fetch() and may be nearly exhausted by the time
+        # we reach this point (e.g. when the server's 408 for the no-wait
+        # probe arrives just before the asyncio timer fires).  Sending a
+        # lingering request with the full original expires in that situation
+        # creates an orphaned pull request that survives on the server long
+        # after the client has timed out, capturing the next published
+        # message and causing the subsequent fetch() to stall for the full
+        # timeout window.
+        deadline = JetStreamContext._time_until(timeout, start_time)
+        if deadline is not None and deadline <= 0:
+>           raise asyncio.TimeoutError
+E           TimeoutError
+
+.venv/lib/python3.12/site-packages/nats/js/client.py:1289: TimeoutError
+------------------------------ Captured log setup ------------------------------
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+=========================== short test summary info ============================
+FAILED adapters/file_storage_adapter/tests/test_entrypoint.py::test_real_entrypoint_processes_a_command_and_shuts_down_cleanly
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
+1 failed in 2.55s
+=== run 4 ===
+..                                                                       [100%]
+2 passed in 2.43s
+=== run 5 ===
+..                                                                       [100%]
+2 passed in 2.42s
+Found it — a second, different code path in sub.fetch() (nats-py's "lingering request" retry logic) raises a bare asyncio.TimeoutError, not nats.errors.TimeoutError. My earlier C4 fix only caught the latter. Since nats.errors.TimeoutError is a subclass of the builtin TimeoutError, catching the builtin covers both.
+
+Read bus_client.py (lines 226-240)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+grep -n "except nats.errors.TimeoutError" libs/jetcore/jetcore/bus_client.py
+
+OUT
+279:        except nats.errors.TimeoutError:
+Read bus_client.py (lines 256-285)
+Edit bus_client.py
+Added 12 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+for i in $(seq 1 10); do
+  echo "=== run $i ==="
+  uv run pytest -q adapters/file_storage_adapter/tests/test_entrypoint.py -x 2>&1 | tail -5
+done
+
+OUT
+=== run 1 ===
+..                                                                       [100%]
+2 passed in 2.42s
+=== run 2 ===
+..                                                                       [100%]
+2 passed in 2.44s
+=== run 3 ===
+..                                                                       [100%]
+2 passed in 2.41s
+=== run 4 ===
+..                                                                       [100%]
+2 passed in 2.40s
+=== run 5 ===
+..                                                                       [100%]
+2 passed in 2.40s
+=== run 6 ===
+..                                                                       [100%]
+2 passed in 2.41s
+=== run 7 ===
+..                                                                       [100%]
+2 passed in 2.41s
+=== run 8 ===
+..                                                                       [100%]
+2 passed in 2.42s
+=== run 9 ===
+..                                                                       [100%]
+2 passed in 2.41s
+=== run 10 ===
+..                                                                       [100%]
+2 passed in 2.44s
+10/10 clean now. Let's run the full suite several times for stability, then the rest of the toolchain.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+for i in 1 2 3 4; do
+  echo "=== full suite run $i ==="
+  uv run pytest -q 2>&1 | tail -6
+done
+
+OUT
+=== full suite run 1 ===
+........................................................................ [ 71%]
+.............................                                            [100%]
+101 passed in 16.84s
+=== full suite run 2 ===
+........................................................................ [ 71%]
+.............................                                            [100%]
+101 passed in 17.03s
+=== full suite run 3 ===
+........................................................................ [ 71%]
+.............................                                            [100%]
+101 passed in 17.11s
+=== full suite run 4 ===
+........................................................................ [ 71%]
+.............................                                            [100%]
+101 passed in 17.33s
+101 tests, 4/4 clean runs. Now the rest of the toolchain.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== ruff ==="; uv run ruff check . 2>&1 | tail -30
+echo "=== ruff format ==="; uv run ruff format --check . 2>&1 | tail -20
+echo "=== mypy ==="; uv run --all-packages mypy libs adapters 2>&1 | tail -30
+echo "=== bandit ==="; uv run bandit -q -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter 2>&1
+echo "=== pip-audit ==="; uv run pip-audit 2>&1 | tail -10
+
+OUT
+=== ruff ===
+All checks passed!
+=== ruff format ===
+42 files already formatted
+=== mypy ===
+Success: no issues found in 34 source files
+=== bandit ===
+=== pip-audit ===
+No known vulnerabilities found
+Name                 Skip Reason
+-------------------- -----------------------------------------------------------------------------------
+file-storage-adapter Dependency not found on PyPI and could not be audited: file-storage-adapter (0.1.0)
+jetcore              Dependency not found on PyPI and could not be audited: jetcore (0.1.0)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+grep -n "^\- \[x\] \*\*B6\|^\- \[x\] \*\*B4\|^  This step surfaced" Design.md
+
+OUT
+441:- [x] **B4. `config.py`** — [libs/jetcore/jetcore/config.py](libs/jetcore/jetcore/config.py): `AdapterSettings(BaseSettings)`, `JETCORE_`-prefixed env vars matching §7.6 exactly (`JETCORE_SERVICE_ID`, `JETCORE_NATS_URL`, `JETCORE_NATS_CREDS_PATH`, `JETCORE_SUBJECTS`, `JETCORE_LOG_LEVEL`), meant to be subclassed per adapter for adapter-specific settings. `nats_creds_path` uses pydantic's `FilePath` type — fails fast at config-load time if the `.creds` file (Step A3's output) doesn't exist, rather than surfacing as a confusing connection error later (B6). **Clarified `JETCORE_SUBJECTS`'s meaning**, since §7.6 only sketched the env var name: it's the subjects this instance *subscribes to* / registers itself as a recipient for (§4.5) — not publish subjects, which stay inherent to an adapter's own code (what it publishes in reply to what isn't really a runtime knob you'd change without also changing logic). **Executed and verified**: 9 new tests (29 total), clean `ruff`/`mypy`/`bandit`/`pip-audit`/`pre-commit`. One real finding from actually running it: **`pydantic-settings` attempts its own JSON-decode of list-typed fields at the settings-source layer, before any `field_validator` ever runs** — a plain comma-separated `JETCORE_SUBJECTS` value failed with a low-level `SettingsError` despite a `mode="before"` validator specifically written to handle it, because that validator never got the chance to run. Fixed with `Annotated[list[str], NoDecode]`, which defers entirely to the validator instead — confirmed by testing both comma-separated and JSON-array input afterward. (Comma-separated is supported deliberately: far more natural to hand-write in a `docker-compose.yml` `environment:` block or `.env` file than JSON, which needs careful shell-quoting to avoid breaking on special characters.)
+449:- [x] **B6. `bus_client.py`** — [libs/jetcore/jetcore/bus_client.py](libs/jetcore/jetcore/bus_client.py): `BusClient.publish()` (look up recipients via a cached `RecipientCache` → encrypt → sign → build envelope → JetStream publish) and `.subscribe()`/`.fetch()` (register + heartbeat as a recipient → durable filtered pull consumer → decrypt → verify → hand back a `ReceivedEvent` for explicit ack/nak). Ties together B2/B3/B5 into the first fully end-to-end capstone of Track B. **Executed and verified**: 5 integration tests against the real Phase 2 pair (`webhook-listener-01` → `file-storage-01`) on their real subject, run twice for stability (45 tests total), clean `ruff`/`mypy`/`bandit`/`pip-audit`/`pre-commit`.
+453:  This step surfaced the most significant findings of Track B so far — one design gap, one real security-property clarification, and one test-isolation bug, none of them visible until the pieces actually had to work together:
+502:  This step surfaced more real, non-cosmetic findings than any single step since B6 — all found by actually running things, none guessable in advance:
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+sed -n '500,510p' Design.md
+
+OUT
+  Added a new `test-observer-01` identity (A2/A3, above) since no real adapter is permitted to watch its own published output. **Executed and verified**: 5 new unit tests for `paths.py` (relative/`..`/absolute/symlink-escape/degenerate-`.` cases — a symlink escape included, not just string-based traversal), 8 for `payloads.py`, 4 live-NATS integration tests (create, update, malformed-payload-acked, path-traversal-rejected) — 86 tests total, run 3× for stability, plus clean `ruff`/`mypy`/`bandit`/`pip-audit`.
+
+  This step surfaced more real, non-cosmetic findings than any single step since B6 — all found by actually running things, none guessable in advance:
+
+  1. **A project-wide JetStream ack permission gap, present since Phase 1** — see the A3 entry above and [infra/nats/README.md](infra/nats/README.md) for the full writeup. The single most consequential finding of Track C so far: every `ack()` call in every adapter, including Phase 1's own B6/B7 tests, was silently failing server-side the whole time. Fixed in `bootstrap_auth.sh` with `nsc`'s `--allow-pub-response`.
+  2. **`BusClient.fetch()` raised `nats.errors.TimeoutError` instead of returning `[]` when nothing was pending** — the same "raises on idle rather than returning an empty/None result" shape B5 already found in `KeyWatcher.updates()`, just never noticed for `fetch()` because no Phase 1 test had ever called it expecting truly nothing to be there. A consumer's main loop (any real adapter, or a test confirming "no redelivery") shouldn't have to wrap every poll in its own try/except for this — fixed at the `jetcore.bus_client` layer so every current and future consumer benefits, not worked around locally in this one adapter.
+  3. **The Step C1 test-module-naming collision recurred twice more, in two different shapes**, confirming it's a systemic pattern, not a one-off: a second file named `_helpers.py` (a plain support module, not even a `test_*.py` file) collided with `libs/jetcore/tests/_helpers.py` the same way `test_scaffold.py` did — fixed by renaming to `_file_storage_helpers.py`, with the earlier fix's own docstring updated to admit it hadn't gone far enough. Then **`conftest.py` hit the same collision in `mypy`** (not `pytest`, which loads `conftest.py` specially per-directory and was unaffected) — but `conftest.py`'s name is fixed by pytest, so renaming wasn't an option this time; fixed instead by excluding `tests/conftest.py` files from `mypy`'s file walk in root `pyproject.toml`, `mypy`'s own documented resolution for this exact error.
+  4. **Absolute paths silently bypass a naive `root / relative` join** — `Path("/a") / "/etc/passwd"` evaluates to `Path("/etc/passwd")`, discarding `root` entirely, confirmed by testing rather than assumed from pathlib's docs. `resolve_within` rejects an absolute `relative` explicitly before ever touching the filesystem, rather than relying solely on the post-`resolve()` containment check to catch it (which also would have, just less obviously).
+- [x] **C5. External-creation watch** — [create_watch.py](adapters/file_storage_adapter/file_storage_adapter/create_watch.py) (`ExternalCreationWatch`, `wait_until_settled`) + [recent_writes.py](adapters/file_storage_adapter/file_storage_adapter/recent_writes.py) (`RecentWrites`). Watches `watch_dir` via `watchfiles.awatch()`, filters to `Change.added` on real files (a `mkdir` for a nested path also fires "added" — excluded via `path.is_file()`), publishes `FileCreateCompleted` with no `correlationId` for anything not recently written by this adapter's own write-path handler (Decision #19's narrow pull-forward).
+
+  **A real design gap, found before any code was written, not during testing**: running C4 and C5 concurrently on the same `watch_dir` means C4's own command-triggered creations would *also* trip C5's raw filesystem watch — a second, spurious, uncorrelated `FileCreateCompleted` for every ordinary write. `RecentWrites` is the fix: `WriteCommandHandler` (C4, now takes an optional `recent_writes` param) marks a path the moment it finishes writing it; `ExternalCreationWatch` skips any "added" path marked within the last few seconds. A short TTL (5s default), not a permanent record — it only needs to bridge the gap to `watchfiles`' own debounce window (confirmed via `awatch`'s signature: `debounce=1600ms` default), not track write history generally.
+Edit Design.md
+Modified
+Now let's find the C6/C7 checklist bullets to replace.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+grep -n "^\- \[ \] \*\*C6\|^\- \[ \] \*\*C7\|^\*\*Exit criteria" Design.md
+
+OUT
+515:- [ ] **C6. Entrypoint + graceful shutdown** — `__main__.py` wiring settings → `BusClient.connect()` → C4+C5 concurrently, `SIGTERM`/`SIGINT` handling so `docker compose stop`/`down` exits cleanly rather than being killed after Compose's default grace period.
+516:- [ ] **C7. Tests + verification** — integration tests against the real Phase 1 stack (same fixture style as `libs/jetcore/tests`, not mocked): round-trip write, create-vs-update detection, path-traversal rejection, external-creation detection. `ruff`/`mypy`/`bandit`/`pip-audit`/`pre-commit` clean. This is Track C's exit criteria — the adapter must work standing alone (driven by test code publishing `FileWriteRequested` directly) before Track D gives it a real producer.
+533:**Exit criteria:** Track C passes standing alone, then Track D passes standing alone, then E3+E4 both pass against the fully wired `docker-compose` stack — mirroring Phase 1's "both tracks converge, then prove it end-to-end from a clean rebuild" pattern (§11's B7 checkpoint).
+Edit Design.md
+Added 11 lines
+Now add the new §9 open item for encryption-keypair persistence.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+sed -n '/^## 9\. Open Questions Summary/,/^---/p' Design.md
+
+OUT
+## 9. Open Questions Summary
+
+Architectural questions have been resolved and folded into §2–§8 above (Decisions #1–#20). What's left is deliberately deferred, not blocking:
+
+1. **File Storage Adapter command/response schema** — exact subject names and payload shape for the `list`/`read`/`write`/`delete` commands are TBD. **Partially resolved for Phase 2**: the write path (`FileWriteRequested` → `FileCreateCompleted`/`FileWriteCompleted`) is fully specified in §12 (Decision #22), since Phase 2 needs it to build the vertical slice. `list`/`read`/`delete` remain deferred to Phase 3, unchanged.
+2. **Subject naming** — real bounded-context names are deferred by choice; `events.<context>.<EventType>` stays a placeholder pattern (`orders` as stand-in) until real domains are known. Nothing else in the design depends on the specific names chosen. Reconfirmed still deferred, not blocking.
+3. **Externally-triggered file *updates*** — Decision #19 has the File Storage Adapter detect externally-created files (→ `FileCreateCompleted`), but not externally-triggered updates to existing files. Reconfirmed as deferred to Phase 3, when the real usage pattern (how chatty the watched directory actually is) will be clearer.
+
+Item #4 (the sender-authentication gap found in Step B6) is **resolved** — see Decision #20 and §4.6. It's noted there as a v1-scoped mechanism (trusts whoever registers first for a serviceId, no revocation beyond overwrite), not a fully solved problem for all time, but it's no longer an open design question — it's a documented, implemented, tested decision.
+
+---
+Edit Design.md
+Added 1 line
+Let's do a final clean verification pass and tidy up the bus state.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -3
+sg docker -c "$NB consumer rm EVENTS file-storage-01-write-handler -f" 2>&1 | tail -3
+for bucket in service-directory service-identity; do
+  for key in $(sg docker -c "$NB kv ls $bucket" 2>&1); do
+    sg docker -c "$NB kv del $bucket '$key' -f" 2>&1 >/dev/null
+  done
+done
+echo "cleaned"
+rm -rf /tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6-watch-dir /tmp/claude-1000/-home-bherring-dev-clodhopper-GregorsServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/c6.log
+
+OUT
+      First Sequence: 500
+       Last Sequence: 499 @ 2026-08-29 01:19:26
+    Active Consumers: 364
+nats: error: consumer not found (10014)
+cleaned
+Bash
+IN
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== pytest ==="; uv run pytest -q 2>&1 | tail -8
+echo "=== ruff ==="; uv run ruff check . 2>&1 | tail -10
+echo "=== mypy ==="; uv run --all-packages mypy libs adapters 2>&1 | tail -10
+echo "=== bandit ==="; uv run bandit -q -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter 2>&1
+echo "=== pip-audit ==="; uv run pip-audit 2>&1 | tail -6
+echo "--- git status ---"
+git status --short
+
+OUT
+=== pytest ===
+........................................................................ [ 71%]
+.............................                                            [100%]
+101 passed in 17.00s
+=== ruff ===
+All checks passed!
+=== mypy ===
+Success: no issues found in 34 source files
+=== bandit ===
+=== pip-audit ===
+No known vulnerabilities found
+Name                 Skip Reason
+-------------------- -----------------------------------------------------------------------------------
+file-storage-adapter Dependency not found on PyPI and could not be audited: file-storage-adapter (0.1.0)
+jetcore              Dependency not found on PyPI and could not be audited: jetcore (0.1.0)
+--- git status ---
+ M .claude/session.log
+ M .pre-commit-config.yaml
+ M Dependencies.md
+ M Design.md
+ M README.md
+ M infra/nats/README.md
+ M infra/nats/adapter_identities.yaml
+ M infra/nats/bootstrap_auth.sh
+ M libs/jetcore/jetcore/bus_client.py
+ M libs/jetcore/jetcore/crypto.py
+ M libs/jetcore/tests/test_bus_client.py
+ M pyproject.toml
+ M uv.lock
+?? adapters/
+?? libs/jetcore/jetcore/creds.py
+?? libs/jetcore/tests/test_creds.py
+?? schemas/
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/GregorsServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -3
+for bucket in service-directory service-identity; do
+  for key in $(sg docker -c "$NB kv ls $bucket" 2>&1); do
+    sg docker -c "$NB kv del $bucket '$key' -f" 2>&1 >/dev/null
+  done
+done
+sg docker -c "docker compose -f /home/bherring/dev/clodhopper/GregorsServiceBus/docker-compose.yml ps" 2>&1
+
+OUT
+      First Sequence: 523
+       Last Sequence: 522 @ 2026-08-29 01:21:28
+    Active Consumers: 382
+NAME             IMAGE         COMMAND                  SERVICE   CREATED      STATUS       PORTS
+jetcore-nats-1   nats:2.14.5   "/nats-server -c /et…"   nats      4 days ago   Up 6 hours   0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+Track C complete — Steps C6 and C7.
+
+C6 — entrypoint + graceful shutdown. Before writing it, I resolved a real gap that had been sitting unaddressed in the shared library: nothing gave a real adapter a stable signing identity — every existing connect() (test-only) generates a fresh random keypair per call, exactly the problem B7 diagnosed for concurrent connections, just recurring across restarts instead. crypto.py's own docstring already said the intended fix ("real adapters use the nkey nsc already generated... the same keypair serves both connection auth and event signing") — it just wasn't built. Added jetcore/creds.py (parses the nkey seed straight out of a real .creds file — caught a real quirk there too: nsc's template is asymmetric, 5 dashes on BEGIN, 6 on END) and BusClient.connect_as_adapter(), now the real entrypoint's connection path.
+
+The encryption keypair is not solved the same way — still generated fresh per process start. I considered deriving it from the signing seed and rejected that (it would undermine §4.1's explicit "two independent keypairs" security rationale), and building real persistent storage for a second secret is its own design decision, not something to smuggle into an entrypoint step. Documented as a new, explicit §9 open item instead of quietly ignored.
+
+Then actually ran python -m file_storage_adapter as a real process against the live stack — published a real command from a separate process, watched it write the file and publish the completion event; dropped a file directly into watch_dir and confirmed the external-creation path fired without a duplicate; sent a real SIGTERM and confirmed clean exit in under a second. Hit the encryption-keypair limitation firsthand along the way (a stale message from an old key failed to decrypt) — good confirmation the documented tradeoff is real, not hypothetical.
+
+C7 — tests + verification. Wrote test_entrypoint.py, driving __main__.run() directly rather than re-exercising C4/C5's classes in isolation. Running the suite repeatedly turned up a second, genuinely intermittent bug in C4's own BusClient.fetch() fix: nats-py's JetStream fetch() has a second internal timeout path that raises the bare asyncio.TimeoutError rather than nats.errors.TimeoutError — so the earlier fix only caught the timeout it happened to hit first (~1-in-5 failure rate). Fixed by catching the builtin TimeoutError instead of the narrower subclass. Confirmed with 10 consecutive clean runs, not one.
+
+101 tests total (up from 94), full suite run 4× for stability, clean ruff/mypy/bandit/pip-audit. Design.md, Dependencies.md updated; bus state cleaned; jetcore-nats-1 still healthy.
+
+Track C (C1–C7) is done — the File Storage Adapter works standing alone, proven both by tests and by a real running process. Ready for Track D — the Webhook Listener whenever you'd like to continue.
+
+----------------- Track C Completed --------------------
