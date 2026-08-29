@@ -3,7 +3,7 @@
 # This root is "virtual" (tool.uv.package = false) — it's not itself an
 # installable package, just the workspace container plus shared dev tooling
 # config and the shared dev dependency group. Real packages live under
-# libs/ (jetcore) and adapters/ (populated starting Phase 3).
+# libs/ (jetcore) and adapters/ (populated starting Phase 2, Design.md §12).
 
 [project]
 name = "jet-core-service-bus"
@@ -30,6 +30,9 @@ dev = [
     "bandit>=1.8",
     "pip-audit>=2.7",
     "pre-commit>=4",
+    "jsonschema>=4.26.0",
+    "types-jsonschema>=4.26.0.20260518",
+    "types-aiofiles>=25.1.0.20260518",
 ]
 
 [tool.ruff]
@@ -39,9 +42,21 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+# conftest.py's filename is fixed by pytest (unlike test_*.py support
+# modules, it can't be renamed to dodge a duplicate-module collision — see
+# adapters/file_storage_adapter/tests/conftest.py and the sibling
+# test_file_storage_adapter_scaffold.py/_file_storage_helpers.py findings,
+# Design.md §12 Step C1/C4). mypy hits the exact "Duplicate module named
+# conftest" error once a second package's tests/ directory exists,
+# confirmed by testing; pytest itself is unaffected (it loads each
+# conftest.py as a directory-scoped plugin, not via this collision-prone
+# bare-import path). Excluded here rather than restructured — mypy's own
+# suggested resolution for this — since conftest.py content is thin
+# fixture wiring already exercised by every test run, not unverified logic.
 [tool.mypy]
 python_version = "3.12"
 strict = true
+exclude = '(^|/)tests/conftest\.py$'
 warn_unused_ignores = true
 plugins = ["pydantic.mypy"]
 

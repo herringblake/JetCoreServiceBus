@@ -17,7 +17,8 @@ import base64
 import uuid
 
 import pytest
-from _helpers import SUBJECT, connect, wait_until_cache_nonempty
+from _helpers import SUBJECT, connect, settings, wait_until_cache_nonempty
+from jetcore.bus_client import BusClient
 from jetcore.crypto import encrypt_for_recipients, generate_signing_keypair, sign
 from jetcore.envelope import EncryptionMetadata, Event, EventDetails, EventEnvelope
 
@@ -265,4 +266,49 @@ async def test_fetch_without_subscribe_raises() -> None:
         with pytest.raises(ValueError, match="call subscribe"):
             await consumer.fetch("never-subscribed-durable")
     finally:
+        await consumer.close()
+
+
+async def test_connect_as_adapter_uses_a_stable_signing_identity(durable_name: str) -> None:
+    """Design.md §12 Step C6: connect_as_adapter() must derive its signing
+    key from the .creds file's own embedded nkey every time, not generate
+    a fresh one per call — the actual fix for the class of problem Step
+    B7 found (repeated/concurrent connections invalidating each other's
+    registered identity). Two separate connections for the same
+    serviceId must agree on the same signing public key."""
+    wl_settings = settings("webhook-listener-01")
+    client_a = await BusClient.connect_as_adapter(wl_settings, adapter_type="test")
+    client_b = await BusClient.connect_as_adapter(wl_settings, adapter_type="test")
+    try:
+        assert client_a._signing_public_key == client_b._signing_public_key
+    finally:
+        await client_a.close()
+        await client_b.close()
+
+
+async def test_connect_as_adapter_signature_verifies_against_creds_derived_key(
+    durable_name: str,
+) -> None:
+    """Not just "the two public keys match each other" — the derived
+    identity must actually be the one file-storage-01 uses to enforce
+    permissions/verify signatures, proven end-to-end: publish via
+    connect_as_adapter, fetch via the ordinary test connect(), and
+    confirm the message verifies and decrypts normally."""
+    publisher = await BusClient.connect_as_adapter(
+        settings("webhook-listener-01"), adapter_type="test"
+    )
+    consumer = await _connect("file-storage-01")
+    try:
+        await consumer.subscribe(SUBJECT, durable_name=durable_name)
+        await _wait_until_cache_nonempty(await publisher._cache_for(SUBJECT))
+
+        await publisher.publish(SUBJECT, b"signed with the real creds identity", event_type="X")
+
+        received = await consumer.fetch(durable_name, timeout=3)
+
+        assert len(received) == 1
+        assert received[0].payload == b"signed with the real creds identity"
+        assert received[0].details.source_service_id == "webhook-listener-01"
+    finally:
+        await publisher.close()
         await consumer.close()

@@ -35,7 +35,15 @@ import nats
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 
 from jetcore.config import AdapterSettings
-from jetcore.crypto import EncryptionKeyPair, decrypt, encrypt_for_recipients, sign, verify
+from jetcore.creds import load_signing_keypair
+from jetcore.crypto import (
+    EncryptionKeyPair,
+    decrypt,
+    encrypt_for_recipients,
+    generate_encryption_keypair,
+    sign,
+    verify,
+)
 from jetcore.envelope import EncryptionMetadata, Event, EventDetails, EventEnvelope
 from jetcore.registry import RecipientCache, RegistryClient
 
@@ -143,6 +151,38 @@ class BusClient:
             signing_public_key=signing_public_key,
         )
 
+    @classmethod
+    async def connect_as_adapter(cls, settings: AdapterSettings, *, adapter_type: str) -> BusClient:
+        """The connection path a real adapter entrypoint should use
+        (Design.md §12 Step C6), not the lower-level `connect()` above
+        (kept as-is for tests/tooling that want full control over both
+        keypairs — every existing test still does).
+
+        Signing identity: derived from `settings.nats_creds_path`'s own
+        embedded nkey (jetcore.creds), the SAME key the connection itself
+        authenticates with — stable across restarts, unlike a freshly
+        generated one. B7 documented exactly what goes wrong when this
+        isn't stable (concurrent connections invalidating each other's
+        registered identity); a restarting adapter is the same problem
+        across time instead of across connections.
+
+        Encryption keypair: still generated fresh every call — Design.md
+        has no persistent-storage answer for this yet (§9, a new open
+        item this step added, not silently skipped). Consequence: any
+        message encrypted for this adapter and still unconsumed across a
+        restart becomes undecryptable. Low-stakes for Phase 2's
+        command/response flow (a lost FileWriteRequested is retriable by
+        its sender); worth resolving before real production use."""
+        signing = load_signing_keypair(settings.nats_creds_path)
+        encryption = generate_encryption_keypair()
+        return await cls.connect(
+            settings,
+            adapter_type=adapter_type,
+            encryption_keypair=encryption,
+            signing_seed=signing.seed,
+            signing_public_key=signing.public_key,
+        )
+
     async def close(self) -> None:
         for task in self._background_tasks:
             task.cancel()
@@ -218,12 +258,38 @@ class BusClient:
     ) -> list[ReceivedEvent]:
         """Pulls up to `batch` messages from a consumer already set up via
         `subscribe()`. A message that fails to parse/decrypt/verify is
-        logged and left unacked (redelivery), not silently dropped."""
+        logged and left unacked (redelivery), not silently dropped.
+
+        Returns an empty list if nothing is available within `timeout` —
+        not an exception. nats-py's underlying `PullSubscription.fetch()`
+        actually *raises* on an idle timeout (confirmed by testing while
+        building Design.md §12 Step C4 — no Phase 1 test had ever called
+        `fetch()` with truly nothing pending to notice this before), the
+        same "raises on idle rather than returning an empty/None result"
+        shape already documented for `KeyWatcher.updates()` in registry.py.
+        A caller polling in a loop (any real adapter's main loop, or a
+        test asserting "nothing left to redeliver") shouldn't have to
+        wrap every call in its own try/except for this.
+
+        Catches the builtin `TimeoutError`, not the narrower
+        `nats.errors.TimeoutError` the first version of this fix used —
+        confirmed by testing (a real, intermittent Step C7 test failure,
+        not found by reading docs) that nats-py's `fetch()` has a *second*
+        internal timeout path (its "lingering request" retry logic, for
+        when an initial no-wait probe returns nothing) that raises the
+        *bare* `asyncio.TimeoutError` directly rather than wrapping it in
+        `nats.errors.TimeoutError`. Since `nats.errors.TimeoutError` is
+        itself a `TimeoutError` subclass, catching the builtin covers both
+        paths instead of just the one that happened to get exercised
+        first."""
         sub = self._subscriptions.get(durable_name)
         if sub is None:
             raise ValueError(f"no consumer named {durable_name!r} — call subscribe() first")
 
-        msgs = await sub.fetch(batch=batch, timeout=timeout)
+        try:
+            msgs = await sub.fetch(batch=batch, timeout=timeout)
+        except TimeoutError:
+            return []
 
         received = []
         for msg in msgs:

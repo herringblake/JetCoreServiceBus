@@ -90,19 +90,28 @@ def decrypt(ciphertext: bytes, private_key: str) -> bytes:
 # --- Event signing (Ed25519 / nkeys, Design.md §4.1) -------------------------
 
 
+def _keypair_from_seed(seed: str) -> SigningKeyPair:
+    """Derives the public key for an existing nkey seed. Shared by
+    `generate_signing_keypair` (a fresh seed) and `jetcore.creds.
+    load_signing_keypair` (Step C6 — a seed read from a real .creds file)
+    so both agree on exactly how a seed becomes a SigningKeyPair."""
+    public_key = nkeys.from_seed(seed.encode()).public_key.decode()
+    return SigningKeyPair(seed=seed, public_key=public_key)
+
+
 def generate_signing_keypair() -> SigningKeyPair:
     """A fresh Ed25519 nkey keypair, for tests/tooling. Real adapters use
     the nkey `nsc` (Step A3) already generated for their NATS identity —
     the same keypair serves both connection auth and event signing
     (Design.md §4.1's "two separate keypairs" note is about encryption vs.
     signing keys being different purposes, not that signing needs its own
-    distinct nkey from the one used to connect)."""
+    distinct nkey from the one used to connect). See jetcore.creds
+    (Step C6) for loading that real identity instead of generating one."""
     import os
 
     raw_seed = os.urandom(32)
     seed = nkeys.encode_seed(raw_seed, nkeys.PREFIX_BYTE_USER).decode()
-    public_key = nkeys.from_seed(seed.encode()).public_key.decode()
-    return SigningKeyPair(seed=seed, public_key=public_key)
+    return _keypair_from_seed(seed)
 
 
 def _digest(plaintext: bytes) -> bytes:

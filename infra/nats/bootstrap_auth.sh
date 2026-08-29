@@ -69,6 +69,22 @@ BASELINE_PUB='$JS.API.>'
 # same as service-directory's; only the per-adapter *write* scope (own
 # namespace only, derived above) is what actually enforces least privilege.
 BASELINE_SUB='$JS.API.>,_INBOX.>,$KV.service-directory.>,$KV.service-identity.>'
+# --allow-pub-response (applied below, not a subject in the lists above):
+# JetStream's msg.ack() publishes to the delivered message's own reply-to
+# subject (nats-py's Msg.ack(), confirmed by reading its source), which is
+# a per-message subject the server generates dynamically
+# ($JS.ACK.<stream>.<consumer>...) — a static $JS.ACK.> wildcard grant
+# would work but is broader than needed. nsc's --allow-pub-response instead
+# dynamically permits exactly one reply per message actually received, the
+# purpose-built mechanism for this. **Found missing entirely** while
+# building Design.md §12 Step C4: every ack() call in every adapter
+# (including Phase 1's own B6/B7 tests) was silently failing server-side
+# — nats-py's ack() doesn't await a response, so the "permissions
+# violation" surfaced only via the connection's async error callback/log,
+# never as a raised exception on the ack() call itself. Nothing in Phase 1
+# ever tested "does a second fetch confirm the message was actually
+# consumed" specifically enough to catch it. Fixed here, retroactively
+# covering every existing identity too, not just the ones Step C4 added.
 
 mkdir -p "$STORE_DIR" "$CREDS_DIR"
 
@@ -183,7 +199,8 @@ while IFS= read -r adapter; do
 
   nsc edit user --account "$ACCOUNT_NAME" --name "$service_id" \
     --allow-pub "$all_pub" \
-    --allow-sub "$all_sub"
+    --allow-sub "$all_sub" \
+    --allow-pub-response
 
   nsc generate creds --account "$ACCOUNT_NAME" --name "$service_id" \
     >"$CREDS_DIR/$service_id.creds"
@@ -202,7 +219,8 @@ else
 fi
 
 nsc edit user --account "$ACCOUNT_NAME" --name "$ADMIN_ID" \
-  --allow-pubsub '$JS.API.>,$KV.service-directory.>,$KV.service-identity.>,_INBOX.>'
+  --allow-pubsub '$JS.API.>,$KV.service-directory.>,$KV.service-identity.>,_INBOX.>' \
+  --allow-pub-response
 
 nsc generate creds --account "$ACCOUNT_NAME" --name "$ADMIN_ID" \
   >"$CREDS_DIR/$ADMIN_ID.creds"

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jetcoreservicebus.internal/schemas/events.files.FileCreateCompleted.v1.json",
+  "title": "FileCreateCompleted",
+  "description": "Result: a file was newly created under the File Storage Adapter's watch_dir (Design.md Decision #19). Published two ways: (1) in reply to a FileWriteRequested whose path didn't already exist — eventDetails.correlationId is set to that request's; (2) with no preceding command at all, when the adapter's external-creation watch (Design.md §12 Step C5) notices a file appear from an outside process — eventDetails.correlationId is absent in that case.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "sizeBytes", "occurredAt"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "File path, relative to watch_dir, that was created."
+    },
+    "sizeBytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Size of the file's content in bytes, as written."
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp (RFC 3339 / ISO 8601) the creation completed."
+    }
+  }
+}

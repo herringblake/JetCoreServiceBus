@@ -26,8 +26,8 @@ uv sync --all-packages
 uv run --all-packages pytest            # tests
 uv run ruff check .                     # lint
 uv run ruff format .                    # format
-uv run --all-packages mypy libs         # type-check (adapters/ added here once Phase 3 creates it)
-uv run bandit -r libs/jetcore/jetcore # security static analysis
+uv run --all-packages mypy libs adapters   # type-check
+uv run bandit -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter # security static analysis (source only — add each new adapter's package dir here as it's scaffolded)
 uv run pip-audit                        # dependency vulnerability scan
 ```
 
@@ -43,4 +43,4 @@ To run these automatically on every commit: `uv run pre-commit install`. Not don
 
 ## Repository layout
 
-See [Design.md §7.1](Design.md#71-repository-layout) for the full intended layout. In short: `libs/jetcore/` is the shared library every adapter depends on; `adapters/` (populated starting Phase 3) holds one package per adapter instance; `infra/` holds infrastructure config and bootstrap scripts (see [infra/nats/README.md](infra/nats/README.md) for the NATS setup, which is further along than the Python side as of this writing).
+See [Design.md §7.1](Design.md#71-repository-layout) for the full intended layout. In short: `libs/jetcore/` is the shared library every adapter depends on; `adapters/` (populated starting Phase 2, Design.md §12) holds one package per adapter instance; `infra/` holds infrastructure config and bootstrap scripts (see [infra/nats/README.md](infra/nats/README.md) for the NATS setup, which is further along than the Python side as of this writing).

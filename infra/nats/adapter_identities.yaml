@@ -136,3 +136,36 @@ adapters:
                                          # input subject below, on purpose.
       subscribe:
         - events.orders.OrderCreated    # write path input
+
+  # --- Test/CI tooling identities — NOT adapters, never built as one ---
+  #     Real adapters deliberately don't subscribe to their own published
+  #     result events (see e.g. the DB Adapter note above) — nothing in
+  #     Phase 2 yet consumes FileCreateCompleted/FileWriteCompleted, so an
+  #     integration test that wants to confirm one was actually published
+  #     (Design.md §12 Step C4/C7) has no adapter identity that's allowed
+  #     to. This identity exists purely to give test suites a legitimate,
+  #     narrowly-scoped way to observe an adapter's real published output
+  #     on the real bus, the same way jetcore-admin exists for
+  #     provisioning rather than as an adapter (Step A3/A5).
+
+  - serviceId: test-observer-01
+    adapterType: test-observer
+    description: >
+      Read-only observer used by integration tests to confirm an adapter's
+      published output actually appears on the bus with the expected
+      metadata (Design.md §12 Step C4 onward). Subscribes to result
+      subjects only — never publishes, never triggers real adapter
+      behavior. Extend its subscribe list as new adapters' tests need to
+      observe new result subjects.
+    permissions:
+      publish: []
+      subscribe:
+        - events.files.FileWriteRequested    # lets a test independently
+                                              # capture a request's real
+                                              # eventId, to confirm a
+                                              # completion event's
+                                              # correlationId actually
+                                              # references it (not just
+                                              # that *some* value is set)
+        - events.files.FileCreateCompleted
+        - events.files.FileWriteCompleted

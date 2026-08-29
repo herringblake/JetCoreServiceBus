@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jetcoreservicebus.internal/schemas/events.files.FileWriteRequested.v1.json",
+  "title": "FileWriteRequested",
+  "description": "Command: write a file under the File Storage Adapter's watch_dir, auto-creating it if it doesn't exist (Design.md Decision #19, §8, §12). This is the logical, pre-encryption shape of eventPayload — the wire envelope wraps this per §5. Published by the Webhook Listener (Decision #22) or any other adapter that needs a file written.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "content"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "File path, relative to the File Storage Adapter's watch_dir. Must resolve to a location inside watch_dir — absolute paths, '..' traversal, and symlink escapes are rejected by the adapter (Design.md §12), not by this schema."
+    },
+    "content": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "Raw file bytes, base64-encoded. Kept opaque/binary-safe rather than assuming text, since this command has no real external source shaping its contents yet (Decision #22)."
+    }
+  }
+}

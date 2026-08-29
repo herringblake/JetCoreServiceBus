@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jetcoreservicebus.internal/schemas/events.files.FileWriteCompleted.v1.json",
+  "title": "FileWriteCompleted",
+  "description": "Result: an existing file under the File Storage Adapter's watch_dir was updated (Design.md Decision #19) — always in reply to a FileWriteRequested whose path already existed. eventDetails.correlationId is set to that request's eventId. Unlike FileCreateCompleted, this is never published outside the command flow — there's no 'externally-triggered update' detection in v1 (Design.md §9, deferred).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "sizeBytes", "occurredAt"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "File path, relative to watch_dir, that was updated."
+    },
+    "sizeBytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Size of the file's content in bytes, after the write."
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp (RFC 3339 / ISO 8601) the write completed."
+    }
+  }
+}
