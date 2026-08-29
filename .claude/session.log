@@ -16063,3 +16063,2066 @@ C7 — tests + verification. Wrote test_entrypoint.py, driving __main__.run() di
 Track C (C1–C7) is done — the File Storage Adapter works standing alone, proven both by tests and by a real running process. Ready for Track D — the Webhook Listener whenever you'd like to continue.
 
 ----------------- Track C Completed --------------------
+
+Proceed to all steps of Track D
+Good — the rename carried over cleanly. Let me do a quick sanity check from the new path before starting Track D.
+
+Bash
+IN
+pwd
+echo "---"
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sg docker -c "docker compose ps" 2>&1
+echo "--- git status ---"
+git status --short | head -20
+echo "--- quick test sanity check ---"
+uv run pytest -q 2>&1 | tail -8
+
+OUT
+/home/bherring/dev/clodhopper/JetCoreServiceBus
+---
+NAME             IMAGE         COMMAND                  SERVICE   CREATED      STATUS       PORTS
+jetcore-nats-1   nats:2.14.5   "/nats-server -c /et…"   nats      4 days ago   Up 7 hours   0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+--- git status ---
+--- quick test sanity check ---
+error: Failed to spawn: `pytest`
+  Caused by: No such file or directory (os error 2)
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+cat .venv/pyvenv.cfg 2>/dev/null | head -5
+echo "---"
+head -1 .venv/bin/pytest 2>/dev/null
+
+OUT
+home = /usr/bin
+implementation = CPython
+uv = 0.12.5
+version_info = 3.12.3
+include-system-site-packages = false
+---
+#!/home/bherring/dev/clodhopper/GregorsServiceBus/.venv/bin/python
+Confirmed — the venv's console-script shebangs are hardcoded to the old absolute path. Let's resync to repair it.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv sync --all-packages 2>&1 | tail -20
+
+OUT
+Resolved 78 packages in 1ms
+   Building file-storage-adapter @ file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/file_storage_adapter
+   Building jetcore @ file:///home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore
+      Built jetcore @ file:///home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore
+      Built file-storage-adapter @ file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/file_storage_adapter
+Prepared 2 packages in 500ms
+Uninstalled 2 packages in 1ms
+Installed 2 packages in 0.85ms
+ - file-storage-adapter==0.1.0 (from file:///home/bherring/dev/clodhopper/GregorsServiceBus/adapters/file_storage_adapter)
+ + file-storage-adapter==0.1.0 (from file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/file_storage_adapter)
+ - jetcore==0.1.0 (from file:///home/bherring/dev/clodhopper/GregorsServiceBus/libs/jetcore)
+ + jetcore==0.1.0 (from file:///home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore)
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+head -1 .venv/bin/pytest
+uv run pytest -q 2>&1 | tail -10
+
+OUT
+#!/home/bherring/dev/clodhopper/GregorsServiceBus/.venv/bin/python
+error: Failed to spawn: `pytest`
+  Caused by: No such file or directory (os error 2)
+A full resync didn't touch the already-installed console scripts. Cleanest fix: wipe the venv and recreate it fresh.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+rm -rf .venv
+uv sync --all-packages 2>&1 | tail -20
+
+OUT
+ + python-discovery==1.5.3
+ + python-dotenv==1.2.3
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + requests==2.34.2
+ + rich==15.0.0
+ + rpds-py==2026.6.3
+ + ruff==0.16.4
+ + sortedcontainers==2.4.0
+ + stevedore==5.9.1
+ + tomli==2.4.1
+ + tomli-w==1.2.0
+ + types-aiofiles==25.1.0.20260518
+ + types-jsonschema==4.26.0.20260518
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + urllib3==2.7.0
+ + uuid6==2025.0.1
+ + virtualenv==21.7.4
+ + watchfiles==1.2.0
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+head -1 .venv/bin/pytest
+uv run pytest -q 2>&1 | tail -10
+
+OUT
+#!/home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/bin/python
+........................................................................ [ 71%]
+.............................                                            [100%]
+101 passed in 14.71s
+Let's confirm nothing else in the repo has stale absolute paths from the old directory name.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -rl "GregorsServiceBus\|GregorServiceBus" . --exclude-dir=.git --exclude-dir=.venv --exclude-dir=__pycache__ 2>/dev/null
+
+OUT
+.claude/session.log
+Good — only the auto-generated session log references the old name; everything else was already path-independent by design. Let me add a quick README note about the venv gotcha since it's a real, reusable finding, then start Track D.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "## Setting up the Python workspace" README.md
+
+OUT
+15:## Setting up the Python workspace
+Read README.md (lines 16-25)
+Edit README.md
+Added 2 lines
+Now let's proceed to Track D. Let me re-read the exact plan and parameters.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '/### Track D/,/### Track E/p' Design.md
+
+OUT
+### Track D — Webhook Listener
+
+- [ ] **D1. Package scaffold** — `adapters/webhook_listener/pyproject.toml` (`jetcore` + `fastapi` + `uvicorn` per §7.2), package dir, `tests/`, `Dockerfile`.
+- [ ] **D2. `settings.py`** — `WebhookListenerSettings(AdapterSettings)` adding the shared-secret config (Decision #21) and the HTTP bind port.
+- [ ] **D3. HTTP endpoint** — `POST /webhooks/{path:path}` (Decision #22): verify `X-Webhook-Secret`, reject with `401` on mismatch/missing before touching the bus at all, read the raw body, base64-encode into `{"path": ..., "content": ...}`, publish `events.files.FileWriteRequested` via `BusClient` (fire-and-forget per the manifest's own description — respond `202 Accepted` once published, not once processed). A `GET /healthz` for Compose/manual liveness checks, since — per A6/A7's finding — not every image in this stack ships a usable shell/HTTP client for that; a Python-native ASGI app can trivially serve its own.
+- [ ] **D4. Entrypoint** — `uvicorn` app factory wired to settings/`BusClient` lifecycle (connect on startup, close on shutdown — FastAPI lifespan, not a global).
+- [ ] **D5. Tests + verification** — `httpx`-based tests against the running app (FastAPI's ASGI test transport) for the HTTP-facing behavior (secret rejected/accepted, body→payload mapping, `202`/`401` codes), plus one live-bus integration test confirming a real `POST` results in a real `FileWriteRequested` landing on the stream. `ruff`/`mypy`/`bandit`/`pip-audit`/`pre-commit` clean.
+
+### Track E — Integration
+D1 — Package scaffold, applying what Track C already taught us (unique test-file naming, defer the Dockerfile to Track E).
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+mkdir -p adapters/webhook_listener/webhook_listener adapters/webhook_listener/tests
+
+OUT
+(Bash completed with no output)
+Write pyproject.toml
+27 lines
+# webhook_listener — inbound HTTP webhook receiver (Design.md §8, §12
+# Step D1). Converts an accepted webhook into a FileWriteRequested
+# command and publishes it (Decision #22) — fire-and-forget from the
+# caller's perspective, no reply subject.
+#
+# Dependencies added incrementally as each module (Design.md §12 Track D)
+# is actually built, same discipline Track C followed. `jetcore` is the
+# one dependency every adapter needs from the start.
+
+[project]
+name = "webhook-listener"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "jetcore",
+]
+
+[tool.uv.sources]
+jetcore = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["webhook_listener"]
+Write __init__.py
+10 lines
+"""webhook_listener — inbound HTTP webhook receiver (Design.md §8, §12
+Track D).
+
+Step D1 scaffold. Real modules (settings, HTTP endpoint, entrypoint) land
+in Steps D2-D4 — this package is intentionally empty of application logic
+until then.
+"""
+
+__version__ = "0.1.0"
+Write test_webhook_listener_scaffold.py
+14 lines
+"""Step D1 scaffold smoke test — proves the package installs and the
+pytest/ruff/mypy wiring actually works, before any real logic exists.
+Uniquely named (not test_scaffold.py): a bare-filename collision across
+workspace members is a real, confirmed pytest/mypy failure — see Step
+C1's finding in Design.md §12 and
+adapters/file_storage_adapter/tests/test_file_storage_adapter_scaffold.py.
+"""
+
+import webhook_listener
+
+
+def test_package_imports_and_has_version() -> None:
+    assert webhook_listener.__version__ == "0.1.0"
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv sync --all-packages 2>&1 | tail -10
+echo "=== pytest ==="; uv run pytest -q 2>&1 | tail -10
+echo "=== ruff ==="; uv run ruff check . 2>&1 | tail -10
+echo "=== mypy ==="; uv run --all-packages mypy libs adapters 2>&1 | tail -30
+
+OUT
+Resolved 79 packages in 397ms
+   Building webhook-listener @ file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_listener
+      Built webhook-listener @ file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_listener
+Prepared 1 package in 265ms
+Installed 1 package in 1ms
+ + webhook-listener==0.1.0 (from file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_listener)
+=== pytest ===
+........................................................................ [ 70%]
+..............................                                           [100%]
+102 passed in 14.55s
+=== ruff ===
+All checks passed!
+=== mypy ===
+Success: no issues found in 36 source files
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run bandit -q -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter adapters/webhook_listener/webhook_listener 2>&1
+echo "=== pip-audit ==="; uv run pip-audit 2>&1 | tail -10
+
+OUT
+=== pip-audit ===
+No known vulnerabilities found
+Name                 Skip Reason
+-------------------- -----------------------------------------------------------------------------------
+file-storage-adapter Dependency not found on PyPI and could not be audited: file-storage-adapter (0.1.0)
+jetcore              Dependency not found on PyPI and could not be audited: jetcore (0.1.0)
+webhook-listener     Dependency not found on PyPI and could not be audited: webhook-listener (0.1.0)
+Now D2 — settings.py.
+
+Write settings.py
+34 lines
+"""Webhook Listener configuration (Design.md §12 Step D2). Extends
+jetcore's AdapterSettings with the two settings this adapter needs beyond
+the shared baseline, the same subclassing pattern
+adapters/file_storage_adapter/file_storage_adapter/settings.py already
+uses for real (Step C2).
+
+Field <-> env var mapping (still JETCORE_-prefixed, per jetcore.config):
+  webhook_secret   JETCORE_WEBHOOK_SECRET   — the shared secret an inbound
+                                               request's X-Webhook-Secret
+                                               header must match
+                                               (Decision #21). A generic
+                                               placeholder mechanism — no
+                                               real webhook source is
+                                               integrated yet (Design.md
+                                               §8), so there's no
+                                               source-specific scheme
+                                               (HMAC signature header,
+                                               etc.) to build against.
+  http_port        JETCORE_HTTP_PORT        — the port the ASGI app binds
+                                               (Design.md §12 parameter
+                                               table: 8080).
+"""
+
+from __future__ import annotations
+
+from pydantic import SecretStr
+
+from jetcore.config import AdapterSettings
+
+
+class WebhookListenerSettings(AdapterSettings):
+    webhook_secret: SecretStr
+    http_port: int = 8080
+Write test_settings.py
+66 lines
+"""Tests for settings.py (Design.md §12 Step D2)."""
+
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+from webhook_listener.settings import WebhookListenerSettings
+
+
+@pytest.fixture
+def creds_file(tmp_path: Path) -> Path:
+    path = tmp_path / "test.creds"
+    path.write_text("not a real creds file, just needs to exist")
+    return path
+
+
+def _env(monkeypatch: pytest.MonkeyPatch, creds_file: Path, **extra: str) -> None:
+    monkeypatch.setenv("JETCORE_SERVICE_ID", "webhook-listener-01")
+    monkeypatch.setenv("JETCORE_NATS_CREDS_PATH", str(creds_file))
+    for key, value in extra.items():
+        monkeypatch.setenv(key, value)
+
+
+def test_loads_webhook_secret_from_env(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
+    _env(monkeypatch, creds_file, JETCORE_WEBHOOK_SECRET="s3cr3t")
+
+    settings = WebhookListenerSettings(_env_file=None)
+
+    assert settings.webhook_secret.get_secret_value() == "s3cr3t"
+    assert settings.service_id == "webhook-listener-01"  # inherited field still works
+
+
+def test_http_port_defaults_to_8080(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
+    _env(monkeypatch, creds_file, JETCORE_WEBHOOK_SECRET="s3cr3t")
+
+    settings = WebhookListenerSettings(_env_file=None)
+
+    assert settings.http_port == 8080
+
+
+def test_http_port_is_overridable(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
+    _env(monkeypatch, creds_file, JETCORE_WEBHOOK_SECRET="s3cr3t", JETCORE_HTTP_PORT="9000")
+
+    settings = WebhookListenerSettings(_env_file=None)
+
+    assert settings.http_port == 9000
+
+
+def test_missing_webhook_secret_raises(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
+    monkeypatch.setenv("JETCORE_SERVICE_ID", "webhook-listener-01")
+    monkeypatch.setenv("JETCORE_NATS_CREDS_PATH", str(creds_file))
+
+    with pytest.raises(ValidationError):
+        WebhookListenerSettings(_env_file=None)
+
+
+def test_webhook_secret_is_masked_in_repr(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
+    """SecretStr's whole point — a secret shouldn't leak into logs via an
+    incidental repr()/str() of the settings object."""
+    _env(monkeypatch, creds_file, JETCORE_WEBHOOK_SECRET="s3cr3t")
+
+    settings = WebhookListenerSettings(_env_file=None)
+
+    assert "s3cr3t" not in repr(settings)
+    assert "s3cr3t" not in str(settings.webhook_secret)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv sync --all-packages 2>&1 | tail -5
+uv run pytest -q adapters/webhook_listener 2>&1 | tail -30
+
+OUT
+Resolved 79 packages in 1ms
+Checked 77 packages in 0.97ms
+......                                                                   [100%]
+6 passed in 0.10s
+All 6 pass. Now ruff/mypy for D2.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check . 2>&1 | tail -20
+uv run --all-packages mypy libs adapters 2>&1 | tail -30
+
+OUT
+22 |   """
+23 |
+24 | / from __future__ import annotations
+25 | |
+26 | | from pydantic import SecretStr
+27 | |
+28 | | from jetcore.config import AdapterSettings
+   | |__________________________________________^
+help: Organize imports
+   |
+25 |
+   - from pydantic import SecretStr
+   -
+26 | from jetcore.config import AdapterSettings
+27 + from pydantic import SecretStr
+28 |
+   |
+
+Found 2 errors.
+[*] 1 fixable with the `--fix` option.
+adapters/webhook_listener/tests/test_settings.py: error: Duplicate module named "test_settings" (also at "adapters/file_storage_adapter/tests/test_settings.py")
+adapters/webhook_listener/tests/test_settings.py: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#mapping-file-paths-to-modules for more info
+adapters/webhook_listener/tests/test_settings.py: note: Common resolutions include:
+adapters/webhook_listener/tests/test_settings.py: note:     a) using `--exclude` to avoid checking one of them,
+adapters/webhook_listener/tests/test_settings.py: note:     b) adding `__init__.py` somewhere,
+adapters/webhook_listener/tests/test_settings.py: note:     c) using `--explicit-package-bases` or adjusting `MYPYPATH`
+Found 1 error in 1 file (errors prevented further checking)
+Exact same collision pattern as C1, now for test_settings.py. Renaming to stay consistent with the established convention.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+mv adapters/webhook_listener/tests/test_settings.py adapters/webhook_listener/tests/test_webhook_listener_settings.py
+
+OUT
+(Bash completed with no output)
+Edit test_webhook_listener_settings.py
+Added 7 lines
+Now fix the import order and re-check.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check --fix . 2>&1 | tail -20
+
+OUT
+E501 Line too long (101 > 100)
+  --> adapters/webhook_listener/tests/test_webhook_listener_settings.py:64:101
+   |
+64 | def test_webhook_secret_is_masked_in_repr(monkeypatch: pytest.MonkeyPatch, creds_file: Path) -> None:
+   |                                                                                                     ^
+65 |     """SecretStr's whole point — a secret shouldn't leak into logs via an
+66 |     incidental repr()/str() of the settings object."""
+   |
+
+Found 2 errors (1 fixed, 1 remaining).
+[This command modified 1 file you've previously read: adapters/webhook_listener/webhook_listener/settings.py. Call Read before editing.]
+Edit test_webhook_listener_settings.py
+Added 2 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check . 2>&1 | tail -10
+uv run --all-packages mypy libs adapters 2>&1 | tail -20
+uv run pytest -q 2>&1 | tail -10
+
+OUT
+All checks passed!
+Success: no issues found in 38 source files
+........................................................................ [ 67%]
+...................................                                      [100%]
+107 passed in 14.90s
+Let me update Design.md for D1 and D2 before continuing.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^\- \[ \] \*\*D1\|^\- \[ \] \*\*D2" Design.md
+
+OUT
+532:- [ ] **D1. Package scaffold** — `adapters/webhook_listener/pyproject.toml` (`jetcore` + `fastapi` + `uvicorn` per §7.2), package dir, `tests/`, `Dockerfile`.
+533:- [ ] **D2. `settings.py`** — `WebhookListenerSettings(AdapterSettings)` adding the shared-secret config (Decision #21) and the HTTP bind port.
+Edit Design.md
+Modified
+Now D3 — the HTTP endpoint. Adding fastapi as a real dependency and httpx as a shared dev dependency (for FastAPI's test client, needed by every future HTTP-based adapter's tests too).
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv add --package webhook-listener fastapi 2>&1 | tail -15
+uv add --dev httpx 2>&1 | tail -15
+
+OUT
+claude-sonnet-5[1m] is temporarily unavailable (timed out), so auto mode cannot determine the safety of Bash right now. Wait a moment and then try this action again. If it keeps failing, continue with other tasks that don't require this action and come back to it later. Note: reading files, searching code, and other read-only operations do not require the classifier and can still be used.
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv add --package webhook-listener fastapi 2>&1 | tail -15
+uv add --dev httpx 2>&1 | tail -15
+
+OUT
+Resolved 82 packages in 119ms
+   Building webhook-listener @ file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_listener
+      Built webhook-listener @ file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_listener
+Prepared 1 package in 269ms
+Uninstalled 1 package in 0.32ms
+Installed 4 packages in 8ms
+ + annotated-doc==0.0.5
+ + fastapi==0.141.1
+ + starlette==1.6.0
+ ~ webhook-listener==0.1.0 (from file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_listener)
+Resolved 85 packages in 256ms
+Installed 3 packages in 6ms
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpx==0.28.1
+Good, both added. Now write app.py.
+
+Write app.py
+91 lines
+"""The Webhook Listener's HTTP surface (Design.md §8, §12 Step D3).
+
+`POST /webhooks/{path:path}` (Decision #22): verifies `X-Webhook-Secret`
+before touching the bus at all, maps the URL path segment + raw body into
+a FileWriteRequested command, publishes it fire-and-forget, and responds
+`202 Accepted` once *published* — not once the File Storage Adapter has
+actually processed it (Design.md §12's parameter table; no reply subject
+exists for this, per the manifest's own description of
+webhook-listener-01). Path-traversal validation is deliberately NOT
+duplicated here — that's the File Storage Adapter's job (`resolve_within`,
+Step C4); this adapter stays a thin HTTP-to-command translator.
+
+`GET /healthz` exists because not every image in this stack ships a
+usable shell/HTTP client for a Compose-native healthcheck (A6/A7's
+finding) — a Python-native ASGI app can trivially serve its own.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import logging
+import secrets
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, Request, Response
+
+from jetcore.bus_client import BusClient
+from webhook_listener.settings import WebhookListenerSettings
+
+logger = logging.getLogger(__name__)
+
+WRITE_REQUESTED_SUBJECT = "events.files.FileWriteRequested"
+ADAPTER_TYPE = "webhook-listener"
+
+
+def create_app(settings: WebhookListenerSettings, *, bus_client: BusClient | None = None) -> FastAPI:
+    """Builds the ASGI app.
+
+    `bus_client`, when given, is used as-is, and the lifespan below skips
+    connecting/closing one of its own — Step D3's tests inject a real
+    test-connected client this way, without going through the production
+    `connect_as_adapter()` path. The real entrypoint (Step D4) leaves this
+    unset, so the lifespan owns the connection's whole lifecycle (connect
+    on startup, close on shutdown — FastAPI's `lifespan`, not a module-
+    global, so nothing is connected before the app is actually serving)."""
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if bus_client is not None:
+            app.state.bus_client = bus_client
+            yield
+            return
+        client = await BusClient.connect_as_adapter(settings, adapter_type=ADAPTER_TYPE)
+        app.state.bus_client = client
+        try:
+            yield
+        finally:
+            await client.close()
+
+    app = FastAPI(lifespan=lifespan)
+
+    @app.get("/healthz")
+    async def healthz() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.post("/webhooks/{path:path}", status_code=202)
+    async def receive_webhook(path: str, request: Request) -> Response:
+        header_secret = request.headers.get("X-Webhook-Secret")
+        expected_secret = settings.webhook_secret.get_secret_value()
+        # secrets.compare_digest: constant-time comparison, not `==` — the
+        # whole point of checking a secret at all (Decision #21).
+        if header_secret is None or not secrets.compare_digest(header_secret, expected_secret):
+            raise HTTPException(status_code=401, detail="missing or invalid X-Webhook-Secret")
+
+        if not path:
+            raise HTTPException(status_code=400, detail="a target file path is required")
+
+        body = await request.body()
+        payload = json.dumps(
+            {"path": path, "content": base64.b64encode(body).decode()}
+        ).encode()
+
+        client: BusClient = request.app.state.bus_client
+        await client.publish(WRITE_REQUESTED_SUBJECT, payload, event_type="FileWriteRequested")
+
+        return Response(status_code=202)
+
+    return app
+Write test_webhook_listener_app.py
+143 lines
+"""Tests for app.py (Design.md §12 Step D3) — HTTP-facing behavior only,
+against a FakeBusClient, no live NATS needed. The one test that needs a
+real bus (confirming a real POST results in a real FileWriteRequested on
+the stream) is Step D5's job, not duplicated here.
+
+Named test_webhook_listener_app.py, not test_app.py: proactively unique,
+per the naming-collision lesson learned repeatedly in Track C (Design.md
+§12 Step C1) — a future FastAPI-based adapter (e.g. the REST API Service,
+Phase 3) would very plausibly also want a module named app.py/test_app.py.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+
+import pytest
+from fastapi.testclient import TestClient
+from webhook_listener.app import create_app
+from webhook_listener.settings import WebhookListenerSettings
+
+from jetcore.bus_client import BusClient
+
+WEBHOOK_SECRET = "test-secret-value"
+
+
+class FakeBusClient(BusClient):
+    """A publish-recording stand-in — subclasses BusClient (not just
+    duck-typed) so mypy --strict accepts it wherever a real BusClient is
+    expected, without calling the real __init__ (which needs a live
+    connection this fake never makes)."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, bytes, str]] = []
+
+    async def publish(
+        self,
+        subject: str,
+        payload: bytes,
+        *,
+        event_type: str,
+        event_schema_version: str = "1.0.0",
+        correlation_id: str | None = None,
+    ) -> None:
+        self.published.append((subject, payload, event_type))
+
+
+@pytest.fixture
+def fake_bus() -> FakeBusClient:
+    return FakeBusClient()
+
+
+@pytest.fixture
+def client(fake_bus: FakeBusClient) -> TestClient:
+    settings = WebhookListenerSettings(
+        service_id="webhook-listener-01",
+        nats_creds_path="infra/nats/operator/creds/webhook-listener-01.creds",
+        webhook_secret=WEBHOOK_SECRET,  # type: ignore[arg-type]
+    )
+    app = create_app(settings, bus_client=fake_bus)
+    return TestClient(app)
+
+
+def test_healthz_returns_ok(client: TestClient) -> None:
+    response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_valid_secret_publishes_and_returns_202(
+    client: TestClient, fake_bus: FakeBusClient
+) -> None:
+    response = client.post(
+        "/webhooks/notes/todo.txt",
+        content=b"hello from a webhook",
+        headers={"X-Webhook-Secret": WEBHOOK_SECRET},
+    )
+
+    assert response.status_code == 202
+    assert len(fake_bus.published) == 1
+    subject, payload, event_type = fake_bus.published[0]
+    assert subject == "events.files.FileWriteRequested"
+    assert event_type == "FileWriteRequested"
+    data = json.loads(payload)
+    assert data["path"] == "notes/todo.txt"
+    assert base64.b64decode(data["content"]) == b"hello from a webhook"
+
+
+def test_missing_secret_header_is_rejected(client: TestClient, fake_bus: FakeBusClient) -> None:
+    response = client.post("/webhooks/notes/todo.txt", content=b"hello")
+
+    assert response.status_code == 401
+    assert fake_bus.published == []
+
+
+def test_wrong_secret_is_rejected(client: TestClient, fake_bus: FakeBusClient) -> None:
+    response = client.post(
+        "/webhooks/notes/todo.txt",
+        content=b"hello",
+        headers={"X-Webhook-Secret": "not-the-right-secret"},
+    )
+
+    assert response.status_code == 401
+    assert fake_bus.published == []
+
+
+def test_empty_path_is_rejected(client: TestClient, fake_bus: FakeBusClient) -> None:
+    response = client.post(
+        "/webhooks/", content=b"hello", headers={"X-Webhook-Secret": WEBHOOK_SECRET}
+    )
+
+    assert response.status_code in (400, 404)  # routing itself may 404 on an empty {path:path}
+    assert fake_bus.published == []
+
+
+def test_nested_path_is_preserved_verbatim(client: TestClient, fake_bus: FakeBusClient) -> None:
+    response = client.post(
+        "/webhooks/a/b/c/deep.txt",
+        content=b"nested",
+        headers={"X-Webhook-Secret": WEBHOOK_SECRET},
+    )
+
+    assert response.status_code == 202
+    data = json.loads(fake_bus.published[0][1])
+    assert data["path"] == "a/b/c/deep.txt"
+
+
+def test_binary_body_round_trips_through_base64(
+    client: TestClient, fake_bus: FakeBusClient
+) -> None:
+    binary_body = bytes(range(256))
+
+    response = client.post(
+        "/webhooks/binary.dat",
+        content=binary_body,
+        headers={"X-Webhook-Secret": WEBHOOK_SECRET},
+    )
+
+    assert response.status_code == 202
+    data = json.loads(fake_bus.published[0][1])
+    assert base64.b64decode(data["content"]) == binary_body
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv sync --all-packages 2>&1 | tail -5
+uv run pytest -q adapters/webhook_listener -v 2>&1 | tail -60
+
+OUT
+Resolved 85 packages in 1ms
+Checked 83 packages in 1ms
+.venv/lib/python3.12/site-packages/starlette/middleware/errors.py:164: in __call__
+    await self.app(scope, receive, _send)
+.venv/lib/python3.12/site-packages/starlette/middleware/exceptions.py:63: in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+.venv/lib/python3.12/site-packages/starlette/_exception_handler.py:53: in wrapped_app
+    raise exc
+.venv/lib/python3.12/site-packages/starlette/_exception_handler.py:42: in wrapped_app
+    await app(scope, receive, sender)
+.venv/lib/python3.12/site-packages/fastapi/middleware/asyncexitstack.py:18: in __call__
+    await self.app(scope, receive, send)
+.venv/lib/python3.12/site-packages/starlette/routing.py:670: in __call__
+    await self.middleware_stack(scope, receive, send)
+.venv/lib/python3.12/site-packages/fastapi/routing.py:2734: in app
+    await route.handle(scope, receive, send)
+.venv/lib/python3.12/site-packages/fastapi/routing.py:1281: in handle
+    await super().handle(scope, receive, send)
+.venv/lib/python3.12/site-packages/starlette/routing.py:280: in handle
+    await self.app(scope, receive, send)
+.venv/lib/python3.12/site-packages/fastapi/routing.py:158: in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+.venv/lib/python3.12/site-packages/starlette/_exception_handler.py:53: in wrapped_app
+    raise exc
+.venv/lib/python3.12/site-packages/starlette/_exception_handler.py:42: in wrapped_app
+    await app(scope, receive, sender)
+.venv/lib/python3.12/site-packages/fastapi/routing.py:144: in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+.venv/lib/python3.12/site-packages/fastapi/routing.py:706: in app
+    raw_response = await run_endpoint_function(
+.venv/lib/python3.12/site-packages/fastapi/routing.py:352: in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+adapters/webhook_listener/webhook_listener/app.py:85: in receive_webhook
+    client: BusClient = request.app.state.bus_client
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <starlette.datastructures.State object at 0x7396ee433c50>
+key = 'bus_client'
+
+    def __getattr__(self, key: Any) -> Any:
+        try:
+            return self._state[key]
+        except KeyError:
+            message = "'{}' object has no attribute '{}'"
+>           raise AttributeError(message.format(self.__class__.__name__, key))
+E           AttributeError: 'State' object has no attribute 'bus_client'
+
+.venv/lib/python3.12/site-packages/starlette/datastructures.py:686: AttributeError
+=============================== warnings summary ===============================
+.venv/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED adapters/webhook_listener/tests/test_webhook_listener_app.py::test_valid_secret_publishes_and_returns_202
+FAILED adapters/webhook_listener/tests/test_webhook_listener_app.py::test_nested_path_is_preserved_verbatim
+FAILED adapters/webhook_listener/tests/test_webhook_listener_app.py::test_binary_body_round_trips_through_base64
+=================== 3 failed, 10 passed, 1 warning in 1.48s ====================
+A real finding: TestClient only runs the FastAPI lifespan when used as a context manager — plain instantiation skips it, so app.state.bus_client was never set. Fixing the fixture.
+
+Edit test_webhook_listener_app.py
+Added 1 line
+Edit test_webhook_listener_app.py
+Added 6 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q adapters/webhook_listener -v 2>&1 | tail -30
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/bherring/dev/clodhopper/JetCoreServiceBus
+configfile: pyproject.toml
+plugins: anyio-4.14.2, cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 13 items
+
+adapters/webhook_listener/tests/test_webhook_listener_app.py .......     [ 53%]
+adapters/webhook_listener/tests/test_webhook_listener_scaffold.py .      [ 61%]
+adapters/webhook_listener/tests/test_webhook_listener_settings.py .....  [100%]
+
+=============================== warnings summary ===============================
+.venv/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================== 13 passed, 1 warning in 0.38s =========================
+A deprecation warning worth checking — starlette says httpx itself is being deprecated in favor of httpx2 for TestClient. Let me verify this is real and actionable before deciding whether to act on it.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run python3 -c "import starlette; print(starlette.__version__)"
+uv run python3 -c "
+import starlette.testclient as tc
+import inspect
+src = inspect.getsource(tc)
+print(src[:2000])
+"
+
+OUT
+1.6.0
+<string>:2: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+from __future__ import annotations
+
+import contextlib
+import inspect
+import io
+import json
+import math
+import sys
+import warnings
+from collections.abc import Awaitable, Callable, Generator, Iterable, Mapping, MutableMapping, Sequence
+from concurrent.futures import Future
+from contextlib import AbstractContextManager
+from types import GeneratorType
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeGuard, cast
+from urllib.parse import unquote, urljoin
+
+import anyio
+import anyio.abc
+import anyio.from_thread
+from anyio.streams.stapled import StapledObjectStream
+
+from starlette._utils import is_async_callable
+from starlette.exceptions import StarletteDeprecationWarning
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from starlette.websockets import WebSocketDisconnect
+
+if sys.version_info >= (3, 11):  # pragma: no cover
+    from typing import Self
+else:  # pragma: no cover
+    from typing_extensions import Self
+
+if TYPE_CHECKING:
+    import httpx2 as httpx
+else:
+    try:
+        import httpx2 as httpx
+    except ModuleNotFoundError:  # pragma: no cover
+        try:
+            import httpx
+        except ModuleNotFoundError:
+            raise RuntimeError(
+                "The starlette.testclient module requires the httpx2 package to be installed.\n"
+                "You can install this with:\n"
+                "    $ pip install httpx2\n"
+            ) from None
+        else:
+            warnings.warn(
+                "Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.",
+                StarletteDeprecationWarning,
+                stacklevel=2,
+            )
+
+_PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+ASGIInstance = Callable[[Receive, Send], Awaitable[None]]
+ASGI2App = Callable[[Scope], ASGIInstance]
+ASGI3App = Callable[[Scope, Receive, Send], Awaitable[None]]
+
+
+_RequestData = Mapping[str, str | Iterable[str] | bytes]
+
+
+def _is_asgi3(app: ASGI2App | ASGI3App) -> T
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv add --dev httpx2 2>&1 | tail -20
+
+OUT
+Resolved 89 packages in 31.28s
+Prepared 3 packages in 155ms
+Installed 3 packages in 5ms
+ + httpcore2==2.12.0
+ + httpx2==2.12.0
+ + truststore==0.10.4
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv remove --dev httpx 2>&1 | tail -10
+uv run pytest -q adapters/webhook_listener 2>&1 | tail -20
+
+OUT
+ - pydantic-core==2.46.4
+ - pydantic-settings==2.15.0
+ - pynacl==1.6.2
+ - pyrage==1.4.0
+ - python-dotenv==1.2.3
+ - starlette==1.6.0
+ - typing-inspection==0.4.4
+ - uuid6==2025.0.1
+ - watchfiles==1.2.0
+ - webhook-listener==0.1.0 (from file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_listener)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+adapters/webhook_listener/tests/test_webhook_listener_scaffold.py:9: in <module>
+    import webhook_listener
+E   ModuleNotFoundError: No module named 'webhook_listener'
+_ ERROR collecting adapters/webhook_listener/tests/test_webhook_listener_settings.py _
+ImportError while importing test module '/home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_listener/tests/test_webhook_listener_settings.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+adapters/webhook_listener/tests/test_webhook_listener_settings.py:13: in <module>
+    from pydantic import ValidationError
+E   ModuleNotFoundError: No module named 'pydantic'
+=========================== short test summary info ============================
+ERROR adapters/webhook_listener/tests/test_webhook_listener_app.py
+ERROR adapters/webhook_listener/tests/test_webhook_listener_scaffold.py
+ERROR adapters/webhook_listener/tests/test_webhook_listener_settings.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 3 errors during collection !!!!!!!!!!!!!!!!!!!!
+3 errors in 0.10s
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv sync --all-packages 2>&1 | tail -30
+
+OUT
+Resolved 87 packages in 1ms
+Installed 21 packages in 10ms
+ + aiofiles==25.1.0
+ + annotated-doc==0.0.5
+ + annotated-types==0.8.0
+ + cffi==2.1.1
+ + fastapi==0.141.1
+ + file-storage-adapter==0.1.0 (from file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/file_storage_adapter)
+ + jetcore==0.1.0 (from file:///home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore)
+ + nats-py==2.15.0
+ + nkeys==0.2.1
+ + pycparser==3.0
+ + pydantic==2.13.4
+ + pydantic-core==2.46.4
+ + pydantic-settings==2.15.0
+ + pynacl==1.6.2
+ + pyrage==1.4.0
+ + python-dotenv==1.2.3
+ + starlette==1.6.0
+ + typing-inspection==0.4.4
+ + uuid6==2025.0.1
+ + watchfiles==1.2.0
+ + webhook-listener==0.1.0 (from file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_listener)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q adapters/webhook_listener -v 2>&1 | tail -30
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/bherring/dev/clodhopper/JetCoreServiceBus
+configfile: pyproject.toml
+plugins: anyio-4.14.2, cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 13 items
+
+adapters/webhook_listener/tests/test_webhook_listener_app.py .......     [ 53%]
+adapters/webhook_listener/tests/test_webhook_listener_scaffold.py .      [ 61%]
+adapters/webhook_listener/tests/test_webhook_listener_settings.py .....  [100%]
+
+============================== 13 passed in 0.87s ==============================
+No more deprecation warning, all pass. Now the full toolchain.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== full pytest ==="; uv run pytest -q 2>&1 | tail -10
+echo "=== ruff ==="; uv run ruff check . 2>&1 | tail -40
+
+OUT
+=== full pytest ===
+........................................................................ [ 63%]
+..........................................                               [100%]
+114 passed in 15.82s
+=== ruff ===
+  --> adapters/webhook_listener/webhook_listener/app.py:18:1
+   |
+16 |   """
+17 |
+18 | / from __future__ import annotations
+19 | |
+20 | | import base64
+21 | | import json
+22 | | import logging
+23 | | import secrets
+24 | | from collections.abc import AsyncIterator
+25 | | from contextlib import asynccontextmanager
+26 | |
+27 | | from fastapi import FastAPI, HTTPException, Request, Response
+28 | |
+29 | | from jetcore.bus_client import BusClient
+30 | | from webhook_listener.settings import WebhookListenerSettings
+   | |_____________________________________________________________^
+31 |
+32 |   logger = logging.getLogger(__name__)
+   |
+help: Organize imports
+   |
+27 | from fastapi import FastAPI, HTTPException, Request, Response
+28 + from jetcore.bus_client import BusClient
+29 |
+   - from jetcore.bus_client import BusClient
+30 | from webhook_listener.settings import WebhookListenerSettings
+   |
+
+E501 Line too long (101 > 100)
+  --> adapters/webhook_listener/webhook_listener/app.py:38:101
+   |
+38 | def create_app(settings: WebhookListenerSettings, *, bus_client: BusClient | None = None) -> FastAPI:
+   |                                                                                                     ^
+39 |     """Builds the ASGI app.
+   |
+
+Found 3 errors.
+[*] 2 fixable with the `--fix` option.
+114 tests pass. Fixing lint issues.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check --fix . 2>&1 | tail -20
+
+OUT
+E501 Line too long (101 > 100)
+  --> adapters/webhook_listener/webhook_listener/app.py:38:101
+   |
+38 | def create_app(settings: WebhookListenerSettings, *, bus_client: BusClient | None = None) -> FastAPI:
+   |                                                                                                     ^
+39 |     """Builds the ASGI app.
+   |
+
+Found 3 errors (2 fixed, 1 remaining).
+[This command modified 2 files you've previously read: adapters/webhook_listener/tests/test_webhook_listener_app.py, adapters/webhook_listener/webhook_listener/app.py. Call Read before editing.]
+Edit app.py
+Added 2 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check . 2>&1 | tail -20
+uv run ruff format . 2>&1 | tail -10
+echo "=== mypy ==="; uv run --all-packages mypy libs adapters 2>&1 | tail -40
+
+OUT
+All checks passed!
+1 file reformatted, 47 files left unchanged
+=== mypy ===
+adapters/webhook_listener/tests/test_webhook_listener_app.py:58: error: Unused "type: ignore" comment  [unused-ignore]
+Found 1 error in 1 file (checked 40 source files)
+[This command modified 1 file you've previously read: adapters/webhook_listener/webhook_listener/app.py. Call Read before editing.]
+Confirmed the type: ignore wasn't needed (pydantic's plugin understands the str→SecretStr coercion). Removing it.
+
+Edit test_webhook_listener_app.py
+Modified
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages mypy libs adapters 2>&1 | tail -20
+uv run ruff check . 2>&1 | tail -10
+uv run bandit -q -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter adapters/webhook_listener/webhook_listener 2>&1
+uv run pip-audit 2>&1 | tail -10
+
+OUT
+Success: no issues found in 40 source files
+All checks passed!
+No known vulnerabilities found
+Name                 Skip Reason
+-------------------- -----------------------------------------------------------------------------------
+file-storage-adapter Dependency not found on PyPI and could not be audited: file-storage-adapter (0.1.0)
+jetcore              Dependency not found on PyPI and could not be audited: jetcore (0.1.0)
+webhook-listener     Dependency not found on PyPI and could not be audited: webhook-listener (0.1.0)
+Now update Dependencies.md and Design.md for D3.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "| \`fastapi\`\|| \`uvicorn\`\|| \`httpx\`" Dependencies.md
+
+OUT
+30:| `fastapi` | [PyPI](https://pypi.org/project/fastapi/) | *pin at adoption* | *pin at adoption* | ASGI HTTP surface for REST API Service and Webhook Listener adapters. | Extremely widely adopted; large, active maintainer community. | 2026-08-23 |
+31:| `uvicorn` | [PyPI](https://pypi.org/project/uvicorn/) | *pin at adoption* | *pin at adoption* | ASGI server running the FastAPI apps above. | Standard companion to FastAPI; widely adopted. | 2026-08-23 |
+32:| `httpx` | [PyPI](https://pypi.org/project/httpx/) | *pin at adoption* | *pin at adoption* | Async outbound HTTP for the HTTP Adapter and Webhook Sender. | Maintained by Encode (same org as `starlette`/`uvicorn`); widely adopted. | 2026-08-23 |
+Edit Dependencies.md
+Added 1 line
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '26,36p' Dependencies.md
+
+OUT
+## 2. Adapter-Specific
+
+| Dependency | Source | Version | Release Date | Purpose | Security Vetting Notes | Last Reviewed |
+|---|---|---|---|---|---|---|
+| `fastapi` | [PyPI](https://pypi.org/project/fastapi/) | **0.141.1** (resolved via `uv add --package webhook-listener`) | ASGI HTTP surface for the Webhook Listener — [app.py](adapters/webhook_listener/webhook_listener/app.py) (Design.md §12 Step D3). REST API Service (Phase 3) will share it. | Extremely widely adopted; large, active maintainer community. Verified: `FastAPI`'s `lifespan` context manager only runs inside `TestClient`'s `with` block — a bare `TestClient(app)` used outside one silently never triggers it, confirmed by testing (not documented anywhere obvious), which left `app.state.bus_client` unset until this was caught. | 2026-08-27 |
+| `uvicorn` | [PyPI](https://pypi.org/project/uvicorn/) | *pin at adoption* | ASGI server running the FastAPI apps above. | Standard companion to FastAPI; widely adopted. | 2026-08-23 |
+| `httpx` | [PyPI](https://pypi.org/project/httpx/) | *pin at adoption* | Async outbound HTTP for the HTTP Adapter and Webhook Sender (Phase 3) — a distinct future use from `httpx2` below. | Maintained by Encode (same org as `starlette`/`uvicorn`); widely adopted. | 2026-08-23 |
+| `httpx2` | [PyPI](https://pypi.org/project/httpx2/) | **2.12.0** (resolved via `uv add --dev`) | `starlette`'s `TestClient` (used by [test_webhook_listener_app.py](adapters/webhook_listener/tests/test_webhook_listener_app.py), Step D3) requires it — a plain `httpx` install works too but logs a `StarletteDeprecationWarning` telling you to install this instead (confirmed by testing, not assumed); a genuinely separate PyPI package from `httpx`, not a version bump, presumably to let both coexist during `starlette`'s migration. Shared dev-group dependency — every future FastAPI-based adapter's tests need the same thing. | New package (backs `httpx`'s own ecosystem, same maintainers as `starlette`/`fastapi` depend on) — low risk, but young; `pip-audit`: no known vulnerabilities. | 2026-08-27 |
+| `tenacity` | [PyPI](https://pypi.org/project/tenacity/) | *pin at adoption* | *pin at adoption* | Retry/backoff for Database Adapter writes (not the Webhook Sender, which is best-effort per Decision #12). | Long-established, widely adopted retry library. | 2026-08-23 |
+| `SQLAlchemy` (2.0, async) | [PyPI](https://pypi.org/project/SQLAlchemy/) | *pin at adoption* | *pin at adoption* | ORM/core for the Database Adapter's write path. | De facto standard Python SQL toolkit; long track record. | 2026-08-23 |
+| `asyncmy` | [PyPI](https://pypi.org/project/asyncmy/) | *pin at adoption* | *pin at adoption* | Async MySQL driver used under SQLAlchemy. | Smaller community than `mysqlclient`/`PyMySQL`; **recommendation:** re-check maintenance activity at adoption time, since MySQL async driver options churn. | 2026-08-23 |
+Confirmed — I dropped the Release Date column for those 4 rows, breaking alignment. Let me fix it properly.
+
+Edit Dependencies.md
+Modified
+Now let's update Design.md's D3 entry.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^\- \[ \] \*\*D3" Design.md
+
+OUT
+534:- [ ] **D3. HTTP endpoint** — `POST /webhooks/{path:path}` (Decision #22): verify `X-Webhook-Secret`, reject with `401` on mismatch/missing before touching the bus at all, read the raw body, base64-encode into `{"path": ..., "content": ...}`, publish `events.files.FileWriteRequested` via `BusClient` (fire-and-forget per the manifest's own description — respond `202 Accepted` once published, not once processed). A `GET /healthz` for Compose/manual liveness checks, since — per A6/A7's finding — not every image in this stack ships a usable shell/HTTP client for that; a Python-native ASGI app can trivially serve its own.
+Edit Design.md
+Added 6 lines
+Now D4 — the entrypoint.
+
+Write __main__.py
+35 lines
+"""Entrypoint for the Webhook Listener (Design.md §12 Step D4). Wires
+settings -> the FastAPI app (app.py's own `lifespan` owns the real
+BusClient's connect/close, Step D3) -> `uvicorn`.
+
+Run via: python -m webhook_listener
+"""
+
+from __future__ import annotations
+
+import logging
+
+import uvicorn
+
+from webhook_listener.app import create_app
+from webhook_listener.settings import WebhookListenerSettings
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO)
+
+    settings = WebhookListenerSettings()  # pydantic-settings loads required fields from env vars
+    app = create_app(settings)
+
+    # uvicorn's own Server installs SIGTERM/SIGINT handlers and drains
+    # in-flight requests before shutting down — unlike the File Storage
+    # Adapter's raw asyncio loop (Step C6), no hand-rolled signal handling
+    # needed here. Binding 0.0.0.0, not 127.0.0.1: this runs in a
+    # container (Design.md §12 Track E) and needs to accept connections
+    # from outside it — not a stray default.
+    uvicorn.run(app, host="0.0.0.0", port=settings.http_port)  # nosec B104
+
+
+if __name__ == "__main__":
+    main()
+Now add uvicorn as the real dependency and run the toolchain.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv add --package webhook-listener uvicorn 2>&1 | tail -15
+
+OUT
+Resolved 89 packages in 206ms
+   Building webhook-listener @ file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_listener
+      Built webhook-listener @ file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_listener
+Prepared 1 package in 368ms
+Uninstalled 1 package in 0.71ms
+Installed 3 packages in 6ms
+ + click==8.5.0
+ + uvicorn==0.52.4
+ ~ webhook-listener==0.1.0 (from file:///home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_listener)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run --all-packages mypy libs adapters 2>&1 | tail -30
+uv run ruff check . 2>&1 | tail -30
+uv run bandit -q -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter adapters/webhook_listener/webhook_listener 2>&1
+
+OUT
+Success: no issues found in 41 source files
+All checks passed!
+Let me verify the nosec comment was actually needed rather than just assumed.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+sed 's/# nosec B104//' adapters/webhook_listener/webhook_listener/__main__.py > /tmp/test_main_no_nosec.py
+uv run bandit -q -r /tmp/test_main_no_nosec.py 2>&1
+
+OUT
+Exit code 1
+Run started:2026-08-29 02:01:09.037647+00:00
+
+Test results:
+>> Issue: [B104:hardcoded_bind_all_interfaces] Possible binding to all interfaces.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-605 (https://cwe.mitre.org/data/definitions/605.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b104_hardcoded_bind_all_interfaces.html
+   Location: /tmp/test_main_no_nosec.py:30:26
+29	    # from outside it — not a stray default.
+30	    uvicorn.run(app, host="0.0.0.0", port=settings.http_port)  
+31	
+
+--------------------------------------------------
+
+Code scanned:
+	Total lines of code: 17
+	Total lines skipped (#nosec): 0
+	Total potential issues skipped due to specifically being disabled (e.g., #nosec BXXX): 0
+
+Run metrics:
+	Total issues (by severity):
+		Undefined: 0
+		Low: 0
+		Medium: 1
+		High: 0
+	Total issues (by confidence):
+		Undefined: 0
+		Low: 0
+		Medium: 1
+		High: 0
+Files skipped (0):
+Confirmed necessary, and the code is correct. Let's clean up the temp file and run the full suite.
+
+Bash
+IN
+rm -f /tmp/test_main_no_nosec.py
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q 2>&1 | tail -10
+
+OUT
+........................................................................ [ 63%]
+..........................................                               [100%]
+114 passed in 14.67s
+Now let's actually run this against the live stack, the same rigor as C6.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+SCRATCH=/tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad
+mkdir -p "$SCRATCH"
+export JETCORE_SERVICE_ID=webhook-listener-01
+export JETCORE_NATS_URL=nats://localhost:4222
+export JETCORE_NATS_CREDS_PATH=infra/nats/operator/creds/webhook-listener-01.creds
+export JETCORE_WEBHOOK_SECRET=d4-manual-verify-secret
+export JETCORE_HTTP_PORT=8099
+uv run --all-packages python -m webhook_listener > "$SCRATCH/d4.log" 2>&1 &
+echo "PID=$!"
+sleep 2
+cat "$SCRATCH/d4.log"
+
+OUT
+PID=59524
+INFO:     Started server process [59528]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8099 (Press CTRL+C to quit)
+Bash
+IN
+curl -sS -w "\nHTTP_STATUS=%{http_code}\n" http://localhost:8099/healthz
+echo "--- wrong secret ---"
+curl -sS -w "\nHTTP_STATUS=%{http_code}\n" -X POST http://localhost:8099/webhooks/from-curl.txt -d "should be rejected" -H "X-Webhook-Secret: nope"
+echo "--- correct secret ---"
+curl -sS -w "\nHTTP_STATUS=%{http_code}\n" -X POST http://localhost:8099/webhooks/from-curl/proof.txt --data-binary "hello from a real curl POST through the real webhook listener" -H "X-Webhook-Secret: d4-manual-verify-secret"
+
+OUT
+{"status":"ok"}
+HTTP_STATUS=200
+--- wrong secret ---
+{"detail":"missing or invalid X-Webhook-Secret"}
+HTTP_STATUS=401
+--- correct secret ---
+
+HTTP_STATUS=202
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream info EVENTS -j" 2>&1 | grep -A2 '"messages"'
+sg docker -c "$NB stream get EVENTS --last-for events.files.FileWriteRequested -j" 2>&1 | tail -20
+
+OUT
+    "messages": 2,
+    "bytes": 2344,
+    "first_seq": 637,
+{
+  "subject": "events.files.FileWriteRequested",
+  "seq": 638,
+  "data": "eyJldmVudCI6eyJldmVudERldGFpbHMiOnsiZXZlbnRJZCI6IjAxYTA0YjQwLTU5ZTItNzY5MS1iMTc4LTIyMTdkZDdhY2IxOSIsImV2ZW50Q3JlYXRlZCI6IjIwMjYtMDgtMjlUMDI6MDE6NDMuNjUwMzc1WiIsImV2ZW50VHlwZSI6IkZpbGVXcml0ZVJlcXVlc3RlZCIsImV2ZW50U2NoZW1hVmVyc2lvbiI6IjEuMC4wIiwic291cmNlU2VydmljZUlkIjoid2ViaG9vay1saXN0ZW5lci0wMSIsImNvcnJlbGF0aW9uSWQiOm51bGwsInNpZ25hdHVyZSI6InMza1NPRUF1QytQdy9LNFBZUzQ2MGdMdVJ2OTc2am9qZTBabTI4WXdFZ1ZhbG9GVWZadkZJUFdMOEIzNnhuZUhQUC9YRmlPNEp4TFhMOStnT3dZRUNRPT0iLCJzb3VyY2VQdWJsaWNLZXkiOiJVRFpBVlRYNUJOWElZV0I0RE9MQUE2RVVFQVY3UEVGT1VCV0dBMkJEWVJaRzRLUkNPTTNUVks2QiJ9LCJlbmNyeXB0aW9uIjp7ImFsZ29yaXRobSI6ImFnZS12MSAoWDI1NTE5ICsgWENoYUNoYTIwLVBvbHkxMzA1KSIsInJlY2lwaWVudHMiOlsiYWdlMXkzcmN2dm5mbmg1enFqZGt0Mmxoamh3bHd3ZGFsbm5sMmh6eTY3M3FrdHNhMzZtbjczdnNmandkc2ciXX0sImV2ZW50UGF5bG9hZCI6IllXZGxMV1Z1WTNKNWNIUnBiMjR1YjNKbkwzWXhDaTArSUZneU5UVXhPU0JST0V0c1NHNDNOWElyZW13d1ZYQklUMDVFTmxSNk1sTkpVRGg0VUV0bFVXOUVkbE1yTkVjeEwycEZDa3RDY2pKWWJXWkNTV0p3YmtNcmJrTjRRVFpSTW1wamMydHRWMkV4VjNKdFMzRTBNaTlWV0VobGVEZ0tMVDRnS2lrdFozSmxZWE5sSUNvd0xpQkxMV050UlNZZ0pWNTlJRHgxU2lNS2RUbENPRFJSVEM4MFZHOUVNREZTYUVwU016aE5kbkpqVWxCWmVWRm1jSG8zTTJOMGR6RlZOa05HYlZOTWJpdHBOamRaVWxJdlNrSkRiRlJXVEZabGJncDFSVkJDT1ZoV1dHTlJDaTB0TFNCamMwaFVTemRPVjJoc1oxZFhaRFpYYUZoQmNXaHZhRm9yTldSclZUZFhlRGRFY2taaU5FTkxhbTFKQ25tSWJPUGZKbXFZQTRYTTNlS29uWUpPdmNXMUlMRnUxU0tEYm1wZFlXYlA3bWE5Tk5rL29mamFBa290QXpEMDgya2lRTG45MlhyVXFSOUVIamc2bDFNcEFHSXQ0SmZtNGxRV3YxREliUmZCQlNmc1hXdnJlSEYxYW43ZGMrdnlVcUs2WHpsRUFFbGRxUktUOHRtK25zb2g4V0lGa05OM0tUZVVBNCtiaTQycEdxZmVpQkllbDRvT0g1WEZkNVI1YUlUOEpaN1J4RzlrTm0yWW00YnJYNGFyd1E9PSJ9fQ==",
+  "time": "2026-08-29T02:01:43.650615231Z"
+}
+Real end-to-end proof — actual signed, encrypted FileWriteRequested on the stream from a real curl request. Now graceful shutdown.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+PID=$(pgrep -f "webhook_listener" | head -1)
+echo "sending SIGTERM to $PID"
+kill -TERM "$PID"
+for i in $(seq 1 20); do
+  if ! kill -0 "$PID" 2>/dev/null; then echo "process exited after ~${i}00ms polls"; break; fi
+  sleep 0.5
+done
+kill -0 "$PID" 2>/dev/null && echo "STILL RUNNING" || echo "confirmed exited"
+SCRATCH=/tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad
+tail -10 "$SCRATCH/d4.log"
+
+OUT
+sending SIGTERM to 59524
+process exited after ~200ms polls
+confirmed exited
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8099 (Press CTRL+C to quit)
+INFO:     127.0.0.1:34652 - "GET /healthz HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34660 - "POST /webhooks/from-curl.txt HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:34670 - "POST /webhooks/from-curl/proof.txt HTTP/1.1" 202 Accepted
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [59528]
+Clean shutdown confirmed, lifespan's shutdown phase ran (closing the real BusClient). Let's clean up test state and update Design.md for D4.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -3
+for bucket in service-directory service-identity; do
+  for key in $(sg docker -c "$NB kv ls $bucket" 2>&1); do
+    sg docker -c "$NB kv del $bucket '$key' -f" 2>&1 >/dev/null
+  done
+done
+rm -f /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/d4.log
+echo cleaned
+
+OUT
+      First Sequence: 639
+       Last Sequence: 638 @ 2026-08-29 02:01:43
+    Active Consumers: 472
+cleaned
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^\- \[ \] \*\*D4" Design.md
+
+OUT
+541:- [ ] **D4. Entrypoint** — `uvicorn` app factory wired to settings/`BusClient` lifecycle (connect on startup, close on shutdown — FastAPI lifespan, not a global).
+Edit Design.md
+Added 2 lines
+Now D5 — the live-bus integration test. Let's add the shared test helpers/fixtures for this package first.
+
+Write _webhook_listener_helpers.py
+51 lines
+"""Test-only helpers for webhook_listener's live-NATS integration tests.
+A local copy of the same connect()/wait_until_cache_nonempty() pattern
+used in libs/jetcore/tests/_helpers.py and
+adapters/file_storage_adapter/tests/_file_storage_helpers.py — not a
+cross-package import, for the same self-containment reason those explain
+(a bare-name collision across workspace members is a confirmed, repeated
+failure mode in this project, Design.md §12 Step C1)."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING
+
+from jetcore.bus_client import BusClient
+from jetcore.config import AdapterSettings
+from jetcore.crypto import generate_encryption_keypair, generate_signing_keypair
+
+if TYPE_CHECKING:
+    from jetcore.registry import RecipientCache
+
+NATS_URL = "nats://localhost:4222"
+CREDS_DIR = "infra/nats/operator/creds"
+
+
+def settings(service_id: str) -> AdapterSettings:
+    return AdapterSettings(
+        service_id=service_id,
+        nats_url=NATS_URL,
+        nats_creds_path=f"{CREDS_DIR}/{service_id}.creds",
+    )
+
+
+async def connect(service_id: str) -> BusClient:
+    signing = generate_signing_keypair()
+    encryption = generate_encryption_keypair()
+    return await BusClient.connect(
+        settings(service_id),
+        adapter_type="test-adapter",
+        encryption_keypair=encryption,
+        signing_seed=signing.seed,
+        signing_public_key=signing.public_key,
+    )
+
+
+async def wait_until_cache_nonempty(cache: RecipientCache, *, timeout: float = 3.0) -> None:
+    async def _poll() -> None:
+        while not cache.current():
+            await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(_poll(), timeout=timeout)
+Write conftest.py
+45 lines
+"""Shared fixtures for webhook_listener's live-NATS integration tests
+(Design.md §12 Step D5). Mirrors libs/jetcore/tests/conftest.py's and
+file_storage_adapter/tests/conftest.py's _clean_state fixture and its
+rationale exactly — re-implemented locally rather than imported, for the
+same self-containment reason _webhook_listener_helpers.py explains.
+
+Applies to every test in this directory, including Step D3's
+FakeBusClient-only tests — they don't strictly need it, but paying a
+trivial extra NATS round trip is simpler than splitting this directory's
+fixture scope, and file_storage_adapter's own pure tests already accept
+the same trade-off (Step C4)."""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import AsyncGenerator
+
+import nats
+import pytest
+from nats.js.errors import NoKeysError
+
+NATS_URL = "nats://localhost:4222"
+CREDS_DIR = "infra/nats/operator/creds"
+WRITE_REQUESTED_SUBJECT = "events.files.FileWriteRequested"
+
+
+@pytest.fixture(autouse=True)
+async def _clean_state() -> AsyncGenerator[None]:
+    nc = await nats.connect(NATS_URL, user_credentials=f"{CREDS_DIR}/jetcore-admin.creds")
+    js = nc.jetstream()
+    await js.purge_stream("EVENTS")
+    kv = await js.key_value("service-directory")
+    try:
+        for key in await kv.keys(filters=[f"{WRITE_REQUESTED_SUBJECT}."]):
+            await kv.delete(key)
+    except NoKeysError:
+        pass
+    await nc.close()
+    yield
+
+
+@pytest.fixture
+def durable_name() -> str:
+    return f"test-{uuid.uuid4().hex[:8]}"
+Now the D5 integration test itself.
+
+Write test_webhook_listener_entrypoint.py
+70 lines
+"""Integration test for the real entrypoint wiring (Design.md §12 Step
+D5) — `create_app(settings)` WITHOUT an injected `bus_client`, so its own
+`lifespan` connects a REAL `BusClient` (via `connect_as_adapter`, Step
+C6's identity-stability fix), exactly the way `python -m webhook_listener`
+does in production (Step D4). Driven through FastAPI's `TestClient` (real
+ASGI requests, no fake) rather than a real subprocess/TCP socket — the
+manual verification in Step D4 already proved the real process/uvicorn
+layer works; this is the one thing Step D3's `FakeBusClient`-based tests
+can't prove: a real POST results in a real, signed, encrypted
+`FileWriteRequested` landing on the `EVENTS` stream.
+
+This is Track D's exit criterion (Design.md §12): the pieces built across
+D1-D4 actually work together against the real bus, not just individually.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+
+from _webhook_listener_helpers import connect, wait_until_cache_nonempty
+from fastapi.testclient import TestClient
+from webhook_listener.app import WRITE_REQUESTED_SUBJECT, create_app
+from webhook_listener.settings import WebhookListenerSettings
+
+WEBHOOK_SECRET = "d5-live-bus-secret"  # noqa: S105 (test fixture value, not a real secret)
+
+
+async def test_real_post_publishes_a_real_signed_encrypted_command(durable_name: str) -> None:
+    settings = WebhookListenerSettings(
+        service_id="webhook-listener-01",
+        nats_creds_path="infra/nats/operator/creds/webhook-listener-01.creds",
+        webhook_secret=WEBHOOK_SECRET,
+    )
+    observer = await connect("test-observer-01")
+    try:
+        observer_durable = await observer.subscribe(
+            WRITE_REQUESTED_SUBJECT, durable_name=durable_name
+        )
+
+        app = create_app(settings)  # no injected bus_client — the real lifespan connects
+        with TestClient(app) as client:
+            real_client = app.state.bus_client
+            await wait_until_cache_nonempty(await real_client._cache_for(WRITE_REQUESTED_SUBJECT))
+
+            body = b"real end-to-end proof: TestClient -> real lifespan BusClient -> real NATS"
+            response = client.post(
+                "/webhooks/d5/proof.txt",
+                content=body,
+                headers={"X-Webhook-Secret": WEBHOOK_SECRET},
+            )
+            assert response.status_code == 202
+        # TestClient's `with` block has now exited — the real BusClient
+        # is closed, same as production's shutdown path (Step D4). The
+        # publish already completed before the response was sent, so
+        # fetching it back afterward is fine: JetStream durability, not
+        # dependent on the publisher's connection staying open.
+
+        received = await observer.fetch(observer_durable, timeout=5)
+
+        assert len(received) == 1
+        result = received[0]
+        assert result.details.event_type == "FileWriteRequested"
+        assert result.details.source_service_id == "webhook-listener-01"
+        data = json.loads(result.payload)
+        assert data["path"] == "d5/proof.txt"
+        assert base64.b64decode(data["content"]) == body
+    finally:
+        await observer.close()
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q adapters/webhook_listener/tests/test_webhook_listener_entrypoint.py -v 2>&1 | tail -60
+
+OUT
+Command did not complete within its 120s timeout and was moved to the background (ID: bjyob9z74). Output is being written to: /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bjyob9z74.output. You will be notified when it completes. To check interim output, use Read on that file path.
+Session cwd remains /home/bherring/dev/clodhopper/JetCoreServiceBus; directory changes made by the backgrounded command do not apply to subsequent commands.
+Bash
+IN
+cat /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bjyob9z74.output 2>&1 | tail -60
+
+OUT
+(Bash completed with no output)
+Bash
+IN
+kill -9 %1 2>/dev/null
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "class RecipientCache\|async def watch\|def current" libs/jetcore/jetcore/registry.py | head -10
+
+OUT
+223:    async def watch(self, subject: str) -> RecipientCache:
+255:class RecipientCache:
+308:    def current(self) -> list[str]:
+Bash
+IN
+cat /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bjyob9z74.output 2>&1 | tail -60
+
+OUT
+    r, w = await asyncio.wait_for(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/streams.py", line 48, in open_connection
+    transport, _ = await loop.create_connection(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 1080, in create_connection
+    infos = await self._ensure_resolved(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 1456, in _ensure_resolved
+    return await loop.getaddrinfo(host, port, family=family, type=type,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 901, in getaddrinfo
+    return await self.run_in_executor(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/socket.py", line 963, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno -2] Name or service not known
+ERROR    nats.aio.client:client.py:239 nats: encountered error
+Traceback (most recent call last):
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/nats/aio/client.py", line 1501, in _select_next_server
+    await self._connect_to_server(s)
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/nats/aio/client.py", line 1470, in _connect_to_server
+    await self._transport.connect(
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/nats/aio/transport.py", line 117, in connect
+    r, w = await asyncio.wait_for(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/streams.py", line 48, in open_connection
+    transport, _ = await loop.create_connection(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 1080, in create_connection
+    infos = await self._ensure_resolved(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 1456, in _ensure_resolved
+    return await loop.getaddrinfo(host, port, family=family, type=type,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 901, in getaddrinfo
+    return await self.run_in_executor(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/socket.py", line 963, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno -2] Name or service not known
+=========================== short test summary info ============================
+FAILED adapters/webhook_listener/tests/test_webhook_listener_entrypoint.py::test_real_post_publishes_a_real_signed_encrypted_command
+======================== 1 failed in 123.42s (0:02:03) =========================
+
+[exited with code 0]
+Found it — a simple oversight, not the deep cross-event-loop issue I was worried about: I forgot nats_url="nats://localhost:4222" in the test's settings construction, so it fell back to the Docker-internal default hostname nats, which doesn't resolve from the host.
+
+Edit test_webhook_listener_entrypoint.py
+Added 1 line
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+timeout 30 uv run pytest -q adapters/webhook_listener/tests/test_webhook_listener_entrypoint.py -v 2>&1 | tail -60
+echo "exit=$?"
+
+OUT
+    cinfo = await watcher._sub.consumer_info()
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.12/site-packages/nats/js/client.py:930: in consumer_info
+    info = await self._js._jsm.consumer_info(
+.venv/lib/python3.12/site-packages/nats/js/manager.py:174: in consumer_info
+    resp = await self._api_request(f"{self._prefix}.CONSUMER.INFO.{stream}.{consumer}", b"", timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.12/site-packages/nats/js/manager.py:464: in _api_request
+    msg = await self._nc.request(req_subject, req, timeout=timeout)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.12/site-packages/nats/aio/client.py:1068: in request
+    msg = await self._request_new_style(subject, payload, timeout=timeout, headers=headers)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <nats client v2.15.0>
+subject = '$JS.API.CONSUMER.INFO.KV_service-directory.1LJ96c7e', payload = b''
+timeout = 5, headers = None
+
+    async def _request_new_style(
+        self,
+        subject: str,
+        payload: bytes,
+        timeout: float = 1,
+        headers: Optional[Dict[str, Any]] = None,
+    ) -> Msg:
+        if self.is_draining_pubs:
+            raise errors.ConnectionDrainingError
+    
+        if not self._resp_sub_prefix:
+            await self._init_request_sub()
+        assert self._resp_sub_prefix
+    
+        # Use a new NUID + couple of unique token bytes to identify the request,
+        token = self._nuid.next()
+        token.extend(token_hex(2).encode())
+        inbox = self._resp_sub_prefix[:]
+        inbox.extend(token)
+    
+        # Then use the future to get the response.
+        future: asyncio.Future = asyncio.Future()
+        future.add_done_callback(lambda f: self._resp_map.pop(token.decode(), None))
+        self._resp_map[token.decode()] = future
+    
+        # Publish the request
+        await self.publish(subject, payload, reply=inbox.decode(), headers=headers)
+    
+        # Wait for the response or give up on timeout.
+        try:
+            return await asyncio.wait_for(future, timeout)
+        except asyncio.TimeoutError:
+>           raise errors.TimeoutError
+E           nats.errors.TimeoutError: nats: timeout
+
+.venv/lib/python3.12/site-packages/nats/aio/client.py:1105: TimeoutError
+------------------------------ Captured log setup ------------------------------
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+=========================== short test summary info ============================
+FAILED adapters/webhook_listener/tests/test_webhook_listener_entrypoint.py::test_real_post_publishes_a_real_signed_encrypted_command
+============================== 1 failed in 10.47s ==============================
+exit=0
+Found the real root cause: I was calling async methods on app.state.bus_client — a client running on TestClient's own background thread/event loop — from my test's different event loop. That's not safe (cross-loop Futures never resolve). Let me redesign this properly rather than patch around it.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '/async def watch/,/^    async def heartbeat\|^class /p' libs/jetcore/jetcore/registry.py | head -60
+
+OUT
+    async def watch(self, subject: str) -> RecipientCache:
+        """A live, watch-updated `RecipientCache` for `subject`, started
+        and ready to use — added during Step B6 so `BusClient` doesn't
+        need access to this client's private `_kv` to build one itself."""
+        cache = RecipientCache(self._kv, subject)
+        await cache.start()
+        return cache
+
+    async def lookup_recipients(self, subject: str) -> list[str]:
+        """One-shot lookup of current recipient public keys for
+        `subject`. Prefer `RecipientCache` for a publisher that looks this
+        up repeatedly."""
+        prefix = f"{subject}."
+        try:
+            keys = await self._kv.keys(filters=[prefix])
+        except NoKeysError:
+            return []
+
+        recipients = []
+        for key in keys:
+            entry = await self._kv.get(key)
+            if entry.value is None:
+                logger.warning("skipping empty service-directory entry %s", key)
+                continue
+            try:
+                value = json.loads(entry.value)
+                recipients.append(value["encryptionPublicKey"])
+            except (json.JSONDecodeError, KeyError):
+                logger.warning("skipping malformed service-directory entry %s", key)
+        return recipients
+
+
+class RecipientCache:
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '/class RecipientCache/,/^class /p' libs/jetcore/jetcore/registry.py | head -70
+
+OUT
+class RecipientCache:
+    """A live, watch-updated view of who's registered for one subject.
+    Create one per subject a publisher actually publishes to; call
+    `start()` once, then read `current()` before each encrypt — no GET per
+    publish (Design.md §4.5)."""
+
+    def __init__(self, kv: KeyValue, subject: str) -> None:
+        self._kv = kv
+        self._subject = subject
+        self._entries: dict[str, str] = {}  # full KV key -> encryptionPublicKey
+        self._task: asyncio.Task[None] | None = None
+        self._ready = asyncio.Event()
+
+    async def start(self) -> None:
+        """Establishes the watch and blocks until the initial snapshot of
+        existing recipients has been loaded (the first "caught up to live
+        data" marker) — so `current()` is accurate as soon as `start()`
+        returns, not just eventually."""
+        watcher = await self._kv.watch(f"{self._subject}.*")
+        self._task = asyncio.create_task(self._consume(watcher))
+        await self._ready.wait()
+
+    async def _consume(self, watcher: KeyValue.KeyWatcher) -> None:
+        while True:
+            try:
+                # nats-py ships a py.typed marker, but KeyWatcher.updates
+                # itself has no type annotations — confirmed via mypy
+                # (a genuinely partial-typing gap, distinct from
+                # nkeys/pyrage's "no types at all", which is why this
+                # needs its own narrow ignore rather than a module-wide
+                # ignore_missing_imports override).
+                entry = await watcher.updates(  # type: ignore[no-untyped-call]
+                    timeout=_WATCH_POLL_TIMEOUT_SECONDS
+                )
+            except nats.errors.TimeoutError:
+                # No news within the poll window — normal, not an error.
+                # Distinct from the `None` "caught up" marker below.
+                continue
+
+            if entry is None:
+                self._ready.set()
+                continue
+
+            if entry.operation in (KV_DEL, KV_PURGE):
+                self._entries.pop(entry.key, None)
+                continue
+
+            try:
+                value = json.loads(entry.value)
+                self._entries[entry.key] = value["encryptionPublicKey"]
+            except (json.JSONDecodeError, KeyError):
+                logger.warning("skipping malformed service-directory entry %s", entry.key)
+
+    def current(self) -> list[str]:
+        """The current recipient public keys, from the in-memory cache —
+        no network call."""
+        return list(self._entries.values())
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+            self._task = None
+Confirmed — RecipientCache.start() blocks until its initial catch-up snapshot is loaded, so as long as the observer subscribes before the webhook listener's client ever calls publish() for that subject, the recipient is guaranteed visible with no extra synchronization needed. Removing the problematic cross-loop access entirely.
+
+Edit test_webhook_listener_entrypoint.py
+Added 16 lines
+Edit test_webhook_listener_entrypoint.py
+Removed 3 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+timeout 30 uv run pytest -q adapters/webhook_listener/tests/test_webhook_listener_entrypoint.py -v 2>&1 | tail -60
+echo "exit=$?"
+
+OUT
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/bherring/dev/clodhopper/JetCoreServiceBus
+configfile: pyproject.toml
+plugins: anyio-4.14.2, cov-7.1.0, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 1 item
+
+adapters/webhook_listener/tests/test_webhook_listener_entrypoint.py .    [100%]
+
+============================== 1 passed in 0.34s ===============================
+exit=0
+Passes cleanly. Let's run it several times for stability, then the full suite.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+for i in 1 2 3 4 5; do
+  timeout 15 uv run pytest -q adapters/webhook_listener/tests/test_webhook_listener_entrypoint.py 2>&1 | tail -3
+done
+
+OUT
+.                                                                        [100%]
+1 passed in 0.33s
+.                                                                        [100%]
+1 passed in 0.35s
+.                                                                        [100%]
+1 passed in 0.33s
+.                                                                        [100%]
+1 passed in 0.34s
+.                                                                        [100%]
+1 passed in 0.33s
+5/5 stable. Now the full suite and toolchain.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== full suite x3 ==="
+for i in 1 2 3; do timeout 60 uv run pytest -q 2>&1 | tail -8; done
+
+OUT
+=== full suite x3 ===
+........................................................................ [ 62%]
+...........................................                              [100%]
+115 passed in 14.83s
+........................................................................ [ 62%]
+...........................................                              [100%]
+115 passed in 14.94s
+........................................................................ [ 62%]
+...........................................                              [100%]
+115 passed in 15.01s
+115 tests, 3/3 clean runs. Now the rest of the toolchain.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== ruff ==="; uv run ruff check . 2>&1 | tail -30
+echo "=== ruff format ==="; uv run ruff format --check . 2>&1 | tail -20
+echo "=== mypy ==="; uv run --all-packages mypy libs adapters 2>&1 | tail -40
+
+OUT
+=== ruff ===
+All checks passed!
+=== ruff format ===
+52 files already formatted
+=== mypy ===
+Success: no issues found in 43 source files
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+echo "=== bandit ==="
+uv run bandit -q -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter adapters/webhook_listener/webhook_listener 2>&1
+echo "=== pip-audit ==="
+uv run pip-audit 2>&1 | tail -10
+
+OUT
+=== bandit ===
+=== pip-audit ===
+No known vulnerabilities found
+Name                 Skip Reason
+-------------------- -----------------------------------------------------------------------------------
+file-storage-adapter Dependency not found on PyPI and could not be audited: file-storage-adapter (0.1.0)
+jetcore              Dependency not found on PyPI and could not be audited: jetcore (0.1.0)
+webhook-listener     Dependency not found on PyPI and could not be audited: webhook-listener (0.1.0)
+I added a noqa: S105 earlier defensively — let's verify it's actually necessary given our ruff rule selection, matching the project's practice of not leaving unnecessary suppressions.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "noqa" adapters/webhook_listener/tests/test_webhook_listener_entrypoint.py
+grep -n "select = " pyproject.toml
+
+OUT
+42:WEBHOOK_SECRET = "d5-live-bus-secret"  # noqa: S105 (test fixture value, not a real secret)
+44:select = ["E", "F", "I", "UP", "B"]
+Edit test_webhook_listener_entrypoint.py
+Modified
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run ruff check . 2>&1 | tail -10
+uv run pytest -q adapters/webhook_listener/tests/test_webhook_listener_entrypoint.py 2>&1 | tail -5
+
+OUT
+All checks passed!
+.                                                                        [100%]
+1 passed in 0.36s
+Now update Design.md for D5.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^\- \[ \] \*\*D5" Design.md
+
+OUT
+544:- [ ] **D5. Tests + verification** — `httpx`-based tests against the running app (FastAPI's ASGI test transport) for the HTTP-facing behavior (secret rejected/accepted, body→payload mapping, `202`/`401` codes), plus one live-bus integration test confirming a real `POST` results in a real `FileWriteRequested` landing on the stream. `ruff`/`mypy`/`bandit`/`pip-audit`/`pre-commit` clean.
+Edit Design.md
+Added 4 lines
+Now let's clean up the bus state and do a final full verification pass.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -3
+for bucket in service-directory service-identity; do
+  for key in $(sg docker -c "$NB kv ls $bucket" 2>&1); do
+    sg docker -c "$NB kv del $bucket '$key' -f" 2>&1 >/dev/null
+  done
+done
+sg docker -c "docker compose -f /home/bherring/dev/clodhopper/JetCoreServiceBus/docker-compose.yml ps" 2>&1
+
+OUT
+      First Sequence: 718
+       Last Sequence: 717 @ 2026-08-29 02:09:44
+    Active Consumers: 538
+NAME             IMAGE         COMMAND                  SERVICE   CREATED      STATUS       PORTS
+jetcore-nats-1   nats:2.14.5   "/nats-server -c /et…"   nats      4 days ago   Up 7 hours   0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+export PATH="$HOME/.local/bin:$PATH"
+uv run pytest -q 2>&1 | tail -8
+git status --short
+
+OUT
+........................................................................ [ 62%]
+...........................................                              [100%]
+115 passed in 14.84s
+ M Dependencies.md
+ M Design.md
+ M README.md
+ M pyproject.toml
+ M uv.lock
+?? adapters/webhook_listener/
+Track D (D1–D5) complete. Here's the summary:
+
+D1 — scaffold. adapters/webhook_listener, applying Track C's lessons from the start: fastapi/uvicorn deferred until actually used, test files pre-emptively uniquely named.
+
+D2 — settings. WebhookListenerSettings adds webhook_secret: SecretStr (masks the value from repr()/logs) and http_port. Hit the exact test_settings.py naming collision C1 predicted would recur — renamed before it could reach the full suite.
+
+D3 — the HTTP endpoint. POST /webhooks/{path:path}: constant-time secret check via secrets.compare_digest, empty-path rejection, raw body → base64 content, fire-and-forget publish, 202. GET /healthz. Two real findings: TestClient only runs FastAPI's lifespan inside a with block — a bare instantiation silently never connects the bus client; and starlette 1.6.0 now prefers a genuinely separate package, httpx2, over httpx for its test client (confirmed by reading its import fallback, not assumed).
+
+D4 — entrypoint. uvicorn.run() needs no hand-rolled signal handling, unlike C6's raw asyncio loop — it drains and shuts down gracefully on its own. Verified with a real running process again: real curl POSTs, a real signed+encrypted FileWriteRequested confirmed on the stream via raw nats stream get, and a real SIGTERM producing uvicorn's own clean shutdown sequence (confirming the lifespan actually closed the bus connection, not just that the process exited).
+
+D5 — the live-bus proof. This one had a genuine bug worth flagging clearly: my first attempt reached into app.state.bus_client from the test's own event loop to pre-warm its recipient cache — TestClient runs the app's lifespan (and everything it creates) on a separate thread with its own event loop, so that hung silently for the full timeout. Fixed by not doing that at all: since RecipientCache.start() blocks until its catch-up snapshot loads, subscribing the observer before the app is even created is sufficient — no cross-loop access needed. Also hit a dumb but costly one on the way: forgot nats_url in the test's settings, silently falling back to the Docker-internal nats://nats:4222 hostname, which doesn't resolve from the host — several minutes of DNS-retry timeout before I caught it.
+
+115 tests total, full suite run 3× clean, the new entrypoint test run 5× standalone given how it failed. Clean ruff/mypy/bandit/pip-audit throughout. Design.md and Dependencies.md updated with every real finding; bus state cleaned; jetcore-nats-1 still healthy.
+
+Ready for Track E — wiring both adapters into docker-compose and proving the whole vertical slice end-to-end whenever you'd like to continue.
+
+---------------- Track D Completed --------------------
