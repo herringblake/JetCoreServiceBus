@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jetcoreservicebus.internal/schemas/events.http.RequestCompleted.v1.json",
+  "title": "RequestCompleted",
+  "description": "Result: the HTTP Adapter called its configured external REST API in response to a trigger event, and got a real response back (Design.md §8, §13 Step H3). eventDetails.correlationId is set to the triggering event's eventId. Published only when a response was actually received — a genuine connection failure (the API unreachable, not just returning an error status) leaves the triggering command unacked for redelivery instead (Design.md §13), so there's nothing to report yet.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "statusCode", "body", "occurredAt"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["success", "error"],
+      "description": "success: the external API returned a 2xx status. error: any other status (4xx/5xx) — this adapter reports the outcome, it doesn't judge it (Design.md §13)."
+    },
+    "statusCode": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 599,
+      "description": "The external API's real HTTP status code."
+    },
+    "body": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "The external API's raw response body, base64-encoded — not assumed to be JSON or even text, since the target is an arbitrary external API."
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp (RFC 3339 / ISO 8601) the response was received."
+    }
+  }
+}

@@ -16,8 +16,8 @@ from collections.abc import AsyncGenerator
 
 import httpx
 import pytest
-from _local_http_server import LocalHttpServer
 from _webhook_sender_helpers import ORDER_CREATED_SUBJECT, connect, wait_until_cache_has
+from _webhook_sender_local_server import LocalHttpServer
 from webhook_sender.relay_handler import RelayHandler
 
 

@@ -188,3 +188,4 @@ adapters:
         - events.files.FileListCompleted
         - events.files.FileDeleteCompleted
         - events.files.FileOperationFailed
+        - events.http.RequestCompleted       # Design.md §13 Step H5

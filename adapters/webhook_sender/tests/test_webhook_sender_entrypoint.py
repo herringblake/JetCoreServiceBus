@@ -14,8 +14,8 @@ import asyncio
 
 import httpx
 import webhook_sender.__main__ as entrypoint
-from _local_http_server import LocalHttpServer
 from _webhook_sender_helpers import ORDER_CREATED_SUBJECT, connect, wait_until_cache_has
+from _webhook_sender_local_server import LocalHttpServer
 from jetcore.bus_client import BusClient
 from jetcore.config import AdapterSettings
 

@@ -1,9 +1,19 @@
-"""A real local HTTP server for webhook_sender's tests (Design.md §13
-Step G5) — stdlib only (`http.server`), no new dependency, and no mocking:
-this project's whole testing ethos has been real components throughout
-(real NATS, real crypto, real files, real Docker); a relay adapter's own
-tests shouldn't be the first to reach for a fake HTTP layer instead of a
+"""A real local HTTP server for http_adapter's tests (Design.md §13 Step
+H5) — a local copy of the identical helper webhook_sender's tests use
+(Step G5), not a cross-package import, for the same self-containment
+reason every other adapter's `_*_helpers.py` explains. Stdlib only
+(`http.server`), no new dependency, and no mocking: this project's whole
+testing ethos has been real components throughout (real NATS, real
+crypto, real files, real Docker) — an adapter making real outbound HTTP
+calls shouldn't be the first to reach for a fake HTTP layer instead of a
 real socket.
+
+Named _http_adapter_local_server.py, not _local_http_server.py: two
+different packages both naming their local copy identically collides the
+same way any other same-named module across workspace members does
+(confirmed here too, not just for test_*.py files or _*_helpers.py —
+mypy: "Duplicate module named _local_http_server", also at
+webhook_sender's own copy).
 
 Runs in a background thread (`http.server` is synchronous) alongside the
 async test code, which just POSTs to a real `127.0.0.1` port.
