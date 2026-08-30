@@ -18,6 +18,7 @@ from collections.abc import Iterator
 import pytest
 from fastapi.testclient import TestClient
 from jetcore.bus_client import BusClient
+from jetcore.envelope import new_event_id
 from webhook_listener.app import create_app
 from webhook_listener.settings import WebhookListenerSettings
 
@@ -41,8 +42,13 @@ class FakeBusClient(BusClient):
         event_type: str,
         event_schema_version: str = "1.0.0",
         correlation_id: str | None = None,
-    ) -> None:
+    ) -> str:
         self.published.append((subject, payload, event_type))
+        # A real, distinct id each call — Design.md §13 Step I1 made this a
+        # real return value, not None; a fixed constant here would silently
+        # pass a REST API Service test that (bug) reused the SAME id for
+        # every request's correlationId.
+        return new_event_id()
 
 
 @pytest.fixture

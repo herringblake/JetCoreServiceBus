@@ -12,6 +12,7 @@ members = [
     "jet-core-service-bus",
     "jetcore",
     "jetcore-http-adapter",
+    "jetcore-rest-api-service",
     "jetcore-webhook-listener",
     "jetcore-webhook-sender",
 ]
@@ -774,6 +775,23 @@ dependencies = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "jetcore", editable = "libs/jetcore" },
+]
+
+[[package]]
+name = "jetcore-rest-api-service"
+version = "0.1.0"
+source = { editable = "adapters/rest_api_service" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "jetcore" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.141.1" },
+    { name = "jetcore", editable = "libs/jetcore" },
+    { name = "uvicorn", specifier = ">=0.52.4" },
 ]
 
 [[package]]

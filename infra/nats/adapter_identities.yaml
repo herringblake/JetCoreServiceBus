@@ -110,11 +110,15 @@ adapters:
     adapterType: rest-api-service
     description: >
       "Front door" for external HTTP clients — translates inbound REST calls
-      into bus events (§8).
+      into bus events (§8). Design.md §13 Step I4 added its sync-reply path:
+      subscribes to OrderPersisted (Decision #26) to correlate a Database
+      Adapter write-ack back to the HTTP request that triggered it, via an
+      in-memory pending-request map keyed by correlationId.
     permissions:
       publish:
         - events.orders.OrderCreated   # placeholder published subject
-      subscribe: []
+      subscribe:
+        - events.orders.OrderPersisted   # Design.md §13 Step I4
 
   - serviceId: webhook-sender-01
     adapterType: webhook-sender
@@ -133,11 +137,19 @@ adapters:
       CDC read path tails the binlog and publishes row changes. These two
       paths deliberately use DIFFERENT subjects (see note below) so the
       adapter never consumes its own CDC output as a write-path trigger.
+      Not yet built as code (Track J) — its real NATS identity is already
+      provisioned, though, so Track I's Step I7 borrows it as a "fake
+      replier" in tests (the same "not-yet-built adapter's real identity"
+      approach Steps G5/H5 used for rest-api-service-01 before Track I
+      existed), publishing a matching OrderPersisted on cue without needing
+      the real Database Adapter to exist yet.
     permissions:
       publish:
         - events.db.orders.RowChanged   # CDC read path output — distinct
                                          # namespace from the write-path
                                          # input subject below, on purpose.
+        - events.orders.OrderPersisted  # write-ack event (Decision #26,
+                                         # Design.md §13 Step I4)
       subscribe:
         - events.orders.OrderCreated    # write path input
 
@@ -189,3 +201,8 @@ adapters:
         - events.files.FileDeleteCompleted
         - events.files.FileOperationFailed
         - events.http.RequestCompleted       # Design.md §13 Step H5
+        - events.orders.OrderCreated         # Design.md §13 Step I7 —
+                                              # independently captures a
+                                              # POST /api/orders request's
+                                              # real eventId, same reason
+                                              # as FileWriteRequested above

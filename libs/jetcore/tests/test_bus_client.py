@@ -39,7 +39,7 @@ async def test_publish_and_fetch_round_trip(durable_name: str) -> None:
         # recipient cache to actually see it registered.
         await _wait_until_cache_nonempty(await publisher._cache_for(SUBJECT))
 
-        await publisher.publish(
+        event_id = await publisher.publish(
             SUBJECT, b"hello from the round trip", event_type="FileWriteRequested"
         )
 
@@ -49,6 +49,9 @@ async def test_publish_and_fetch_round_trip(durable_name: str) -> None:
         assert received[0].payload == b"hello from the round trip"
         assert received[0].details.event_type == "FileWriteRequested"
         assert received[0].details.source_service_id == "webhook-listener-01"
+        # Design.md §13 Step I1 — publish() now returns the generated
+        # eventId, and it must be the *same* id the receiver actually sees.
+        assert event_id == received[0].details.event_id
         await received[0].ack()
     finally:
         await publisher.close()

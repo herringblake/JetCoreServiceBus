@@ -1,0 +1,39 @@
+# rest_api_service — "front door" for external HTTP clients, translating
+# inbound REST calls into bus events (Design.md §8, §13 Track I). The one
+# adapter in this phase with a synchronous reply path: `?wait=` correlates
+# a Database Adapter write-ack (events.orders.OrderPersisted, Decision #26)
+# back to the HTTP request that triggered it, via BusClient.publish()'s
+# now-returned eventId (Decision #24, Step I1) — not core NATS
+# request-reply.
+#
+# Dependencies added incrementally as each module (Design.md §13 Track I)
+# is actually built, same discipline every prior adapter followed.
+# `jetcore` is the one dependency every adapter needs from the start;
+# `fastapi`/`uvicorn` mirror the Webhook Listener's own HTTP-adapter shape
+# (Step D1) since both are FastAPI-based front doors.
+#
+# [project] name is "jetcore-rest-api-service", not "rest-api-service" —
+# applying Decision #28 from the start (confirmed during Design.md §13
+# Step G5 that unprefixed adapter names collide with real, unrelated
+# PyPI packages), not retrofitted the way webhook-listener/webhook-sender
+# needed. The Python import name (`rest_api_service`) is unaffected.
+
+[project]
+name = "jetcore-rest-api-service"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "jetcore",
+    "uvicorn>=0.52.4",
+]
+
+[tool.uv.sources]
+jetcore = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["rest_api_service"]

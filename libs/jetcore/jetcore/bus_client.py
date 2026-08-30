@@ -208,7 +208,12 @@ class BusClient:
         event_type: str,
         event_schema_version: str = "1.0.0",
         correlation_id: str | None = None,
-    ) -> None:
+    ) -> str:
+        """Publishes `payload` and returns the generated `eventId` (Design.md
+        §13 Step I1, Decision #24) — the REST API Service needs it as the
+        `correlationId` for a synchronous-reply request, and every existing
+        caller that ignored the previous `None` return is unaffected by this
+        becoming a real value (additive, not breaking)."""
         cache = await self._cache_for(subject)
         recipients = cache.current()
         if not recipients:
@@ -231,6 +236,7 @@ class BusClient:
             eventPayload=base64.b64encode(ciphertext).decode(),
         )
         await self._js.publish(subject, Event(event=envelope).to_wire())
+        return details.event_id
 
     # --- Consume ---------------------------------------------------------
 
