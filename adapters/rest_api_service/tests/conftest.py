@@ -30,7 +30,14 @@ _ALL_SUBJECTS = (ORDER_CREATED_SUBJECT, ORDER_PERSISTED_SUBJECT)
 # restarts). A leftover consumer from an earlier real-`create_app()` test
 # run attaches to (doesn't replace) an existing one on `pull_subscribe`,
 # so it needs active deletion between runs, not just a stream purge.
-FIXED_ENTRYPOINT_DURABLE_NAME = "rest-api-service-01-events_orders_OrderPersisted"
+#
+# Named after rest-api-service-01-TEST, not rest-api-service-01 itself
+# (Defects.md Defect 1) — test_rest_api_service_app.py's SETTINGS connects
+# as the dedicated test-only identity, so its durable name (derived from
+# settings.service_id) follows suit; this also keeps it from ever
+# colliding with the real deployed container's own identically-shaped
+# consumer.
+FIXED_ENTRYPOINT_DURABLE_NAME = "rest-api-service-01-test-events_orders_OrderPersisted"
 
 
 @pytest.fixture(autouse=True)

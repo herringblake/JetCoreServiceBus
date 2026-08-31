@@ -6,6 +6,12 @@ for their own adapters — test_relay_handler.py already proves
 RelayHandler works in isolation; this is the one test that proves it
 still works wired into the real multi-subject gather (Step G4), including
 the "subjects is empty" keepalive path.
+
+Connects as webhook-sender-01-TEST, a dedicated test-only identity
+(Defects.md Defect 1) — not webhook-sender-01 itself, whose real
+docker-compose container runs throughout this whole dev session and
+would otherwise race this test for the service-identity/service-directory
+KV entries.
 """
 
 from __future__ import annotations
@@ -23,12 +29,12 @@ from jetcore.config import AdapterSettings
 async def test_real_entrypoint_relays_and_shuts_down_cleanly(durable_name: str) -> None:
     server = LocalHttpServer(status_code=200)
     settings = AdapterSettings(
-        service_id="webhook-sender-01",
+        service_id="webhook-sender-01-test",
         nats_url="nats://localhost:4222",
-        nats_creds_path="infra/nats/operator/creds/webhook-sender-01.creds",
+        nats_creds_path="infra/nats/operator/creds/webhook-sender-01-test.creds",
     )
     sender_client = await BusClient.connect_as_adapter(settings, adapter_type="webhook-sender")
-    publisher = await connect("rest-api-service-01")
+    publisher = await connect("rest-api-service-01-test")
     shutdown = asyncio.Event()
     run_task: asyncio.Task[None] | None = None
     try:
@@ -40,7 +46,7 @@ async def test_real_entrypoint_relays_and_shuts_down_cleanly(durable_name: str) 
                     target_url=server.url,
                     outbound_secret="entrypoint-secret",
                     http_client=http_client,
-                    service_id="webhook-sender-01",
+                    service_id="webhook-sender-01-test",
                     shutdown=shutdown,
                 )
             )
@@ -78,9 +84,9 @@ async def test_real_entrypoint_with_no_subjects_still_shuts_down_cleanly() -> No
     subjects there's nothing to gather except it, so run() must still
     respond to shutdown rather than hang forever with an empty gather."""
     settings = AdapterSettings(
-        service_id="webhook-sender-01",
+        service_id="webhook-sender-01-test",
         nats_url="nats://localhost:4222",
-        nats_creds_path="infra/nats/operator/creds/webhook-sender-01.creds",
+        nats_creds_path="infra/nats/operator/creds/webhook-sender-01-test.creds",
     )
     sender_client = await BusClient.connect_as_adapter(settings, adapter_type="webhook-sender")
     shutdown = asyncio.Event()
@@ -94,7 +100,7 @@ async def test_real_entrypoint_with_no_subjects_still_shuts_down_cleanly() -> No
                     target_url="http://127.0.0.1:1",  # never used — no subjects
                     outbound_secret=None,
                     http_client=http_client,
-                    service_id="webhook-sender-01",
+                    service_id="webhook-sender-01-test",
                     shutdown=shutdown,
                 )
             )

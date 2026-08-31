@@ -30,10 +30,13 @@ from jetcore.bus_client import BusClient
 async def test_real_entrypoint_processes_write_and_cdc_together_and_shuts_down_cleanly(
     durable_name: str,
 ) -> None:
+    # Dedicated test-only identity (Defects.md Defect 1), not
+    # db-adapter-mysql-01 itself — that real serviceId's own live
+    # docker-compose container runs throughout this whole dev session.
     settings = DbAdapterSettings(
-        service_id="db-adapter-mysql-01",
+        service_id="db-adapter-mysql-01-test",
         nats_url="nats://localhost:4222",
-        nats_creds_path="infra/nats/operator/creds/db-adapter-mysql-01.creds",
+        nats_creds_path="infra/nats/operator/creds/db-adapter-mysql-01-test.creds",
         mysql_host="localhost",
         mysql_write_user="jetcore_write",
         mysql_write_password="jetcore-write-dev-only",
@@ -43,7 +46,7 @@ async def test_real_entrypoint_processes_write_and_cdc_together_and_shuts_down_c
     adapter_client = await BusClient.connect_as_adapter(
         settings, adapter_type="database-adapter-mysql"
     )
-    publisher = await connect("rest-api-service-01")
+    publisher = await connect("rest-api-service-01-test")
     observer = await connect("test-observer-01")
     shutdown = asyncio.Event()
     run_task: asyncio.Task[None] | None = None
@@ -60,7 +63,7 @@ async def test_real_entrypoint_processes_write_and_cdc_together_and_shuts_down_c
         )
         # The write handler's own subscribe() (inside run(), not yet
         # called at this point) is what actually registers
-        # db-adapter-mysql-01 as a recipient for OrderCreated — this wait
+        # db-adapter-mysql-01-test as a recipient for OrderCreated — this wait
         # has to come AFTER run_task starts, the same ordering mistake
         # already found and fixed in Step I7's own entrypoint test.
         await wait_until_cache_has(await publisher._cache_for(ORDER_CREATED_SUBJECT), 1)

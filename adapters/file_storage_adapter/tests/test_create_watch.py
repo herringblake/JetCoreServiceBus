@@ -98,7 +98,7 @@ async def test_external_file_creation_is_detected_and_published(
     tmp_path: Path, durable_name: str, stop_watch: WatchHandle
 ) -> None:
     stop_event, tasks = stop_watch
-    fs_client = await connect("file-storage-01")
+    fs_client = await connect("file-storage-01-test")
     observer = await connect("test-observer-01")
     try:
         completed_durable = await observer.subscribe(
@@ -130,8 +130,8 @@ async def test_command_triggered_creation_is_not_also_reported_by_watch(
     tmp_path: Path, durable_name: str, stop_watch: WatchHandle
 ) -> None:
     stop_event, tasks = stop_watch
-    publisher = await connect("webhook-listener-01")
-    fs_client = await connect("file-storage-01")
+    publisher = await connect("webhook-listener-01-test")
+    fs_client = await connect("file-storage-01-test")
     observer = await connect("test-observer-01")
     try:
         recent_writes = RecentWrites()

@@ -32,8 +32,8 @@ def _write_requested_payload(path: str, content: bytes) -> bytes:
 async def test_new_file_creates_and_publishes_file_create_completed(
     tmp_path: Path, durable_name: str
 ) -> None:
-    publisher = await connect("webhook-listener-01")
-    fs_client = await connect("file-storage-01")
+    publisher = await connect("webhook-listener-01-test")
+    fs_client = await connect("file-storage-01-test")
     observer = await connect("test-observer-01")
     handler = WriteCommandHandler(fs_client, watch_dir=tmp_path)
     try:
@@ -67,7 +67,7 @@ async def test_new_file_creates_and_publishes_file_create_completed(
 
         [result] = await observer.fetch(completed_durable, timeout=3)
         assert result.details.event_type == "FileCreateCompleted"
-        assert result.details.source_service_id == "file-storage-01"
+        assert result.details.source_service_id == "file-storage-01-test"
         assert result.details.correlation_id == request_seen.details.event_id
         data = json.loads(result.payload)
         assert data["path"] == "notes/todo.txt"
@@ -86,8 +86,8 @@ async def test_existing_file_updates_and_publishes_file_write_completed(
     existing.parent.mkdir(parents=True)
     existing.write_bytes(b"old content")
 
-    publisher = await connect("webhook-listener-01")
-    fs_client = await connect("file-storage-01")
+    publisher = await connect("webhook-listener-01-test")
+    fs_client = await connect("file-storage-01-test")
     observer = await connect("test-observer-01")
     handler = WriteCommandHandler(fs_client, watch_dir=tmp_path)
     try:
@@ -124,8 +124,8 @@ async def test_existing_file_updates_and_publishes_file_write_completed(
 async def test_malformed_payload_is_acked_not_left_for_redelivery(
     tmp_path: Path, durable_name: str
 ) -> None:
-    publisher = await connect("webhook-listener-01")
-    fs_client = await connect("file-storage-01")
+    publisher = await connect("webhook-listener-01-test")
+    fs_client = await connect("file-storage-01-test")
     handler = WriteCommandHandler(fs_client, watch_dir=tmp_path)
     try:
         handler_durable = await handler.start(durable_name=durable_name)
@@ -154,8 +154,8 @@ async def test_path_traversal_is_rejected_without_writing_outside_watch_dir(
     watch_dir = tmp_path / "watch"
     watch_dir.mkdir()
 
-    publisher = await connect("webhook-listener-01")
-    fs_client = await connect("file-storage-01")
+    publisher = await connect("webhook-listener-01-test")
+    fs_client = await connect("file-storage-01-test")
     handler = WriteCommandHandler(fs_client, watch_dir=watch_dir)
     try:
         handler_durable = await handler.start(durable_name=durable_name)

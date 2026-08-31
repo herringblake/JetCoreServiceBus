@@ -34,7 +34,7 @@ async def test_existing_file_is_read_and_published(tmp_path: Path, durable_name:
     existing.write_bytes(b"hello world")
 
     client = await connect("test-observer-01")
-    fs_client = await connect("file-storage-01")
+    fs_client = await connect("file-storage-01-test")
     handler = ReadCommandHandler(fs_client, watch_dir=tmp_path)
     try:
         handler_durable = await handler.start(durable_name=durable_name)
@@ -56,7 +56,7 @@ async def test_existing_file_is_read_and_published(tmp_path: Path, durable_name:
 
         [result] = await client.fetch(completed_durable, timeout=3)
         assert result.details.event_type == "FileReadCompleted"
-        assert result.details.source_service_id == "file-storage-01"
+        assert result.details.source_service_id == "file-storage-01-test"
         data = json.loads(result.payload)
         assert data["path"] == "notes/todo.txt"
         assert base64.b64decode(data["content"]) == b"hello world"
@@ -71,7 +71,7 @@ async def test_missing_file_publishes_file_operation_failed(
     tmp_path: Path, durable_name: str
 ) -> None:
     client = await connect("test-observer-01")
-    fs_client = await connect("file-storage-01")
+    fs_client = await connect("file-storage-01-test")
     handler = ReadCommandHandler(fs_client, watch_dir=tmp_path)
     try:
         handler_durable = await handler.start(durable_name=durable_name)
@@ -110,7 +110,7 @@ async def test_malformed_payload_is_acked_not_left_for_redelivery(
     tmp_path: Path, durable_name: str
 ) -> None:
     client = await connect("test-observer-01")
-    fs_client = await connect("file-storage-01")
+    fs_client = await connect("file-storage-01-test")
     handler = ReadCommandHandler(fs_client, watch_dir=tmp_path)
     try:
         handler_durable = await handler.start(durable_name=durable_name)
@@ -139,7 +139,7 @@ async def test_path_traversal_is_rejected_without_reading_outside_watch_dir(
     outside_secret.write_bytes(b"top secret")
 
     client = await connect("test-observer-01")
-    fs_client = await connect("file-storage-01")
+    fs_client = await connect("file-storage-01-test")
     handler = ReadCommandHandler(fs_client, watch_dir=watch_dir)
     try:
         handler_durable = await handler.start(durable_name=durable_name)

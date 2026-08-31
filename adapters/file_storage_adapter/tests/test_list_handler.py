@@ -30,7 +30,7 @@ async def test_directory_contents_are_listed_and_published(
     (notes / "archive").mkdir()
 
     client = await connect("test-observer-01")
-    fs_client = await connect("file-storage-01")
+    fs_client = await connect("file-storage-01-test")
     handler = ListCommandHandler(fs_client, watch_dir=tmp_path)
     try:
         handler_durable = await handler.start(durable_name=durable_name)
@@ -65,7 +65,7 @@ async def test_empty_path_lists_watch_dir_itself(tmp_path: Path, durable_name: s
     (tmp_path / "notes").mkdir()
 
     client = await connect("test-observer-01")
-    fs_client = await connect("file-storage-01")
+    fs_client = await connect("file-storage-01-test")
     handler = ListCommandHandler(fs_client, watch_dir=tmp_path)
     try:
         handler_durable = await handler.start(durable_name=durable_name)
@@ -96,7 +96,7 @@ async def test_missing_directory_publishes_file_operation_failed(
     tmp_path: Path, durable_name: str
 ) -> None:
     client = await connect("test-observer-01")
-    fs_client = await connect("file-storage-01")
+    fs_client = await connect("file-storage-01-test")
     handler = ListCommandHandler(fs_client, watch_dir=tmp_path)
     try:
         handler_durable = await handler.start(durable_name=durable_name)
@@ -131,7 +131,7 @@ async def test_path_that_is_a_file_publishes_not_a_directory_failure(
     (tmp_path / "todo.txt").write_bytes(b"not a directory")
 
     client = await connect("test-observer-01")
-    fs_client = await connect("file-storage-01")
+    fs_client = await connect("file-storage-01-test")
     handler = ListCommandHandler(fs_client, watch_dir=tmp_path)
     try:
         handler_durable = await handler.start(durable_name=durable_name)
@@ -163,7 +163,7 @@ async def test_malformed_payload_is_acked_not_left_for_redelivery(
     tmp_path: Path, durable_name: str
 ) -> None:
     client = await connect("test-observer-01")
-    fs_client = await connect("file-storage-01")
+    fs_client = await connect("file-storage-01-test")
     handler = ListCommandHandler(fs_client, watch_dir=tmp_path)
     try:
         handler_durable = await handler.start(durable_name=durable_name)
@@ -192,7 +192,7 @@ async def test_path_traversal_is_rejected_without_listing_outside_watch_dir(
     (tmp_path / "outside" / "secret.txt").write_bytes(b"top secret")
 
     client = await connect("test-observer-01")
-    fs_client = await connect("file-storage-01")
+    fs_client = await connect("file-storage-01-test")
     handler = ListCommandHandler(fs_client, watch_dir=watch_dir)
     try:
         handler_durable = await handler.start(durable_name=durable_name)

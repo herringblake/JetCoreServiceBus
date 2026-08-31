@@ -27,7 +27,7 @@ async def test_existing_file_is_deleted_and_published(tmp_path: Path, durable_na
     existing.write_bytes(b"delete me")
 
     client = await connect("test-observer-01")
-    fs_client = await connect("file-storage-01")
+    fs_client = await connect("file-storage-01-test")
     handler = DeleteCommandHandler(fs_client, watch_dir=tmp_path)
     try:
         handler_durable = await handler.start(durable_name=durable_name)
@@ -63,7 +63,7 @@ async def test_missing_file_publishes_file_operation_failed(
     tmp_path: Path, durable_name: str
 ) -> None:
     client = await connect("test-observer-01")
-    fs_client = await connect("file-storage-01")
+    fs_client = await connect("file-storage-01-test")
     handler = DeleteCommandHandler(fs_client, watch_dir=tmp_path)
     try:
         handler_durable = await handler.start(durable_name=durable_name)
@@ -96,7 +96,7 @@ async def test_malformed_payload_is_acked_not_left_for_redelivery(
     tmp_path: Path, durable_name: str
 ) -> None:
     client = await connect("test-observer-01")
-    fs_client = await connect("file-storage-01")
+    fs_client = await connect("file-storage-01-test")
     handler = DeleteCommandHandler(fs_client, watch_dir=tmp_path)
     try:
         handler_durable = await handler.start(durable_name=durable_name)
@@ -125,7 +125,7 @@ async def test_path_traversal_is_rejected_without_deleting_outside_watch_dir(
     outside_secret.write_bytes(b"do not delete me")
 
     client = await connect("test-observer-01")
-    fs_client = await connect("file-storage-01")
+    fs_client = await connect("file-storage-01-test")
     handler = DeleteCommandHandler(fs_client, watch_dir=watch_dir)
     try:
         handler_durable = await handler.start(durable_name=durable_name)

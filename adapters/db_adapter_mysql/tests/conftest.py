@@ -21,10 +21,19 @@ from _db_adapter_mysql_helpers import (
     ORDER_PERSISTED_SUBJECT,
     root_engine,
 )
-from nats.js.errors import NoKeysError
+from nats.js.errors import NoKeysError, NotFoundError
 from sqlalchemy import text
 
 _ALL_SUBJECTS = (ORDER_CREATED_SUBJECT, ORDER_PERSISTED_SUBJECT)
+
+# test_db_adapter_mysql_entrypoint.py drives the real __main__.run() under
+# db-adapter-mysql-01-TEST (Defects.md Defect 1), not db-adapter-mysql-01
+# itself — its write handler's fixed (non-random) durable name follows
+# suit. Same "needs active deletion between runs, not just a stream
+# purge" reasoning as every other adapter's own FIXED_ENTRYPOINT_DURABLE_
+# NAME(S) — a leftover consumer from an earlier run attaches to (doesn't
+# replace) an existing one on `pull_subscribe`.
+FIXED_ENTRYPOINT_DURABLE_NAME = "db-adapter-mysql-01-test-write-handler"
 
 
 @pytest.fixture(autouse=True)
@@ -32,6 +41,10 @@ async def _clean_state() -> AsyncGenerator[None]:
     nc = await nats.connect(NATS_URL, user_credentials=f"{CREDS_DIR}/jetcore-admin.creds")
     js = nc.jetstream()
     await js.purge_stream("EVENTS")
+    try:
+        await js.delete_consumer("EVENTS", FIXED_ENTRYPOINT_DURABLE_NAME)
+    except NotFoundError:
+        pass
     kv = await js.key_value("service-directory")
     for subject in _ALL_SUBJECTS:
         try:

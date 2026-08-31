@@ -31,8 +31,8 @@ async def test_received_event_is_relayed_to_target_url(
     durable_name: str, http_client: httpx.AsyncClient
 ) -> None:
     server = LocalHttpServer(status_code=200)
-    publisher = await connect("rest-api-service-01")
-    sender_client = await connect("webhook-sender-01")
+    publisher = await connect("rest-api-service-01-test")
+    sender_client = await connect("webhook-sender-01-test")
     handler = RelayHandler(
         sender_client,
         subject=ORDER_CREATED_SUBJECT,
@@ -66,8 +66,8 @@ async def test_outbound_secret_is_sent_when_configured(
     durable_name: str, http_client: httpx.AsyncClient
 ) -> None:
     server = LocalHttpServer(status_code=200)
-    publisher = await connect("rest-api-service-01")
-    sender_client = await connect("webhook-sender-01")
+    publisher = await connect("rest-api-service-01-test")
+    sender_client = await connect("webhook-sender-01-test")
     handler = RelayHandler(
         sender_client,
         subject=ORDER_CREATED_SUBJECT,
@@ -97,8 +97,8 @@ async def test_failed_post_is_still_acked_not_redelivered(
     """Decision #12 — best-effort, single attempt. A downstream 500
     shouldn't cause redelivery, which would itself be a retry."""
     server = LocalHttpServer(status_code=500)
-    publisher = await connect("rest-api-service-01")
-    sender_client = await connect("webhook-sender-01")
+    publisher = await connect("rest-api-service-01-test")
+    sender_client = await connect("webhook-sender-01-test")
     handler = RelayHandler(
         sender_client,
         subject=ORDER_CREATED_SUBJECT,
@@ -132,8 +132,8 @@ async def test_connection_refused_is_still_acked_not_redelivered(
     """A downstream that isn't even listening — httpx.ConnectError, not
     an HTTP status — must be caught the same way a 500 is (Decision #12
     doesn't distinguish "server errored" from "server unreachable")."""
-    publisher = await connect("rest-api-service-01")
-    sender_client = await connect("webhook-sender-01")
+    publisher = await connect("rest-api-service-01-test")
+    sender_client = await connect("webhook-sender-01-test")
     # Port 1 is always refused (privileged, nothing binds it in a test env).
     handler = RelayHandler(
         sender_client,

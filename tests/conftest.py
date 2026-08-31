@@ -18,6 +18,11 @@ Step K4 extends this fixture with a second real datastore's own cleanup
 (MySQL's `orders` table, the same `DELETE FROM orders` pattern
 adapters/db_adapter_mysql/tests/conftest.py already established) — the
 first time this root conftest.py has needed anything beyond NATS.
+
+Both cross-adapter tests connect as each real adapter's dedicated
+test-only twin (`<adapter>-01-test`, Defects.md Defect 1), not the real
+adapter identities themselves — the fixed durable names below follow
+suit.
 """
 
 from __future__ import annotations
@@ -46,15 +51,15 @@ OPERATION_FAILED_SUBJECT = "events.files.FileOperationFailed"
 ORDER_CREATED_SUBJECT = "events.orders.OrderCreated"
 ORDER_PERSISTED_SUBJECT = "events.orders.OrderPersisted"
 FIXED_ENTRYPOINT_DURABLE_NAMES = (
-    "file-storage-01-write-handler",
-    "file-storage-01-read-handler",
-    "file-storage-01-list-handler",
-    "file-storage-01-delete-handler",
-    "db-adapter-mysql-01-write-handler",
+    "file-storage-01-test-write-handler",
+    "file-storage-01-test-read-handler",
+    "file-storage-01-test-list-handler",
+    "file-storage-01-test-delete-handler",
+    "db-adapter-mysql-01-test-write-handler",
     # rest_api_service/app.py's own lifespan (Design.md §13 Step I5) builds
     # its durable name from the subject string directly, the same
     # dot-replacement convention Step G4 introduced.
-    "rest-api-service-01-events_orders_OrderPersisted",
+    "rest-api-service-01-test-events_orders_OrderPersisted",
 )
 
 

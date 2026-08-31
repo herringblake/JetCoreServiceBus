@@ -27,7 +27,7 @@ from sqlalchemy import text
 
 
 async def test_order_created_is_upserted_and_persisted_published(durable_name: str) -> None:
-    # ONE client for both roles, not two separate connect("rest-api-service-01")
+    # ONE client for both roles, not two separate connect("rest-api-service-01-test")
     # calls — a real bug the first version of this test hit: two concurrent
     # connections under the same serviceId each register_identity() their
     # own freshly-generated signing key (BusClient.connect(), unlike
@@ -37,8 +37,8 @@ async def test_order_created_is_upserted_and_persisted_published(durable_name: s
     # in bus_client.py's connect_as_adapter() docstring (Step B7); this is
     # the same underlying issue, just via two ad-hoc test connections
     # instead of two real adapter restarts.
-    publisher = await connect("rest-api-service-01")
-    adapter_client = await connect("db-adapter-mysql-01")
+    publisher = await connect("rest-api-service-01-test")
+    adapter_client = await connect("db-adapter-mysql-01-test")
     engine = write_engine()
     handler = WriteCommandHandler(adapter_client, engine=engine)
     try:
@@ -61,7 +61,7 @@ async def test_order_created_is_upserted_and_persisted_published(durable_name: s
 
         [result] = await publisher.fetch(completed_durable, timeout=3)
         assert result.details.event_type == "OrderPersisted"
-        assert result.details.source_service_id == "db-adapter-mysql-01"
+        assert result.details.source_service_id == "db-adapter-mysql-01-test"
 
         root = root_engine()
         try:
@@ -86,8 +86,8 @@ async def test_order_created_upserts_idempotently_on_repeat(durable_name: str) -
     """Decision #25 — order_id is caller-supplied specifically so a
     repeat/redelivered OrderCreated for the same order updates the
     existing row rather than failing on a duplicate-key error."""
-    publisher = await connect("rest-api-service-01")
-    adapter_client = await connect("db-adapter-mysql-01")
+    publisher = await connect("rest-api-service-01-test")
+    adapter_client = await connect("db-adapter-mysql-01-test")
     engine = write_engine()
     handler = WriteCommandHandler(adapter_client, engine=engine)
     try:
@@ -129,8 +129,8 @@ async def test_order_created_upserts_idempotently_on_repeat(durable_name: str) -
 
 
 async def test_malformed_payload_is_acked_not_redelivered(durable_name: str) -> None:
-    publisher = await connect("rest-api-service-01")
-    adapter_client = await connect("db-adapter-mysql-01")
+    publisher = await connect("rest-api-service-01-test")
+    adapter_client = await connect("db-adapter-mysql-01-test")
     engine = write_engine()
     handler = WriteCommandHandler(adapter_client, engine=engine)
     try:

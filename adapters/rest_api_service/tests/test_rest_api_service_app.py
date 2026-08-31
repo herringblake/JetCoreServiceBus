@@ -8,14 +8,16 @@ correlation, so there's little value in a FakeBusClient-only layer that
 can't exercise it (unlike webhook_listener's D3/D5 split, which had a
 pure fire-and-forget path worth unit-testing fast and separately).
 
-Uses db-adapter-mysql-01's real identity as the "fake replier" for the
-sync-reply tests — Track J (the real Database Adapter) doesn't exist as
-code yet, but its real NATS identity already does (Phase 1 placeholder
-provisioning, extended in Step I4 with OrderPersisted publish
-permission), the same "not-yet-built adapter's real identity" approach
-Steps G5/H5/I7 have each already used in turn. test-observer-01
-(extended in this step) independently captures a request's real eventId
-where a test needs to, mirroring Step F6's precedent.
+Uses db-adapter-mysql-01-TEST's identity as the "fake replier" for the
+sync-reply tests — a dedicated test-only twin of db-adapter-mysql-01
+(Defects.md Defect 1), not that real serviceId itself: Track J's real
+Database Adapter is now a live docker-compose container (Step K2), and
+this whole app also connects as rest-api-service-01-TEST rather than
+rest-api-service-01 for the same reason. test-observer-01 (extended in
+this step) independently captures a request's real eventId where a test
+needs to, mirroring Step F6's precedent — it has no live production
+counterpart to collide with, so it's unaffected by Defect 1 and stays as
+the real test-observer-01 identity.
 """
 
 from __future__ import annotations
@@ -34,9 +36,9 @@ from rest_api_service.app import create_app
 from rest_api_service.settings import RestApiServiceSettings
 
 SETTINGS = RestApiServiceSettings(
-    service_id="rest-api-service-01",
+    service_id="rest-api-service-01-test",
     nats_url="nats://localhost:4222",
-    nats_creds_path="infra/nats/operator/creds/rest-api-service-01.creds",
+    nats_creds_path="infra/nats/operator/creds/rest-api-service-01-test.creds",
     default_reply_timeout_seconds=5.0,
 )
 
@@ -73,7 +75,7 @@ async def test_fire_and_forget_publishes_a_real_order_created(durable_name: str)
 
 
 async def test_sync_reply_returns_the_real_order_persisted_payload(durable_name: str) -> None:
-    replier = await connect("db-adapter-mysql-01")
+    replier = await connect("db-adapter-mysql-01-test")
     try:
         replier_durable = await replier.subscribe(ORDER_CREATED_SUBJECT, durable_name=durable_name)
 
@@ -103,7 +105,7 @@ async def test_sync_reply_returns_the_real_order_persisted_payload(durable_name:
         # the replier concurrently with the in-flight request.
         with TestClient(create_app(SETTINGS)) as client:
             # The app's own lifespan (entered above) is what actually
-            # subscribes rest-api-service-01 to OrderPersisted — only now
+            # subscribes rest-api-service-01-test to OrderPersisted — only now
             # is it a registered recipient replier.publish() can encrypt
             # for, so the cache-wait has to be here, not before entering
             # this block.

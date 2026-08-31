@@ -11,10 +11,12 @@ run in this session is expected and tolerated, not something to
 suppress.
 
 Uses test-observer-01 (extended with events.db.orders.RowChanged
-subscribe permission in this step) — db-adapter-mysql-01 is the only
-identity with publish permission on this subject, and a real adapter
-deliberately never subscribes to its own output (the same reasoning
-documented for every other adapter's result events).
+subscribe permission in this step) to observe, and connects as
+db-adapter-mysql-01-TEST — a dedicated test-only twin of db-adapter-mysql-01
+(Defects.md Defect 1), not that real serviceId itself, whose own live
+docker-compose container runs throughout this whole dev session — to
+publish. A real adapter deliberately never subscribes to its own output
+(the same reasoning documented for every other adapter's result events).
 """
 
 from __future__ import annotations
@@ -75,9 +77,9 @@ async def _find_row_changed(
 @pytest.fixture
 def db_settings() -> DbAdapterSettings:
     return DbAdapterSettings(
-        service_id="db-adapter-mysql-01",
+        service_id="db-adapter-mysql-01-test",
         nats_url="nats://localhost:4222",
-        nats_creds_path="infra/nats/operator/creds/db-adapter-mysql-01.creds",
+        nats_creds_path="infra/nats/operator/creds/db-adapter-mysql-01-test.creds",
         mysql_host=MYSQL_HOST,  # "localhost" — tests run on the host, not
         # inside the Compose network, unlike a
         # real deployed adapter (which would use
@@ -93,7 +95,7 @@ async def test_cdc_detects_a_direct_sql_insert_bypassing_the_bus(
     durable_name: str, db_settings: DbAdapterSettings
 ) -> None:
     observer = await connect("test-observer-01")
-    adapter_client = await connect("db-adapter-mysql-01")
+    adapter_client = await connect("db-adapter-mysql-01-test")
     watcher = CdcWatcher(adapter_client, db_settings)
     watcher_task = asyncio.create_task(watcher.run())
     try:
@@ -127,7 +129,7 @@ async def test_cdc_detects_a_bus_originated_update(
     durable_name: str, db_settings: DbAdapterSettings
 ) -> None:
     observer = await connect("test-observer-01")
-    adapter_client = await connect("db-adapter-mysql-01")
+    adapter_client = await connect("db-adapter-mysql-01-test")
     watcher = CdcWatcher(adapter_client, db_settings)
     watcher_task = asyncio.create_task(watcher.run())
     try:
@@ -167,7 +169,7 @@ async def test_cdc_detects_a_direct_sql_delete(
     durable_name: str, db_settings: DbAdapterSettings
 ) -> None:
     observer = await connect("test-observer-01")
-    adapter_client = await connect("db-adapter-mysql-01")
+    adapter_client = await connect("db-adapter-mysql-01-test")
     watcher = CdcWatcher(adapter_client, db_settings)
     watcher_task = asyncio.create_task(watcher.run())
     try:

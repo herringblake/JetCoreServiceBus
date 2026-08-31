@@ -12,6 +12,11 @@ two adapters' actual application code works *together*, the same
 separation of concerns Steps C7/D5 each already established for one
 adapter alone. Closes the loop the way Step B7 did for the library by
 itself, this time for two real adapters.
+
+Connects as file-storage-01-TEST and webhook-listener-01-TEST, dedicated
+test-only twins of the real adapters (Defects.md Defect 1) — not
+file-storage-01/webhook-listener-01 themselves, whose own live
+docker-compose containers run throughout this whole dev session.
 """
 
 from __future__ import annotations
@@ -35,9 +40,9 @@ async def test_real_webhook_post_ends_up_as_a_real_file_and_completion_event(
     tmp_path: Path, durable_name: str
 ) -> None:
     fsa_settings = AdapterSettings(
-        service_id="file-storage-01",
+        service_id="file-storage-01-test",
         nats_url="nats://localhost:4222",
-        nats_creds_path="infra/nats/operator/creds/file-storage-01.creds",
+        nats_creds_path="infra/nats/operator/creds/file-storage-01-test.creds",
     )
     fsa_client = await BusClient.connect_as_adapter(
         fsa_settings, adapter_type="file-storage-adapter"
@@ -57,7 +62,7 @@ async def test_real_webhook_post_ends_up_as_a_real_file_and_completion_event(
             file_storage_entrypoint.run(
                 fsa_client,
                 watch_dir=tmp_path,
-                service_id="file-storage-01",
+                service_id="file-storage-01-test",
                 shutdown=shutdown,
             )
         )
@@ -68,9 +73,9 @@ async def test_real_webhook_post_ends_up_as_a_real_file_and_completion_event(
         # C6/D4's connect_as_adapter), exactly as `python -m
         # webhook_listener` does.
         whl_settings = WebhookListenerSettings(
-            service_id="webhook-listener-01",
+            service_id="webhook-listener-01-test",
             nats_url="nats://localhost:4222",
-            nats_creds_path="infra/nats/operator/creds/webhook-listener-01.creds",
+            nats_creds_path="infra/nats/operator/creds/webhook-listener-01-test.creds",
             webhook_secret=WEBHOOK_SECRET,
         )
         app = create_app(whl_settings)
@@ -86,7 +91,7 @@ async def test_real_webhook_post_ends_up_as_a_real_file_and_completion_event(
         received = await observer.fetch(completed_durable, timeout=5)
         assert len(received) == 1
         assert received[0].details.event_type == "FileCreateCompleted"
-        assert received[0].details.source_service_id == "file-storage-01"
+        assert received[0].details.source_service_id == "file-storage-01-test"
 
         written = tmp_path / "e4" / "proof.txt"
         assert written.read_bytes() == body

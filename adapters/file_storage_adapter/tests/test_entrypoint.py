@@ -44,12 +44,12 @@ async def test_real_entrypoint_processes_a_command_and_shuts_down_cleanly(
     tmp_path: Path,
 ) -> None:
     settings = AdapterSettings(
-        service_id="file-storage-01",
+        service_id="file-storage-01-test",
         nats_url="nats://localhost:4222",
-        nats_creds_path="infra/nats/operator/creds/file-storage-01.creds",
+        nats_creds_path="infra/nats/operator/creds/file-storage-01-test.creds",
     )
     fs_client = await BusClient.connect_as_adapter(settings, adapter_type="file-storage-adapter")
-    publisher = await connect("webhook-listener-01")
+    publisher = await connect("webhook-listener-01-test")
     observer = await connect("test-observer-01")
     shutdown = asyncio.Event()
     run_task: asyncio.Task[None] | None = None
@@ -60,7 +60,7 @@ async def test_real_entrypoint_processes_a_command_and_shuts_down_cleanly(
 
         run_task = asyncio.create_task(
             entrypoint.run(
-                fs_client, watch_dir=tmp_path, service_id="file-storage-01", shutdown=shutdown
+                fs_client, watch_dir=tmp_path, service_id="file-storage-01-test", shutdown=shutdown
             )
         )
         await asyncio.sleep(0.2)  # let subscribe()/awatch startup actually happen
@@ -77,7 +77,7 @@ async def test_real_entrypoint_processes_a_command_and_shuts_down_cleanly(
         received = await observer.fetch(completed_durable, timeout=5)
         assert len(received) == 1
         assert received[0].details.event_type == "FileCreateCompleted"
-        assert received[0].details.source_service_id == "file-storage-01"
+        assert received[0].details.source_service_id == "file-storage-01-test"
 
         written = tmp_path / "proof" / "from-real-entrypoint.txt"
         assert written.read_bytes() == b"C7 end-to-end proof"
@@ -107,9 +107,9 @@ async def test_connect_as_adapter_identity_survives_a_simulated_restart(
     connect_as_adapter() returns the same key twice; this confirms it
     holds for the actual entrypoint wiring, not just the bare classmethod."""
     settings = AdapterSettings(
-        service_id="file-storage-01",
+        service_id="file-storage-01-test",
         nats_url="nats://localhost:4222",
-        nats_creds_path="infra/nats/operator/creds/file-storage-01.creds",
+        nats_creds_path="infra/nats/operator/creds/file-storage-01-test.creds",
     )
     first = await BusClient.connect_as_adapter(settings, adapter_type="file-storage-adapter")
     try:
@@ -139,9 +139,9 @@ async def test_real_entrypoint_processes_read_list_and_delete_commands(tmp_path:
     existing.write_bytes(b"already here")
 
     settings = AdapterSettings(
-        service_id="file-storage-01",
+        service_id="file-storage-01-test",
         nats_url="nats://localhost:4222",
-        nats_creds_path="infra/nats/operator/creds/file-storage-01.creds",
+        nats_creds_path="infra/nats/operator/creds/file-storage-01-test.creds",
     )
     fs_client = await BusClient.connect_as_adapter(settings, adapter_type="file-storage-adapter")
     client = await connect("test-observer-01")
@@ -160,7 +160,7 @@ async def test_real_entrypoint_processes_read_list_and_delete_commands(tmp_path:
 
         run_task = asyncio.create_task(
             entrypoint.run(
-                fs_client, watch_dir=tmp_path, service_id="file-storage-01", shutdown=shutdown
+                fs_client, watch_dir=tmp_path, service_id="file-storage-01-test", shutdown=shutdown
             )
         )
         await asyncio.sleep(0.2)  # let subscribe()/awatch startup actually happen

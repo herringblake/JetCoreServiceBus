@@ -42,9 +42,9 @@ async def test_success_response_publishes_request_completed(
     durable_name: str, http_client: httpx.AsyncClient
 ) -> None:
     server = LocalHttpServer(status_code=200)
-    publisher = await connect("rest-api-service-01")
+    publisher = await connect("rest-api-service-01-test")
     observer = await connect("test-observer-01")
-    adapter_client = await connect("http-adapter-01")
+    adapter_client = await connect("http-adapter-01-test")
     handler = TriggerHandler(
         adapter_client,
         subject=ORDER_CREATED_SUBJECT,
@@ -71,7 +71,7 @@ async def test_success_response_publishes_request_completed(
 
         [result] = await observer.fetch(completed_durable, timeout=3)
         assert result.details.event_type == "RequestCompleted"
-        assert result.details.source_service_id == "http-adapter-01"
+        assert result.details.source_service_id == "http-adapter-01-test"
         data = json.loads(result.payload)
         assert data["status"] == "success"
         assert data["statusCode"] == 200
@@ -90,9 +90,9 @@ async def test_error_status_still_publishes_request_completed(
     §13) — a 503 is still a real response, not a failure to reach the
     API at all."""
     server = LocalHttpServer(status_code=503)
-    publisher = await connect("rest-api-service-01")
+    publisher = await connect("rest-api-service-01-test")
     observer = await connect("test-observer-01")
-    adapter_client = await connect("http-adapter-01")
+    adapter_client = await connect("http-adapter-01-test")
     handler = TriggerHandler(
         adapter_client,
         subject=ORDER_CREATED_SUBJECT,
@@ -129,8 +129,8 @@ async def test_auth_token_is_sent_as_bearer_header(
     durable_name: str, http_client: httpx.AsyncClient
 ) -> None:
     server = LocalHttpServer(status_code=200)
-    publisher = await connect("rest-api-service-01")
-    adapter_client = await connect("http-adapter-01")
+    publisher = await connect("rest-api-service-01-test")
+    adapter_client = await connect("http-adapter-01-test")
     handler = TriggerHandler(
         adapter_client,
         subject=ORDER_CREATED_SUBJECT,
@@ -160,8 +160,8 @@ async def test_connection_refused_is_nakd_for_redelivery(
     """Unlike the Webhook Sender's deliberate best-effort choice (Decision
     #12), a genuine connection failure here naks — worth a retry, since
     there's nothing meaningful to report yet."""
-    publisher = await connect("rest-api-service-01")
-    adapter_client = await connect("http-adapter-01")
+    publisher = await connect("rest-api-service-01-test")
+    adapter_client = await connect("http-adapter-01-test")
     handler = TriggerHandler(
         adapter_client,
         subject=ORDER_CREATED_SUBJECT,

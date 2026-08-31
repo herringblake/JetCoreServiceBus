@@ -164,6 +164,115 @@ adapters:
   #     on the real bus, the same way jetcore-admin exists for
   #     provisioning rather than as an adapter (Step A3/A5).
 
+  # --- Dedicated test-only identities for driving a REAL entrypoint ---
+  #     Defects.md Defect 1 (Test/Production Identity Collision): any test
+  #     that calls BusClient.connect_as_adapter() under a real adapter's
+  #     OWN serviceId — by design, to exercise the real __main__.run()/
+  #     create_app() code path, not a stand-in — becomes a second live
+  #     process sharing that identity with whatever real docker-compose
+  #     container is ALSO running under it (true for every adapter as of
+  #     Design.md §13 Step K2). Both service-identity (no TTL) and
+  #     service-directory (TTL'd, but both sides keep re-heartbeating)
+  #     let the two collide silently. Each entry below is a distinct
+  #     serviceId with IDENTICAL permissions to its real counterpart —
+  #     same subjects, same behavior under test, just no live production
+  #     process to race against. Used only by
+  #     BusClient.connect_as_adapter() calls in *_entrypoint.py tests and
+  #     the two root tests/*_end_to_end.py files; every other test's
+  #     plain connect() (a fresh signing key per call, already immune to
+  #     this) is unaffected and unchanged.
+
+  - serviceId: webhook-listener-01-test
+    adapterType: webhook-listener
+    description: >
+      Test-only twin of webhook-listener-01 (Defects.md Defect 1) — identical
+      permissions, used by tests/test_webhook_to_file_storage_end_to_end.py
+      (Step E4) and adapters/webhook_listener/tests/
+      test_webhook_listener_entrypoint.py (Step D5) to drive the real
+      create_app() lifespan without colliding with the live container.
+    permissions:
+      publish:
+        - events.files.FileWriteRequested
+      subscribe: []
+
+  - serviceId: file-storage-01-test
+    adapterType: file-storage-adapter
+    description: >
+      Test-only twin of file-storage-01 (Defects.md Defect 1) — identical
+      permissions, used by tests/test_webhook_to_file_storage_end_to_end.py
+      (Step E4) and adapters/file_storage_adapter/tests/test_entrypoint.py
+      (Step C7) to drive the real __main__.run() without colliding with the
+      live container.
+    permissions:
+      publish:
+        - events.files.FileCreateCompleted
+        - events.files.FileWriteCompleted
+        - events.files.FileReadCompleted
+        - events.files.FileListCompleted
+        - events.files.FileDeleteCompleted
+        - events.files.FileOperationFailed
+      subscribe:
+        - events.files.FileWriteRequested
+        - events.files.FileReadRequested
+        - events.files.FileListRequested
+        - events.files.FileDeleteRequested
+
+  - serviceId: http-adapter-01-test
+    adapterType: http-adapter
+    description: >
+      Test-only twin of http-adapter-01 (Defects.md Defect 1) — identical
+      permissions, used by adapters/http_adapter/tests/
+      test_http_adapter_entrypoint.py (Step H5) to drive the real
+      __main__.run() without colliding with the live container.
+    permissions:
+      publish:
+        - events.http.RequestCompleted
+      subscribe:
+        - events.orders.OrderCreated
+
+  - serviceId: rest-api-service-01-test
+    adapterType: rest-api-service
+    description: >
+      Test-only twin of rest-api-service-01 (Defects.md Defect 1) —
+      identical permissions, used by adapters/rest_api_service/tests/
+      test_rest_api_service_app.py (Step I7) and
+      tests/test_rest_api_service_to_db_adapter_end_to_end.py (Step K4) to
+      drive the real create_app() lifespan without colliding with the live
+      container.
+    permissions:
+      publish:
+        - events.orders.OrderCreated
+      subscribe:
+        - events.orders.OrderPersisted
+
+  - serviceId: webhook-sender-01-test
+    adapterType: webhook-sender
+    description: >
+      Test-only twin of webhook-sender-01 (Defects.md Defect 1) — identical
+      permissions, used by adapters/webhook_sender/tests/
+      test_webhook_sender_entrypoint.py (Step G5) to drive the real
+      __main__.run() without colliding with the live container.
+    permissions:
+      publish: []
+      subscribe:
+        - events.orders.OrderCreated
+
+  - serviceId: db-adapter-mysql-01-test
+    adapterType: database-adapter-mysql
+    description: >
+      Test-only twin of db-adapter-mysql-01 (Defects.md Defect 1) —
+      identical permissions, used by adapters/db_adapter_mysql/tests/
+      test_db_adapter_mysql_entrypoint.py (Step J7) and
+      tests/test_rest_api_service_to_db_adapter_end_to_end.py (Step K4) to
+      drive the real __main__.run() without colliding with the live
+      container.
+    permissions:
+      publish:
+        - events.db.orders.RowChanged
+        - events.orders.OrderPersisted
+      subscribe:
+        - events.orders.OrderCreated
+
   - serviceId: test-observer-01
     adapterType: test-observer
     description: >

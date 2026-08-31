@@ -46,15 +46,21 @@ _ALL_SUBJECTS = (
 # "{service_id}-{command}-handler" names, unlike every other test here's
 # randomized `durable_name` fixture, because that's what a real deployment
 # needs (resume its own cursor across restarts). Step C7's entrypoint test
-# reuses these same real names on purpose, which means they — and only
-# they — need active deletion between runs, not just a stream purge: a
-# leftover consumer from an earlier run attaches to (doesn't replace) an
-# existing one on `pull_subscribe`.
+# reuses these same names on purpose, which means they — and only they —
+# need active deletion between runs, not just a stream purge: a leftover
+# consumer from an earlier run attaches to (doesn't replace) an existing
+# one on `pull_subscribe`.
+#
+# Named after file-storage-01-TEST, not file-storage-01 itself (Defects.md
+# Defect 1) — Step C7's entrypoint test drives the real __main__.run()
+# under a dedicated test-only identity (infra/nats/adapter_identities.yaml)
+# so its own durable consumers can never collide with the real, separately
+# deployed file-storage-01 container's identically-shaped ones.
 FIXED_ENTRYPOINT_DURABLE_NAMES = (
-    "file-storage-01-write-handler",
-    "file-storage-01-read-handler",
-    "file-storage-01-list-handler",
-    "file-storage-01-delete-handler",
+    "file-storage-01-test-write-handler",
+    "file-storage-01-test-read-handler",
+    "file-storage-01-test-list-handler",
+    "file-storage-01-test-delete-handler",
 )
 
 

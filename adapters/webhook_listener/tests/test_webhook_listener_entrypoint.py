@@ -43,10 +43,16 @@ WEBHOOK_SECRET = "d5-live-bus-secret"
 
 
 async def test_real_post_publishes_a_real_signed_encrypted_command(durable_name: str) -> None:
+    # Dedicated test-only identity (Defects.md Defect 1), not
+    # webhook-listener-01 itself — that real serviceId's own live
+    # docker-compose container is running throughout this whole dev
+    # session, and connect_as_adapter() under the SAME serviceId here
+    # would silently race it for the service-identity/service-directory
+    # KV entries.
     settings = WebhookListenerSettings(
-        service_id="webhook-listener-01",
+        service_id="webhook-listener-01-test",
         nats_url="nats://localhost:4222",
-        nats_creds_path="infra/nats/operator/creds/webhook-listener-01.creds",
+        nats_creds_path="infra/nats/operator/creds/webhook-listener-01-test.creds",
         webhook_secret=WEBHOOK_SECRET,
     )
     observer = await connect("test-observer-01")
@@ -75,7 +81,7 @@ async def test_real_post_publishes_a_real_signed_encrypted_command(durable_name:
         assert len(received) == 1
         result = received[0]
         assert result.details.event_type == "FileWriteRequested"
-        assert result.details.source_service_id == "webhook-listener-01"
+        assert result.details.source_service_id == "webhook-listener-01-test"
         data = json.loads(result.payload)
         assert data["path"] == "d5/proof.txt"
         assert base64.b64decode(data["content"]) == body

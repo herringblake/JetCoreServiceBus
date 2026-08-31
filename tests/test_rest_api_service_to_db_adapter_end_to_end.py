@@ -17,6 +17,11 @@ relays are already covered at the adapter level (Tracks F/G/H) and via
 K3's manual proof — this is the one pair that actually needed its own
 dedicated cross-adapter test (Design.md §13 Track K's own sequencing
 note): a real synchronous reply, not just a one-way relay.
+
+Connects as db-adapter-mysql-01-TEST and rest-api-service-01-TEST,
+dedicated test-only twins of the real adapters (Defects.md Defect 1) —
+not db-adapter-mysql-01/rest-api-service-01 themselves, whose own live
+docker-compose containers run throughout this whole dev session.
 """
 
 from __future__ import annotations
@@ -34,9 +39,9 @@ from rest_api_service.settings import RestApiServiceSettings
 
 async def test_real_post_gets_a_real_sync_reply_from_the_real_database_adapter() -> None:
     db_settings = DbAdapterSettings(
-        service_id="db-adapter-mysql-01",
+        service_id="db-adapter-mysql-01-test",
         nats_url="nats://localhost:4222",
-        nats_creds_path="infra/nats/operator/creds/db-adapter-mysql-01.creds",
+        nats_creds_path="infra/nats/operator/creds/db-adapter-mysql-01-test.creds",
         mysql_host="localhost",
         mysql_write_user="jetcore_write",
         mysql_write_password="jetcore-write-dev-only",
@@ -62,9 +67,9 @@ async def test_real_post_gets_a_real_sync_reply_from_the_real_database_adapter()
         # I5/I6's connect_as_adapter), exactly as
         # `python -m rest_api_service` does.
         rest_settings = RestApiServiceSettings(
-            service_id="rest-api-service-01",
+            service_id="rest-api-service-01-test",
             nats_url="nats://localhost:4222",
-            nats_creds_path="infra/nats/operator/creds/rest-api-service-01.creds",
+            nats_creds_path="infra/nats/operator/creds/rest-api-service-01-test.creds",
             default_reply_timeout_seconds=10.0,
         )
         app = create_app(rest_settings)
