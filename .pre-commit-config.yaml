@@ -35,4 +35,12 @@ repos:
         entry: uv run bandit -q -r
         language: system
         types: [python]
-        exclude: ^.*/tests/
+        # Design.md §14 Step L5 — a real, confirmed regex gap, not a
+        # style tweak: `^.*/tests/` requires a path segment *before*
+        # "tests/", so it excluded adapters/*/tests/ and libs/jetcore/
+        # tests/ correctly but never matched a *bare* leading "tests/"
+        # (this project's own root-level cross-adapter test directory,
+        # Step E4) — that one's assert-heavy test files were slipping
+        # through into every bandit run undetected until this was found.
+        # `(^|.*/)tests/` matches both shapes.
+        exclude: (^|.*/)tests/

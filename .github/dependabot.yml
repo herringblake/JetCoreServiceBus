@@ -1,0 +1,23 @@
+# Design.md §14 Step L3. Two ecosystems: the actual Python dependency
+# graph (uv.lock/pyproject.toml — Decision #16's workspace, one lockfile
+# for every member), and the CI workflow's own pinned action versions
+# (Step L2's `actions/checkout@v4`, `astral-sh/setup-uv@v7`), so those
+# don't silently go stale the same way this project's own bandit command
+# already did once (Step L2's own note).
+#
+# `package-ecosystem: "uv"` — confirmed as a real, natively-supported
+# Dependabot ecosystem (added March 2025, still current as of this
+# writing), not the `"pip"` fallback this step's own Design.md parameter
+# table left as a possibility pending verification.
+
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
