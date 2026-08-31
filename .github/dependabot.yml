@@ -16,8 +16,13 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Without this, PRs target the repo's default branch (main) — wrong
+    # for this project, where in-progress work lands on develop and main
+    # is production-only (Design.md §14 Step L1).
+    target-branch: "develop"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    target-branch: "develop"
