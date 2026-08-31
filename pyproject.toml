@@ -68,10 +68,21 @@ plugins = ["pydantic.mypy"]
 testpaths = ["libs", "adapters", "tests"]
 asyncio_mode = "auto"
 
-# nkeys and pyrage ship no type stubs / py.typed marker (confirmed via
-# mypy, not assumed) — standard per-module opt-out rather than a project-
-# wide `ignore_missing_imports`, which would hide this for every future
+# nkeys, pyrage, and python-mysql-replication (import name
+# pymysqlreplication, Design.md §13 Step J5, which pulls in pymysql as a
+# transitive dependency our own test code also imports directly) ship no
+# type stubs / py.typed marker (confirmed via mypy, not assumed) —
+# standard per-module opt-out rather than a project-wide
+# `ignore_missing_imports`, which would hide this for every future
 # untyped dependency too.
 [[tool.mypy.overrides]]
-module = ["nkeys", "pyrage", "pyrage.*"]
+module = [
+    "nkeys",
+    "pyrage",
+    "pyrage.*",
+    "pymysqlreplication",
+    "pymysqlreplication.*",
+    "pymysql",
+    "pymysql.*",
+]
 ignore_missing_imports = true

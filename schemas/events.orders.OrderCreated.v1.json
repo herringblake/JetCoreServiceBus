@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jetcoreservicebus.internal/schemas/events.orders.OrderCreated.v1.json",
+  "title": "OrderCreated",
+  "description": "Trigger: published by the REST API Service's POST /api/orders (Design.md §13 Step I5) as a raw, opaque pass-through of the request body — this schema is the Database Adapter's own contract for what it expects to find inside that body (Step J4), not enforced by the REST API Service itself. orderId is caller-supplied (Decision #25), not a DB-assigned id, so the write path can upsert idempotently without a round trip back through the bus first. `orders` is still a placeholder bounded context (Decision #14) — real schemas replace this whenever a real domain does.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["orderId", "item"],
+  "properties": {
+    "orderId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Caller-supplied primary key for the orders table (Decision #25)."
+    },
+    "item": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Placeholder business column — infra/mysql/init.sql's demo orders table."
+    },
+    "quantity": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Placeholder business column; defaults to 1 if omitted."
+    }
+  }
+}

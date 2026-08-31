@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jetcoreservicebus.internal/schemas/events.orders.OrderPersisted.v1.json",
+  "title": "OrderPersisted",
+  "description": "Result: published by the Database Adapter's write path immediately after a successful upsert into the orders table (Design.md §13 Step J4, Decision #26). eventDetails.correlationId is set to the triggering OrderCreated's eventId — this is how the REST API Service's synchronous ?wait= reply (Decision #24, Step I4) is resolved. Distinct from events.db.orders.RowChanged, the CDC path's own output, which fires for ANY change to the table (bus-originated or not) and carries no correlationId.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["orderId", "status", "occurredAt"],
+  "properties": {
+    "orderId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The same orderId the triggering OrderCreated carried."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["persisted"],
+      "description": "A single value today — the write path only ever publishes this event after a successful upsert (Design.md §13 Step J4); a failed write leaves the triggering command unacked for redelivery instead, so there's nothing to report as a distinct failure status yet."
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp (RFC 3339 / ISO 8601) the upsert completed."
+    }
+  }
+}

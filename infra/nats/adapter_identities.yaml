@@ -206,3 +206,8 @@ adapters:
                                               # POST /api/orders request's
                                               # real eventId, same reason
                                               # as FileWriteRequested above
+        - events.db.orders.RowChanged        # Design.md §13 Step J5 —
+                                              # observes the CDC read
+                                              # path's own output; nobody
+                                              # else in the manifest has
+                                              # subscribe permission on it

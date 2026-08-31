@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jetcoreservicebus.internal/schemas/events.db.orders.RowChanged.v1.json",
+  "title": "RowChanged",
+  "description": "Result: the Database Adapter's CDC read path (Design.md §13 Step J5, Decision #15) tails the MySQL binlog for the orders table and publishes every row change — bus-originated (via the write path) OR a direct SQL write bypassing the bus entirely. Deliberately a DIFFERENT subject from events.orders.OrderCreated (the write path's own input), so the adapter never subscribes to its own CDC output as a write-path trigger. Carries NO correlationId — unlike events.orders.OrderPersisted, this isn't replying to any specific request (Decision #26).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["operation", "table", "row"],
+  "properties": {
+    "operation": {
+      "type": "string",
+      "enum": ["insert", "update", "delete"],
+      "description": "Which binlog row-event type produced this — WriteRowsEvent/UpdateRowsEvent/DeleteRowsEvent respectively."
+    },
+    "table": {
+      "type": "string",
+      "description": "The table name (always \"orders\" today — the only table this adapter watches, infra/mysql/init.sql)."
+    },
+    "row": {
+      "type": "object",
+      "description": "insert/delete: the row's values. update: the row's values AFTER the change."
+    },
+    "previousRow": {
+      "type": "object",
+      "description": "Only present for operation=\"update\" — the row's values BEFORE the change."
+    }
+  }
+}

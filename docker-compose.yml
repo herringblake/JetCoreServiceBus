@@ -86,5 +86,30 @@ services:
       - ./infra/files:/data
     restart: unless-stopped
 
+  # Design.md §13 Step J1 — the only track needing new infra. Binlog
+  # enabled via the my.cnf mount (log_bin/binlog_format=ROW/server-id,
+  # required for the Database Adapter's CDC read path, Decision #15);
+  # init.sql creates the demo `orders` table plus the two distinct
+  # least-privilege users (Decision #25/Track J parameter table) on first
+  # start against a fresh `mysql-data` volume. The Database Adapter's own
+  # Compose service is wired in Track K (K2), once its Dockerfile exists
+  # (K1) — this service stands alone until then, the same way `nats` did
+  # from Step A6 through Phase 2.
+  mysql:
+    image: mysql:8.4.11
+    environment:
+      MYSQL_ROOT_PASSWORD: dev-only-change-me
+      MYSQL_DATABASE: jetcore
+    ports:
+      - "3306:3306"   # dev convenience (e.g. K3's direct-SQL-write smoke
+                       # test) — not needed by any adapter, which all
+                       # connect via the `mysql` Compose network alias.
+    volumes:
+      - ./infra/mysql/my.cnf:/etc/mysql/conf.d/jetcore.cnf:ro
+      - ./infra/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - mysql-data:/var/lib/mysql
+    restart: unless-stopped
+
 volumes:
   nats-data:
+  mysql-data:
