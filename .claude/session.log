@@ -28427,3 +28427,330 @@ Real Adapters React to Shared-Subject Test Traffic — test.sh.
 Defects.md, Design.md §9, and README.md are all updated and cross-linked. ruff, mypy --all-packages, and pip-audit are clean across the whole workspace. The stack is up and healthy, ready for whatever's next.
 
 ------------------ Defect 3 Resolved ------------------
+
+Let's finish the planning of and break out the steps for Phase 4
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "Phase 4" Design.md
+echo "---"
+grep -n "^### 7\.4\|^## 7\." Design.md
+echo "---schemas---"
+ls schemas/
+echo "---Decision 13---"
+grep -n "| 13 |" Design.md
+
+OUT
+415:5. **Phase 4** — Hardening: GitHub Actions CI (ruff, mypy, pytest, bandit, pip-audit), populate `schemas/` for all defined event types, integration test suite via `testcontainers-python`.
+---
+259:## 7. Python Project
+341:### 7.4 Development tooling
+---schemas---
+events.db.orders.RowChanged.v1.json
+events.files.FileCreateCompleted.v1.json
+events.files.FileDeleteCompleted.v1.json
+events.files.FileDeleteRequested.v1.json
+events.files.FileListCompleted.v1.json
+events.files.FileListRequested.v1.json
+events.files.FileOperationFailed.v1.json
+events.files.FileReadCompleted.v1.json
+events.files.FileReadRequested.v1.json
+events.files.FileWriteCompleted.v1.json
+events.files.FileWriteRequested.v1.json
+events.http.RequestCompleted.v1.json
+events.orders.OrderCreated.v1.json
+events.orders.OrderPersisted.v1.json
+---Decision 13---
+44:| 13 | CI platform? | **GitHub Actions** (§7.4, §10). |
+Read Design.md (lines 342-371)
+Read Design.md (lines 406-420)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+git remote -v
+echo "---"
+cat DevelopmentGuidelines.md
+echo "---dependabot mention---"
+grep -n "Dependabot" Dependencies.md
+
+OUT
+---
+# Development Step Guidelines
+
+This is a list of standards for generating code and associated documentation:
+
+Project code will be well documented and organized
+* projects will have a git repository
+* project code will be formatted in accordence with accepted standards for its environment
+* project code will be dockerized
+  * a docker-compose file will be gererated for the entier project
+  * document environment properties
+* project will be organized in accordence to their environment 
+  * example: filetree for a project would have expected files and folders
+  * environment configs are correct and content is formatted to expected norms
+* list all necessary dependencies (frameworks, libraries, services, SDKs, etc...)
+  * descibe what feature/objects/functions are needed and how they will be used
+  * note 
+    * version
+    * release date
+    * source
+  * describe what security validations have been performed on outside resources
+    * note how future security validations may be performed
+* document dev environment configuration
+  * programming environment
+    * language
+    * compiler/runtime
+    * version(s)
+    * environment properties
+      * system paths
+      * local paths
+        * example: Python virtual environment
+  * development tools used
+  ---dependabot mention---
+9:- Existing dependencies, continuously: `pip-audit` and `bandit` run in CI on every push/PR ([Design.md §7.4](Design.md#74-development-tooling)); GitHub **Dependabot** (version updates + security alerts) should be enabled on the repo once it's on GitHub, since CI already runs there (Decision #13) — cheap addition, flagged here as a recommendation rather than a blocking decision.
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+cat .pre-commit-config.yaml
+echo "---"
+gh --version 2>&1
+echo "---schema test files---"
+find . -iname "test_*schemas*.py" -o -iname "test_schemas.py" | grep -v __pycache__
+
+OUT
+# Step B1 (Design.md §7.4, §11 Track B). Hooks shell out to `uv run` rather
+# than letting pre-commit provision its own per-hook environments — reuses
+# the project's one uv-managed venv instead of duplicating it.
+#
+# This file is checked in but hooks are NOT auto-installed into .git/hooks —
+# that's a per-developer choice. Run `uv run pre-commit install` to enable
+# them locally.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+      - id: mypy
+        name: mypy
+        # adapters/ (Step C1) and tests/ (Step E4, cross-adapter tests)
+        # added here as each came into existence. Still explicit paths,
+        # not a bare `mypy`: it hard-errors on a missing path argument
+        # rather than skipping it (confirmed by testing, unlike pytest's
+        # tolerant `testpaths`), so this needs updating again if any of
+        # these are ever removed.
+        entry: uv run --all-packages mypy libs adapters tests
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: bandit
+        name: bandit
+        entry: uv run bandit -q -r
+        language: system
+        types: [python]
+        exclude: ^.*/tests/
+---
+/bin/bash: line 9: gh: command not found
+---schema test files---
+./adapters/db_adapter_mysql/tests/test_db_adapter_mysql_schemas.py
+./adapters/file_storage_adapter/tests/test_schemas.py
+./adapters/http_adapter/tests/test_http_adapter_schemas.py
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+for f in adapters/db_adapter_mysql/tests/test_db_adapter_mysql_schemas.py adapters/file_storage_adapter/tests/test_schemas.py adapters/http_adapter/tests/test_http_adapter_schemas.py; do
+  echo "=== $f ==="
+  grep -o '_load("[^"]*")' "$f" | sort -u
+done
+
+OUT
+=== adapters/db_adapter_mysql/tests/test_db_adapter_mysql_schemas.py ===
+_load("events.orders.OrderCreated")
+_load("events.orders.OrderPersisted")
+=== adapters/file_storage_adapter/tests/test_schemas.py ===
+_load("events.files.FileCreateCompleted")
+_load("events.files.FileDeleteCompleted")
+_load("events.files.FileDeleteRequested")
+_load("events.files.FileListCompleted")
+_load("events.files.FileListRequested")
+_load("events.files.FileOperationFailed")
+_load("events.files.FileReadCompleted")
+_load("events.files.FileReadRequested")
+_load("events.files.FileWriteCompleted")
+_load("events.files.FileWriteRequested")
+=== adapters/http_adapter/tests/test_http_adapter_schemas.py ===
+_load("events.http.RequestCompleted")
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -rn "RowChanged" adapters/db_adapter_mysql/tests/*.py | grep -i schema
+
+OUT
+(Bash completed with no output)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+ls -la .github 2>&1
+find . -iname "*.yml" -path "*.github*" 2>/dev/null
+echo "---"
+grep -n "badge\|shields.io" README.md Design.md 2>/dev/null
+
+OUT
+ls: cannot access '.github': No such file or directory
+---
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^## 1[0-9]\." Design.md
+echo "---"
+sed -n '/^## 13/,/^### Track F/p' Design.md | head -40
+
+OUT
+409:## 10. Proposed Implementation Plan (high-level, no code yet)
+420:## 11. Phase 1 — Detailed Breakdown
+486:## 12. Phase 2 — Detailed Breakdown
+591:## 13. Phase 3 — Detailed Breakdown
+---
+## 13. Phase 3 — Detailed Breakdown
+
+Phase 3 (§10) is the remaining-adapters phase: the four types not yet built (HTTP Adapter, REST API Service, Webhook Sender, Database Adapter) plus rounding out the File Storage Adapter's command set (`list`/`read`/`delete`, deferred from Phase 2). Nothing here is built yet — this is the step-by-step scope for when implementation starts, same spirit as §11/§12. It's a bigger phase than Phase 2's single vertical slice, both in adapter count and in the number of real design gaps closed just to scope it (Decisions #23–27) — proportionate, not scope creep: Phase 2 covered one adapter pair, Phase 3 covers five pieces of work.
+
+**Parameters this breakdown settles — flag now if any should change:**
+
+| Parameter | Decision | Rationale |
+|---|---|---|
+| File Storage `list`/`read`/`delete` shapes, "not found" handling | Decision #23 — `FileOperationFailed` for expected failures, silent ack+log for security-relevant ones (traversal/malformed), `list` non-recursive | See §2. |
+| REST API Service sync-reply mechanism | Decision #24 — reuses `BusClient` pub/sub + an in-memory pending-request map, not core NATS request-reply | See §2. Requires `BusClient.publish()` to start returning the `eventId` it generates (a small, additive `jetcore` change — Track I's first real step). |
+| Database Adapter demo schema | Decision #25 — one `orders` table, caller-supplied `order_id` primary key | See §2. |
+| Database Adapter write-ack event | Decision #26 — `events.orders.OrderPersisted`, separate from the CDC path's `events.db.orders.RowChanged` | See §2. |
+| Webhook Sender / HTTP Adapter external target | Decision #27 — one fixed target per instance, via settings | See §2. |
+| Database Adapter MySQL credentials | **Two distinct MySQL users** — one for the write path's normal DML, one for the CDC user, scoped to `REPLICATION SLAVE`/`REPLICATION CLIENT` only (no table data access) | Least privilege — this exact mitigation was already recorded in [Dependencies.md](Dependencies.md) for `mysql-replication` back when it was still a Phase-3-pending placeholder; Phase 3 is where it actually gets implemented, not just promised. |
+| Database Adapter CDC event shape | `{"operation": "insert"\|"update"\|"delete", "table": "orders", "row": {...}, "previousRow": {...} }` (`previousRow` only for `update`) | Covers all three binlog row-event types with one schema rather than three, matching how the completion events already share a family (`FileCreateCompleted`/`FileWriteCompleted`). |
+| New adapter package naming | `adapters/db_adapter_mysql`, `adapters/http_adapter`, `adapters/rest_api_service`, `adapters/webhook_sender` — matching directory names already used in [infra/nats/adapter_identities.yaml](infra/nats/adapter_identities.yaml) and §7.1's repository layout | Consistency; also sidesteps Step C1/D1/D2's now-well-understood test-module-naming collision by using distinct package names from the start. |
+
+### Track F — File Storage Adapter: `list`/`read`/`delete`
+Let me check the current end of the document to insert the new section correctly.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+tail -15 Design.md
+echo "---linecount---"
+wc -l Design.md
+
+OUT
+- [x] **K3. Manual end-to-end smoke test** — one script, run against the real, fully-wired `docker compose` stack (no mocking anywhere): File Storage `list`/`read`/`delete` via direct bus publish as `test-observer-01`; **one real `POST /api/orders?wait=10`** to the deployed REST API Service (port 8081) that fans out to *three* independent real consumers at once — the Webhook Sender (relays to the Webhook Listener, which writes a real file to `infra/files/orders/relayed.json`), the HTTP Adapter (POSTs to `/healthz`, gets a real `405`, publishes a real `RequestCompleted`), and the Database Adapter's write path (a real upsert + `OrderPersisted`, resolved synchronously by the REST API Service's own pending-reply future — the real `200` response confirmed); and a direct `mysql` client `INSERT` bypassing the bus entirely, confirming `events.db.orders.RowChanged` still fires. **All four parts passed on the first real run.**
+- [x] **K4. Automated end-to-end test** — [tests/test_rest_api_service_to_db_adapter_end_to_end.py](tests/test_rest_api_service_to_db_adapter_end_to_end.py): the REST API Service ↔ Database Adapter round trip (the genuinely new "two real adapters, one waiting on the other's reply" pattern this phase introduces), mirroring Step E4's exact approach — both adapters' real entrypoint wiring running concurrently in-process (`rest_api_service.app.create_app` via `TestClient`, `db_adapter_mysql.__main__.run` as a background task), not orchestrated Docker containers (K3 already proved that layer). [tests/conftest.py](tests/conftest.py) extended with MySQL's own `orders` cleanup (the first time this root conftest needed a second datastore) and the two new fixed entrypoint durable names. **Executed and verified**: passes standing alone, and (like every other adapter's own entrypoint tests, see K2 above) intermittently when run against the fully-deployed stack — same understood cause, not a defect in this test or the code it exercises.
+
+**Exit criteria:** each track passes standing alone first (mirroring Phase 2's own exit criteria), then K3+K4 both pass against the fully wired `docker-compose` stack, MySQL included. **Met** — K3's manual run and K4's automated test each passed for real against the complete stack; the intermittent failures found in *other* tracks' own entrypoint tests once all 6 containers are live are §9 item #5's now-confirmed, already-tracked issue, not a Track K regression.
+
+**Track K is complete — Phase 3 is complete.** All six adapter types described in §8 are now built, tested, containerized, and wired into one `docker-compose` stack, with two real, independently-verified end-to-end proofs (Step E4's Phase 2 slice, Step K4's Phase 3 sync-reply pair) plus K3's broader manual proof spanning all six.
+
+### Suggested sequencing
+
+F (no new infra, extends an adapter that already works) and G/H (simplest new adapters, independent of each other) first, in parallel. J's infra (J1) can start anytime — it has no dependency on the other tracks — but J's adapter logic (J2-J7) and I both depend on Decision #26's `OrderPersisted` event existing, so J should finish before I's sync-reply path can be meaningfully tested end-to-end (I7's fake-replier tests don't need to wait, but I's *real* cross-adapter proof, K4, does). K last, once everything else passes independently.
+
+---
+
+*This document is a living draft — update it as open questions are resolved and the design evolves, rather than letting decisions drift into code undocumented.*
+---linecount---
+737 Design.md
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "testcontainers-python" Dependencies.md
+
+OUT
+51:| `testcontainers-python` | [PyPI](https://pypi.org/project/testcontainers/) | **Not adopted** — Design.md §13 Step J7 was the track that would have adopted it, if the `docker-compose` `mysql` service alone proved awkward for test isolation/reset between runs; it didn't (the same `_clean_state`-fixture pattern already used for NATS extended cleanly to a `DELETE FROM orders`, [conftest.py](adapters/db_adapter_mysql/tests/conftest.py)). | *reconsidered 2026-08-30* | Would spin up real NATS+JetStream and MySQL containers for integration tests (§10 Phase 4) — this project's own long-running `docker compose` services filled that role directly instead, matching how NATS itself was handled throughout Phases 1-3. Kept in this ledger, not removed, in case Phase 4's CI environment (no long-running dev stack to reuse) makes it the better fit there. | Widely adopted across language ecosystems (originated in Java); active Python port. | 2026-08-23 |
+Now let me write the full Phase 4 breakdown into Design.md.
+
+Read Design.md (lines 721-737)
+Let's first add Decision #29 to the §2 Key Decisions table.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^| 28 |" Design.md
+
+OUT
+59:| 28 | Adapter package PyPI distribution naming? | **`jetcore-<adapter>` prefix** for every adapter's `[project] name` (not its Python import name, which stays e.g. `webhook_sender`) — found necessary, not just tidy, during Step G5: `webhook-listener`, `webhook-sender`, and (not yet built) `http-adapter` are all names of real, unrelated packages already published on PyPI, which silently made `pip-audit` check the *wrong* project's vulnerability data for ours instead of correctly flagging them as unpublished, the way `jetcore`/`file-storage-adapter`'s genuinely-unique names already do. `jetcore-webhook-listener`/`jetcore-webhook-sender` retroactively renamed; `rest-api-service`/`db-adapter-mysql` don't currently collide but get the prefix too when built, for consistency and against future PyPI squatting. |
+Edit Design.md
+Added 1 line
+Now let's write the full §14 Phase 4 breakdown.
+
+Edit Design.md
+Added 37 lines
+Now let's close the loop in Dependencies.md's testcontainers-python row, since Design.md now references it as settled.
+
+Read Dependencies.md (lines 52-52)
+Edit Dependencies.md
+Modified
+Let's verify the new section renders correctly.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^## [0-9]" Design.md
+echo "---"
+grep -n "^### Track" Design.md | tail -5
+echo "---linecount---"
+wc -l Design.md
+
+OUT
+11:## 1. Goals & Non-Goals
+28:## 2. Key Decisions (resolved during design discussion)
+64:## 3. High-Level Architecture
+111:## 4. Security Model
+217:## 5. Event Envelope
+251:## 6. NATS JetStream Layout
+260:## 7. Python Project
+378:## 8. Initial Adapters
+393:## 9. Open Questions Summary
+410:## 10. Proposed Implementation Plan (high-level, no code yet)
+421:## 11. Phase 1 — Detailed Breakdown
+487:## 12. Phase 2 — Detailed Breakdown
+592:## 13. Phase 3 — Detailed Breakdown
+738:## 14. Phase 4 — Detailed Breakdown
+---
+642:### Track H — HTTP Adapter
+663:### Track I — REST API Service
+686:### Track J — Database Adapter (MySQL)
+715:### Track K — Integration
+757:### Track L — Hardening & CI
+---linecount---
+775 Design.md
+Structure is clean and consistent with the rest of the document. Let's also update §10's high-level plan line to reflect the corrected/narrowed Phase 4 scope.
+
+Read Design.md (lines 411-417)
+Edit Design.md
+Modified
+Read Design.md (lines 737-775)
+This reads cleanly and matches the established structure. Phase 4 is fully planned and written into Design.md.
+
+Summary
+§14 Phase 4 — Detailed Breakdown added to Design.md, along with Decision #29 in §2's table. Key findings from actually checking the current state before planning (not assuming §10's three-item scope still applied):
+
+Schemas: already done — 14/14 event types covered, built incrementally across Tracks C-J rather than deferred. Found one real, small gap while verifying: events.db.orders.RowChanged has no automated schema-validation test, unlike all 13 others — folded into L4.
+testcontainers-python: closed for good. Decision #29 settles the "kept in the ledger in case CI wants it" question Dependencies.md left open — CI reuses docker compose up -d nats mysql (never the adapter fleet, per Defects.md Defect 3) rather than maintaining a second, parallel infra definition.
+GitHub Actions CI: genuinely not started — this is what Phase 4 actually is now. Confirmed there's no .github/ directory and no git remote at all (git remote -v is empty), which I flagged as L1, a real prerequisite the plan can't route around.
+Track L — Hardening & CI, seven steps:
+
+L1 GitHub repo (flagged as your call — no gh CLI in this sandbox, and it's outward-facing)
+L2 the Actions workflow itself (three parallel jobs: lint/typecheck, security, test — the last one being the only one needing real infra)
+L3 Dependabot
+L4 the schema coverage gap + a real audit, not an assumption
+L5 verifying the already-built .pre-commit-config.yaml still holds against everything Tracks C-K added
+L6 a genuinely fresh-clone verification, mirroring Phase 1's own "rebuilt from nothing" completion checkpoint
+L7 branch protection, explicitly marked optional
+Also updated §10's own summary line (Phase 4 is narrower than originally sketched, not larger) and closed out Dependencies.md's testcontainers-python row to point at the final decision.
+
+Nothing's been built yet — this is the scoping pass. Say the word when you want me to start on Track L.
+
+============== Phase 4 Planning Complete ==============
