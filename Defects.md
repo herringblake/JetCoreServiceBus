@@ -2,13 +2,13 @@
 
 Companion to [Design.md](Design.md) — tracks real, confirmed defects found while building this project: what's broken, how it was diagnosed, and the recommended (or applied) fix. Distinct from [Design.md §9](Design.md#9-open-questions-summary)'s "Open Questions," which are deliberate, deferred *design* choices, not bugs — a defect here may reference an §9 item (or vice versa) when the two are related, but they're tracked separately: §9 is "not decided yet, on purpose," this document is "decided, and it's wrong, here's the fix."
 
-**Status: 2 fixed, 1 open.** See the management instructions at the bottom for how entries get added, updated, and closed.
+**Status: 3 fixed, 0 open.** See the management instructions at the bottom for how entries get added, updated, and closed. Running the test suite locally should always go through [test.sh](test.sh) (`./test.sh` in place of `uv run --all-packages pytest`) — see Defect 3.
 
 | # | Name | Status | Severity | Found |
 |---|---|---|---|---|
 | 1 | [Test/Production Identity Collision](#defect-1-testproduction-identity-collision) | Fixed — Verified | Medium (test-reliability, not a production data-loss/security bug on its own) | Design.md §12 Step E4; root cause isolated §13 Step J7; confirmed at full scale §13 Step K2 |
 | 2 | [Ambient Test Traffic Undecryptable by Real Containers](#defect-2-ambient-test-traffic-undecryptable-by-real-containers) | Fixed — Verified | Low-Medium (log noise + unbounded redelivery on the real containers; no observed effect on pytest's own pass/fail results) | Found and reproduced verifying Defect 1's fix |
-| 3 | [Real Adapters React to Shared-Subject Test Traffic](#defect-3-real-adapters-react-to-shared-subject-test-traffic) | Open — root cause confirmed, fix needs a design decision | Medium (8 real pytest failures per run, a regression from Defects 1/2 fully working) | Found immediately after applying Defect 2's fix |
+| 3 | [Real Adapters React to Shared-Subject Test Traffic](#defect-3-real-adapters-react-to-shared-subject-test-traffic) | Fixed — Verified | Medium (8 real pytest failures per run, a regression from Defects 1/2 fully working) | Found immediately after applying Defect 2's fix |
 
 ---
 
@@ -141,8 +141,8 @@ Applying this fix (plus completing Defect 1's own rollout — see its "Applied f
 
 ## Defect 3: Real Adapters React to Shared-Subject Test Traffic
 
-**Status:** Open — root cause confirmed; fix needs a design decision, not applied.
-**Severity:** Medium. Directly causes real, reproducible pytest failures (8 in the run that surfaced it) — a regression in observed test-suite reliability versus before Defects 1/2 were fixed, even though neither of those fixes is wrong on its own terms (see each entry's own Verification section).
+**Status:** Fixed — Verified. See "Applied fix" and "Verification" below.
+**Severity:** Medium. Directly caused real, reproducible pytest failures (8 in the run that surfaced it) — a regression in observed test-suite reliability versus before Defects 1/2 were fixed, even though neither of those fixes is wrong on its own terms (see each entry's own Verification section).
 **Found:** immediately after applying Defect 2's fix (plus completing Defect 1's rollout) — the very next full-suite run went from 0 failures to 8, all newly, not present in the same form before either fix.
 
 ### Symptom
@@ -156,14 +156,22 @@ Tests that publish to a "placeholder" subject a real adapter also subscribes to 
 
 Structural, not a bug in either Defect 1 or Defect 2's own fix: `-test` identities were deliberately given **identical** publish/subscribe permissions to their real counterparts (Defect 1's own design choice, to keep exercising the real subject/permission set). That means a real adapter and its `-test` twin are *both* legitimate, simultaneous subscribers to the same subject whenever that subject is one the real adapter also owns — which is every "placeholder" subject in this project's manifest (Decision #14), since there's no test-only subject namespace distinct from the real one. Before Defects 1/2 were fixed, the real container was often *unable* to actually complete this reaction (killed by the identity collision, or missing its own registration from the KV-delete bug) — partially masking this exact race. Fixing both made the real container a reliable, fast responder, which is what turned a rare, easy-to-miss flake into an 8-failure regression in a single run.
 
-### Options, not decided here
+### Options considered
 
-- **Give up subscribe-permission parity between `-test` identities and their real counterparts** for subjects a real container also owns — the `-test` twin would need a different mechanism to prove it can be triggered (defeats part of Defect 1's own rationale for exact parity).
-- **Route test traffic through entirely separate, test-only subjects**, distinct from whatever the real fleet listens to — the more architecturally clean answer, but a bigger change (new manifest entries, new subject constants throughout the test suite, and it means tests no longer exercise the literal production subject).
-- **Make assertions robust to a second, unrelated publisher on a shared result subject** — tag test-generated triggers with a unique marker and filter for it when observing (the pattern this project's own `test_cdc_watcher.py`/K3 manual verification already use for unrelated reasons), rather than assuming `[result] = await observer.fetch(...)` sees exactly one message. Doesn't fix `test_publish_with_no_recipients_does_not_crash`'s precondition problem, which has no such fix available — that test's premise is simply no longer achievable with a real adapter fleet running.
-- **Stop the real adapter containers before running the full test suite locally**, matching the complementary CI practice already recommended under Defect 1 — sidesteps the problem entirely for local dev, at the cost of the "always leave the stack running" convenience this project has otherwise maintained throughout.
+- *Give up subscribe-permission parity between `-test` identities and their real counterparts.* Not viable — most affected tests use the `-test` identity as the adapter under test; it fundamentally needs that permission to prove anything.
+- *Route test traffic through entirely separate, test-only subjects.* Architecturally the cleanest option, but the highest cost (new manifest entries, new subject constants throughout the suite) and raises a real question for K3/K4, which deliberately want to prove the *real* subject against the real deployed system.
+- *Make assertions robust to a second, unrelated publisher* (marker-based filtering, the pattern `test_cdc_watcher.py`/K3 already use). Doesn't fix `test_publish_with_no_recipients_does_not_crash`'s precondition problem regardless — that test's premise ("nobody is registered") is structurally false with a real fleet running, no filtering can restore it.
+- **Chosen: stop the real adapter containers before running the local test suite** (`nats`/`mysql` stay up), matching the complementary CI practice already recommended under Defect 1. Removes the entire *class* of problem, not just the 8 tests that happened to surface it, with zero test-code changes. Confirmed not to cost K3/K4 anything: K4's own sync-reply correlation is already keyed strictly by `correlationId` (marker-filtered by construction, not by luck), and K3 is a deliberate, manual "prove it against the real deployed thing" step that's supposed to run with the fleet up.
 
-Not decided or applied — needs a choice among the above (or some combination) before implementing.
+### Applied fix
+
+[test.sh](test.sh) — stops the six adapter application containers, explicitly clears `service-directory` (a stopped container's own registration doesn't clear itself; it only expires on its own 60s TTL, found empirically — a test running early enough could still see a real adapter's stale-but-not-yet-expired entry), runs `uv run --all-packages pytest "$@"`, then restarts the six containers via a `trap ... EXIT` — so they come back up whether or not pytest passed, and the stack is left in its normal running state afterward. `nats`/`mysql` are never touched. Arguments are forwarded to pytest as-is.
+
+Documented in the script's own header that CI (Design.md §10 Phase 4, not yet built) should go a step further and never bring the adapter containers up in the first place, rather than bringing them up and stopping them again.
+
+### Verification
+
+`./test.sh -q`, three consecutive runs, all 6 containers left running from a prior session (the actual condition that produces the race): **230/230 passing every time**, including both symptoms from this entry (the `RequestCompleted` race and `test_publish_with_no_recipients_does_not_crash`'s precondition test). Confirmed the six containers are healthy and running again after each run (`docker compose ps`).
 
 ---
 

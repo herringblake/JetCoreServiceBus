@@ -25,13 +25,15 @@ uv sync --all-packages
 ## Running the checks
 
 ```bash
-uv run --all-packages pytest            # tests
+./test.sh                               # tests — see below, not a bare `uv run pytest`
 uv run ruff check .                     # lint
 uv run ruff format .                    # format
 uv run --all-packages mypy libs adapters tests   # type-check
-uv run bandit -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter adapters/webhook_listener/webhook_listener # security static analysis (source only — add each new adapter's package dir here as it's scaffolded)
+uv run bandit -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter adapters/webhook_listener/webhook_listener adapters/webhook_sender/webhook_sender adapters/http_adapter/http_adapter adapters/rest_api_service/rest_api_service adapters/db_adapter_mysql/db_adapter_mysql # security static analysis (source only — add each new adapter's package dir here as it's scaffolded)
 uv run pip-audit                        # dependency vulnerability scan
 ```
+
+**Use `./test.sh`, not a bare `uv run --all-packages pytest`, whenever the six adapter containers (`docker compose up -d`) might be running.** A test's own trigger/result subject can otherwise race a real, permanently-deployed adapter that's also listening on the exact same "placeholder" subject (Decision #14) — a real, confirmed defect, not a hypothetical; see [Defects.md#defect-3-real-adapters-react-to-shared-subject-test-traffic](Defects.md#defect-3-real-adapters-react-to-shared-subject-test-traffic). `test.sh` stops the six adapter application containers (`nats`/`mysql` stay up), runs pytest, and restarts them afterward regardless of outcome — the stack is left running normally either way. Arguments pass through to pytest, e.g. `./test.sh -k some_test`.
 
 Or all at once via `pre-commit` (config already checked in, hooks call `uv run` directly rather than letting `pre-commit` provision its own duplicate environments):
 
