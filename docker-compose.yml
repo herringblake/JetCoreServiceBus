@@ -86,15 +86,12 @@ services:
       - ./infra/files:/data
     restart: unless-stopped
 
-  # Design.md §13 Step J1 — the only track needing new infra. Binlog
-  # enabled via the my.cnf mount (log_bin/binlog_format=ROW/server-id,
-  # required for the Database Adapter's CDC read path, Decision #15);
-  # init.sql creates the demo `orders` table plus the two distinct
-  # least-privilege users (Decision #25/Track J parameter table) on first
-  # start against a fresh `mysql-data` volume. The Database Adapter's own
-  # Compose service is wired in Track K (K2), once its Dockerfile exists
-  # (K1) — this service stands alone until then, the same way `nats` did
-  # from Step A6 through Phase 2.
+  # Design.md §13 Step J1 — binlog enabled via the my.cnf mount
+  # (log_bin/binlog_format=ROW/server-id, required for the Database
+  # Adapter's CDC read path, Decision #15); init.sql creates the demo
+  # `orders` table plus the two distinct least-privilege users (Decision
+  # #25/Track J parameter table) on first start against a fresh
+  # `mysql-data` volume.
   mysql:
     image: mysql:8.4.11
     environment:
@@ -108,6 +105,96 @@ services:
       - ./infra/mysql/my.cnf:/etc/mysql/conf.d/jetcore.cnf:ro
       - ./infra/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - mysql-data:/var/lib/mysql
+    restart: unless-stopped
+
+  # Design.md §13 Step K2 — the four remaining adapters, each's real
+  # `.creds` file mounted the same way as webhook-listener/file-storage
+  # already are. Target URLs are deliberately in-network, always-available
+  # placeholders (Decision #14 — no real external bounded context/API is
+  # integrated yet): pointing outbound-calling adapters at a real external
+  # host would either need internet access this dev stack shouldn't
+  # depend on, or would just fail forever with nothing to observe. Each
+  # choice here still exercises the adapter's real HTTP behavior end to
+  # end, not a no-op.
+
+  webhook-sender:
+    build:
+      context: .
+      dockerfile: adapters/webhook_sender/Dockerfile
+    depends_on:
+      - nats
+    environment:
+      JETCORE_SERVICE_ID: webhook-sender-01
+      JETCORE_NATS_URL: nats://nats:4222
+      JETCORE_NATS_CREDS_PATH: /creds/webhook-sender-01.creds
+      JETCORE_SUBJECTS: events.orders.OrderCreated
+      # Relays each OrderCreated to the Webhook Listener's own real HTTP
+      # surface — a genuine, self-contained round trip through a second
+      # real adapter (OrderCreated -> relayed as a webhook -> converted
+      # into FileWriteRequested -> written to disk by the File Storage
+      # Adapter), not a target that only ever errors.
+      JETCORE_TARGET_URL: http://webhook-listener:8080/webhooks/orders/relayed.json
+      JETCORE_OUTBOUND_SECRET: dev-only-change-me   # must match webhook-listener's JETCORE_WEBHOOK_SECRET below
+    volumes:
+      - ./infra/nats/operator/creds/webhook-sender-01.creds:/creds/webhook-sender-01.creds:ro
+    restart: unless-stopped
+
+  http-adapter:
+    build:
+      context: .
+      dockerfile: adapters/http_adapter/Dockerfile
+    depends_on:
+      - nats
+    environment:
+      JETCORE_SERVICE_ID: http-adapter-01
+      JETCORE_NATS_URL: nats://nats:4222
+      JETCORE_NATS_CREDS_PATH: /creds/http-adapter-01.creds
+      JETCORE_SUBJECTS: events.orders.OrderCreated
+      # /healthz only accepts GET, so this POST always gets a real (405)
+      # response — still a real HTTP round trip proving the adapter's
+      # actual behavior ("report the outcome, don't judge it"), without
+      # depending on anything outside this stack or ever needing a nak/
+      # redelivery retry loop against an unreachable host.
+      JETCORE_TARGET_BASE_URL: http://webhook-listener:8080/healthz
+    volumes:
+      - ./infra/nats/operator/creds/http-adapter-01.creds:/creds/http-adapter-01.creds:ro
+    restart: unless-stopped
+
+  rest-api-service:
+    build:
+      context: .
+      dockerfile: adapters/rest_api_service/Dockerfile
+    depends_on:
+      - nats
+    ports:
+      - "8081:8080"   # 8081 on the host — webhook-listener already owns 8080
+    environment:
+      JETCORE_SERVICE_ID: rest-api-service-01
+      JETCORE_NATS_URL: nats://nats:4222
+      JETCORE_NATS_CREDS_PATH: /creds/rest-api-service-01.creds
+      JETCORE_HTTP_PORT: "8080"
+    volumes:
+      - ./infra/nats/operator/creds/rest-api-service-01.creds:/creds/rest-api-service-01.creds:ro
+    restart: unless-stopped
+
+  db-adapter-mysql:
+    build:
+      context: .
+      dockerfile: adapters/db_adapter_mysql/Dockerfile
+    depends_on:
+      - nats
+      - mysql
+    environment:
+      JETCORE_SERVICE_ID: db-adapter-mysql-01
+      JETCORE_NATS_URL: nats://nats:4222
+      JETCORE_NATS_CREDS_PATH: /creds/db-adapter-mysql-01.creds
+      JETCORE_MYSQL_HOST: mysql
+      JETCORE_MYSQL_WRITE_USER: jetcore_write
+      JETCORE_MYSQL_WRITE_PASSWORD: jetcore-write-dev-only
+      JETCORE_MYSQL_CDC_USER: jetcore_cdc
+      JETCORE_MYSQL_CDC_PASSWORD: jetcore-cdc-dev-only
+    volumes:
+      - ./infra/nats/operator/creds/db-adapter-mysql-01.creds:/creds/db-adapter-mysql-01.creds:ro
     restart: unless-stopped
 
 volumes:

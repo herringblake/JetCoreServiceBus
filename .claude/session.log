@@ -24842,3 +24842,1813 @@ Modified
 Both entries now cross-reference each other. Design.md is updated — the §13 Track K note explains what will happen and why when K2 lands, and §9 item #5 points forward to it, so neither reads as a surprise or gets re-diagnosed from scratch when it surfaces.
 
 ------------------ Track J Completed ------------------
+
+Proceed with all steps in Track K
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+echo "=== file_storage_adapter/Dockerfile ==="
+cat adapters/file_storage_adapter/Dockerfile
+echo "=== webhook_listener/Dockerfile ==="
+cat adapters/webhook_listener/Dockerfile
+
+OUT
+=== file_storage_adapter/Dockerfile ===
+# File Storage Adapter — Design.md §12 Step E2. First real Dockerfile in
+# the repo; build context is the REPO ROOT (see docker-compose.yml), not
+# this directory — a uv workspace path-dependency (`jetcore`) needs the
+# real libs/jetcore/ tree present to resolve, confirmed by testing, not
+# assumed (an adapter-scoped build context fails resolution entirely).
+#
+# The lockfile (uv.lock) records every workspace member, not just the
+# ones this image needs — `uv sync --frozen` validates the *whole*
+# workspace's pyproject.toml set against it, so every member's
+# pyproject.toml (but not its source) has to exist in the build context
+# too, or the sync fails with a member-not-found error. Confirmed by
+# testing: copying only jetcore + this adapter was NOT enough.
+
+FROM python:3.12-slim AS base
+
+# The official distroless uv image, not `pip install uv` — no extra
+# package manager bootstrap needed, and it's a static binary copy.
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /bin/
+
+WORKDIR /app
+
+# Workspace-wide files uv.lock validation needs.
+COPY pyproject.toml uv.lock .python-version ./
+
+# Every workspace member's pyproject.toml (§12 note above) ...
+COPY libs/jetcore/pyproject.toml libs/jetcore/pyproject.toml
+COPY adapters/file_storage_adapter/pyproject.toml adapters/file_storage_adapter/pyproject.toml
+COPY adapters/webhook_listener/pyproject.toml adapters/webhook_listener/pyproject.toml
+
+# ... but only the real source this image actually runs.
+COPY libs/jetcore/jetcore libs/jetcore/jetcore
+COPY adapters/file_storage_adapter/file_storage_adapter adapters/file_storage_adapter/file_storage_adapter
+
+# --frozen: fail if uv.lock is out of date, don't silently re-resolve in
+# the image build. --no-dev: pytest/ruff/mypy/bandit have no business in
+# a runtime image. --package: installs only this adapter + its transitive
+# deps (jetcore included), not every workspace member.
+RUN uv sync --frozen --no-dev --package file-storage-adapter
+
+# Not root: this adapter writes to a host bind mount (watch_dir, Step
+# E1) — confirmed by testing that files it creates land root-owned on
+# the host otherwise, which the host user then can't even delete without
+# sudo. UID 1000 matches the conventional first non-root Linux user
+# (this host's own included) — not guaranteed on every host, but a
+# reasonable default; override at `docker run`/Compose `user:` time if
+# a deployment's bind-mount ownership needs differ.
+RUN useradd --uid 1000 --create-home appuser
+USER appuser
+
+ENV PATH="/app/.venv/bin:${PATH}"
+
+CMD ["python", "-m", "file_storage_adapter"]
+=== webhook_listener/Dockerfile ===
+# Webhook Listener — Design.md §12 Step E2. Mirrors
+# adapters/file_storage_adapter/Dockerfile's structure and reasoning
+# exactly (build context = repo root; every workspace member's
+# pyproject.toml needed for uv.lock validation, but only this adapter's
+# and jetcore's real source).
+
+FROM python:3.12-slim AS base
+
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /bin/
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock .python-version ./
+
+COPY libs/jetcore/pyproject.toml libs/jetcore/pyproject.toml
+COPY adapters/file_storage_adapter/pyproject.toml adapters/file_storage_adapter/pyproject.toml
+COPY adapters/webhook_listener/pyproject.toml adapters/webhook_listener/pyproject.toml
+
+COPY libs/jetcore/jetcore libs/jetcore/jetcore
+COPY adapters/webhook_listener/webhook_listener adapters/webhook_listener/webhook_listener
+
+RUN uv sync --frozen --no-dev --package jetcore-webhook-listener
+
+# Not root — same reasoning as file_storage_adapter/Dockerfile, applied
+# here too for defense-in-depth even though this adapter has no host
+# bind mount of its own to accidentally root-own.
+RUN useradd --uid 1000 --create-home appuser
+USER appuser
+
+ENV PATH="/app/.venv/bin:${PATH}"
+
+EXPOSE 8080
+
+CMD ["python", "-m", "webhook_listener"]
+Let's verify empirically what uv sync --frozen --package X actually requires now that the workspace has grown to 6 adapter members, before assuming the existing Dockerfiles' comment still holds.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+mkdir -p /tmp/dockertest
+cat > /tmp/dockertest/Dockerfile <<'EOF'
+FROM python:3.12-slim AS base
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /bin/
+WORKDIR /app
+COPY pyproject.toml uv.lock .python-version ./
+COPY libs/jetcore/pyproject.toml libs/jetcore/pyproject.toml
+COPY adapters/webhook_sender/pyproject.toml adapters/webhook_sender/pyproject.toml
+COPY libs/jetcore/jetcore libs/jetcore/jetcore
+COPY adapters/webhook_sender/webhook_sender adapters/webhook_sender/webhook_sender
+RUN uv sync --frozen --no-dev --package jetcore-webhook-sender
+EOF
+sg docker -c "docker build -f /tmp/dockertest/Dockerfile -t test-webhook-sender-minimal ." 2>&1 | tail -40
+
+OUT
+#15 1.479       Built jetcore @ file:///app/libs/jetcore
+#15 1.479       Built jetcore-webhook-sender @ file:///app/adapters/webhook_sender
+#15 1.879       Built nkeys==0.2.1
+#15 1.880 Prepared 22 packages in 1.53s
+#15 1.886 Installed 22 packages in 5ms
+#15 1.886  + annotated-types==0.8.0
+#15 1.886  + anyio==4.14.2
+#15 1.886  + certifi==2026.7.22
+#15 1.886  + cffi==2.1.1
+#15 1.886  + h11==0.16.0
+#15 1.886  + httpcore==1.0.9
+#15 1.886  + httpx==0.28.1
+#15 1.886  + idna==3.19
+#15 1.886  + jetcore==0.1.0 (from file:///app/libs/jetcore)
+#15 1.886  + jetcore-webhook-sender==0.1.0 (from file:///app/adapters/webhook_sender)
+#15 1.886  + nats-py==2.15.0
+#15 1.886  + nkeys==0.2.1
+#15 1.886  + pycparser==3.0
+#15 1.886  + pydantic==2.13.4
+#15 1.886  + pydantic-core==2.46.4
+#15 1.886  + pydantic-settings==2.15.0
+#15 1.887  + pynacl==1.6.2
+#15 1.887  + pyrage==1.4.0
+#15 1.887  + python-dotenv==1.2.3
+#15 1.887  + typing-extensions==4.16.0
+#15 1.887  + typing-inspection==0.4.4
+#15 1.887  + uuid6==2025.0.1
+#15 DONE 2.0s
+
+#16 exporting to image
+#16 exporting layers
+#16 exporting layers 1.0s done
+#16 exporting manifest sha256:c99aea9ddf15f47578d11cde9f4187b1beb2056bb34ed56f8f91a7ec6d576a6c 0.0s done
+#16 exporting config sha256:7fbded812ad430444c69fd36a435850f7b852b2cb87c40efe21afb2e33736e50 0.0s done
+#16 exporting attestation manifest sha256:e058b65cda05653540a479ef1e10cfe1fceb4d752068c3f37da03e6e94a9e13b 0.0s done
+#16 exporting manifest list sha256:e4831edeec193ef3fb68de70d554d32bf11fa1349dde95cfb1ac3f4ab95fdbcc 0.0s done
+#16 naming to docker.io/library/test-webhook-sender-minimal:latest done
+#16 unpacking to docker.io/library/test-webhook-sender-minimal:latest
+#16 unpacking to docker.io/library/test-webhook-sender-minimal:latest 0.5s done
+#16 DONE 1.6s
+Bash
+IN
+sg docker -c "docker rmi test-webhook-sender-minimal" 2>&1 | tail -5
+rm -rf /tmp/dockertest
+
+OUT
+Untagged: test-webhook-sender-minimal:latest
+Deleted: sha256:e4831edeec193ef3fb68de70d554d32bf11fa1349dde95cfb1ac3f4ab95fdbcc
+Now let's write the four Dockerfiles.
+
+Write Dockerfile
+40 lines
+# Webhook Sender — Design.md §13 Step K1. Same build-context-is-repo-root
+# reasoning as adapters/file_storage_adapter/Dockerfile (Step E2) and
+# adapters/webhook_listener/Dockerfile — a uv workspace path-dependency
+# (`jetcore`) needs the real libs/jetcore/ tree present to resolve.
+#
+# Copies only jetcore's + THIS adapter's own pyproject.toml/source, not
+# every workspace member's — a real, empirically-confirmed correction to
+# Step E2's original Dockerfiles' broader copy set (their own comments
+# say "copying only jetcore + this adapter was NOT enough," back when the
+# workspace had 3 members total). Tested directly at this step: with 8
+# members now in the workspace, `uv sync --frozen --package X` only
+# needs X's own dependency subgraph present, not every unrelated sibling
+# adapter's pyproject.toml — confirmed by building this exact minimal set
+# and watching it succeed, not assumed from the older comment.
+
+FROM python:3.12-slim AS base
+
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /bin/
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock .python-version ./
+
+COPY libs/jetcore/pyproject.toml libs/jetcore/pyproject.toml
+COPY adapters/webhook_sender/pyproject.toml adapters/webhook_sender/pyproject.toml
+
+COPY libs/jetcore/jetcore libs/jetcore/jetcore
+COPY adapters/webhook_sender/webhook_sender adapters/webhook_sender/webhook_sender
+
+RUN uv sync --frozen --no-dev --package jetcore-webhook-sender
+
+# Not root — same defense-in-depth reasoning as every other adapter's
+# Dockerfile; this adapter has no host bind mount of its own either.
+RUN useradd --uid 1000 --create-home appuser
+USER appuser
+
+ENV PATH="/app/.venv/bin:${PATH}"
+
+CMD ["python", "-m", "webhook_sender"]
+Write Dockerfile
+27 lines
+# HTTP Adapter — Design.md §13 Step K1. Mirrors
+# adapters/webhook_sender/Dockerfile's structure and reasoning exactly —
+# see that file's header comment for the minimal-copy-set finding.
+
+FROM python:3.12-slim AS base
+
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /bin/
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock .python-version ./
+
+COPY libs/jetcore/pyproject.toml libs/jetcore/pyproject.toml
+COPY adapters/http_adapter/pyproject.toml adapters/http_adapter/pyproject.toml
+
+COPY libs/jetcore/jetcore libs/jetcore/jetcore
+COPY adapters/http_adapter/http_adapter adapters/http_adapter/http_adapter
+
+RUN uv sync --frozen --no-dev --package jetcore-http-adapter
+
+RUN useradd --uid 1000 --create-home appuser
+USER appuser
+
+ENV PATH="/app/.venv/bin:${PATH}"
+
+CMD ["python", "-m", "http_adapter"]
+Write Dockerfile
+32 lines
+# REST API Service — Design.md §13 Step K1. Mirrors
+# adapters/webhook_sender/Dockerfile's structure and reasoning exactly —
+# see that file's header comment for the minimal-copy-set finding. The
+# one difference from the outbound-only adapters: this one serves real
+# inbound HTTP (Track I), so it needs the port exposed, the same as
+# webhook_listener/Dockerfile (Step E2).
+
+FROM python:3.12-slim AS base
+
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /bin/
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock .python-version ./
+
+COPY libs/jetcore/pyproject.toml libs/jetcore/pyproject.toml
+COPY adapters/rest_api_service/pyproject.toml adapters/rest_api_service/pyproject.toml
+
+COPY libs/jetcore/jetcore libs/jetcore/jetcore
+COPY adapters/rest_api_service/rest_api_service adapters/rest_api_service/rest_api_service
+
+RUN uv sync --frozen --no-dev --package jetcore-rest-api-service
+
+RUN useradd --uid 1000 --create-home appuser
+USER appuser
+
+ENV PATH="/app/.venv/bin:${PATH}"
+
+EXPOSE 8080
+
+CMD ["python", "-m", "rest_api_service"]
+Write Dockerfile
+27 lines
+# Database Adapter (MySQL) — Design.md §13 Step K1. Mirrors
+# adapters/webhook_sender/Dockerfile's structure and reasoning exactly —
+# see that file's header comment for the minimal-copy-set finding.
+
+FROM python:3.12-slim AS base
+
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /bin/
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock .python-version ./
+
+COPY libs/jetcore/pyproject.toml libs/jetcore/pyproject.toml
+COPY adapters/db_adapter_mysql/pyproject.toml adapters/db_adapter_mysql/pyproject.toml
+
+COPY libs/jetcore/jetcore libs/jetcore/jetcore
+COPY adapters/db_adapter_mysql/db_adapter_mysql adapters/db_adapter_mysql/db_adapter_mysql
+
+RUN uv sync --frozen --no-dev --package jetcore-db-adapter-mysql
+
+RUN useradd --uid 1000 --create-home appuser
+USER appuser
+
+ENV PATH="/app/.venv/bin:${PATH}"
+
+CMD ["python", "-m", "db_adapter_mysql"]
+Now K2: wire the four new services into docker-compose.yml.
+
+Read docker-compose.yml
+Edit docker-compose.yml
+Added 87 lines
+Now let's build and bring up the full stack.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sg docker -c "docker compose build webhook-sender http-adapter rest-api-service db-adapter-mysql" 2>&1 | tail -80
+
+OUT
+#45 3.090  + anyio==4.14.2
+#45 3.090  + certifi==2026.7.22
+#45 3.090  + cffi==2.1.1
+#45 3.090  + h11==0.16.0
+#45 3.090  + httpcore==1.0.9
+#45 3.090  + httpx==0.28.1
+#45 3.090  + idna==3.19
+#45 3.090  + jetcore==0.1.0 (from file:///app/libs/jetcore)
+#45 3.090  + jetcore-http-adapter==0.1.0 (from file:///app/adapters/http_adapter)
+#45 3.090  + nats-py==2.15.0
+#45 3.090  + nkeys==0.2.1
+#45 3.090  + pycparser==3.0
+#45 3.090  + pydantic==2.13.4
+#45 3.090  + pydantic-core==2.46.4
+#45 3.090  + pydantic-settings==2.15.0
+#45 3.090  + pynacl==1.6.2
+#45 3.090  + pyrage==1.4.0
+#45 3.091  + python-dotenv==1.2.3
+#45 3.091  + typing-extensions==4.16.0
+#45 3.091  + typing-inspection==0.4.4
+#45 3.091  + uuid6==2025.0.1
+#45 DONE 3.2s
+
+#46 [db-adapter-mysql] exporting to image
+#46 ...
+
+#47 [http-adapter base 10/10] RUN useradd --uid 1000 --create-home appuser
+#47 DONE 0.4s
+
+#48 [http-adapter] exporting to image
+#48 ...
+
+#49 [rest-api-service] exporting to image
+#49 exporting layers 1.2s done
+#49 exporting manifest sha256:599e6c98f4c2d5541915bbd0db9c16e341e586918d33bbe59e0b96fb02f0a254 0.0s done
+#49 exporting config sha256:ddc9f5eeda664ef5f6eb1a8946008347deb2a4ab5f1209ee3d962d67bb79665c 0.0s done
+#49 exporting attestation manifest sha256:feb490adb6f30160689a3cdedcf7ee119092ea85aaf76aeec85a4957a6b1659c 0.0s done
+#49 exporting manifest list sha256:9f940718ced918047de7b2c27c36a4238dea9d67bce338023ba286da6fe23a23 0.0s done
+#49 naming to docker.io/library/jetcore-rest-api-service:latest done
+#49 unpacking to docker.io/library/jetcore-rest-api-service:latest 0.5s done
+#49 DONE 1.8s
+
+#48 [http-adapter] exporting to image
+#48 exporting layers 1.2s done
+#48 exporting manifest sha256:b2ef2a37391d4a953cc38d50af90acf4a87aa27ff95c749fde40dd73aa54a1b9 0.0s done
+#48 exporting config sha256:ab3c8874ad82007e29d3958a9e0fd9942fb5c7e8c9078bf1282726019565398c 0.0s done
+#48 exporting attestation manifest sha256:ffac19703f36109a2bae51e34d18cf2192cb21d360eb753272ea3ef683c772b7 0.0s done
+#48 exporting manifest list sha256:f8bba510328b6e3a42061bd9d2d35c741a3b8923c94911d3e096a61b3697adeb 0.0s done
+#48 naming to docker.io/library/jetcore-http-adapter:latest
+#48 ...
+
+#50 [rest-api-service] resolving provenance for metadata file
+#50 DONE 0.0s
+
+#48 [http-adapter] exporting to image
+#48 naming to docker.io/library/jetcore-http-adapter:latest done
+#48 unpacking to docker.io/library/jetcore-http-adapter:latest
+#48 unpacking to docker.io/library/jetcore-http-adapter:latest 0.5s done
+#48 DONE 1.8s
+
+#51 [http-adapter] resolving provenance for metadata file
+#51 DONE 0.0s
+
+#46 [db-adapter-mysql] exporting to image
+#46 exporting layers 2.9s done
+#46 exporting manifest sha256:d214135b36604aa3640da8d3d3f5c5d020bc68f3aada7fd7f865f515a8c1d908 0.0s done
+#46 exporting config sha256:66c8278655e55a54e5bfacbfb2e0b6fe6f47af49212ad1e23772edd0d6f8f62b 0.0s done
+#46 exporting attestation manifest sha256:9e6a07ca5b81528e87786a76b1df21de9315af6ee82fe8e0fcfe76734d1dc5e2 0.0s done
+#46 exporting manifest list sha256:8956b55cfc7de48a4abca2ba84e410603c0a166eb76a2c133bcb2a8ecb5c1e6b 0.0s done
+#46 naming to docker.io/library/jetcore-db-adapter-mysql:latest done
+#46 unpacking to docker.io/library/jetcore-db-adapter-mysql:latest
+#46 unpacking to docker.io/library/jetcore-db-adapter-mysql:latest 0.9s done
+#46 DONE 3.9s
+
+#52 [db-adapter-mysql] resolving provenance for metadata file
+#52 DONE 0.0s
+ Image jetcore-rest-api-service Built 
+ Image jetcore-db-adapter-mysql Built 
+ Image jetcore-webhook-sender Built 
+ Image jetcore-http-adapter Built
+All four built cleanly, including db-adapter-mysql with its heavier dependency set. Now bring the full stack up.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sg docker -c "docker compose up -d" 2>&1 | tail -30
+
+OUT
+ Container jetcore-webhook-listener-1 Running 
+ Container jetcore-mysql-1 Running 
+ Container jetcore-file-storage-adapter-1 Running 
+ Container jetcore-nats-1 Running 
+ Container jetcore-webhook-sender-1 Creating 
+ Container jetcore-rest-api-service-1 Creating 
+ Container jetcore-db-adapter-mysql-1 Creating 
+ Container jetcore-http-adapter-1 Creating 
+ Container jetcore-webhook-sender-1 Created 
+ Container jetcore-rest-api-service-1 Created 
+ Container jetcore-http-adapter-1 Created 
+ Container jetcore-db-adapter-mysql-1 Created 
+ Container jetcore-rest-api-service-1 Starting 
+ Container jetcore-db-adapter-mysql-1 Starting 
+ Container jetcore-webhook-sender-1 Starting 
+ Container jetcore-http-adapter-1 Starting 
+ Container jetcore-http-adapter-1 Started 
+ Container jetcore-db-adapter-mysql-1 Started 
+ Container jetcore-webhook-sender-1 Started 
+ Container jetcore-rest-api-service-1 Started
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sleep 3
+sg docker -c "docker compose ps" 2>&1
+echo "--- logs check ---"
+for svc in webhook-sender http-adapter rest-api-service db-adapter-mysql; do
+  echo "=== $svc ==="
+  sg docker -c "docker compose logs $svc --tail 15" 2>&1
+done
+
+OUT
+NAME                             IMAGE                          COMMAND                  SERVICE                CREATED         STATUS         PORTS
+jetcore-db-adapter-mysql-1       jetcore-db-adapter-mysql       "python -m db_adapte…"   db-adapter-mysql       8 seconds ago   Up 7 seconds   
+jetcore-file-storage-adapter-1   jetcore-file-storage-adapter   "python -m file_stor…"   file-storage-adapter   2 hours ago     Up 2 hours     
+jetcore-http-adapter-1           jetcore-http-adapter           "python -m http_adap…"   http-adapter           8 seconds ago   Up 7 seconds   
+jetcore-mysql-1                  mysql:8.4.11                   "docker-entrypoint.s…"   mysql                  2 hours ago     Up 2 hours     0.0.0.0:3306->3306/tcp, [::]:3306->3306/tcp, 33060/tcp
+jetcore-nats-1                   nats:2.14.5                    "/nats-server -c /et…"   nats                   2 hours ago     Up 2 hours     0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+jetcore-rest-api-service-1       jetcore-rest-api-service       "python -m rest_api_…"   rest-api-service       8 seconds ago   Up 7 seconds   0.0.0.0:8081->8080/tcp, [::]:8081->8080/tcp
+jetcore-webhook-listener-1       jetcore-webhook-listener       "python -m webhook_l…"   webhook-listener       2 hours ago     Up 2 hours     0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp
+jetcore-webhook-sender-1         jetcore-webhook-sender         "python -m webhook_s…"   webhook-sender         8 seconds ago   Up 7 seconds   
+--- logs check ---
+=== webhook-sender ===
+webhook-sender-1  | INFO:__main__:webhook sender started (service_id=webhook-sender-01, subjects=['events.orders.OrderCreated'], target_url=http://webhook-listener:8080/webhooks/orders/relayed.json)
+=== http-adapter ===
+http-adapter-1  | INFO:__main__:http adapter started (service_id=http-adapter-01, subjects=['events.orders.OrderCreated'], target_base_url=http://webhook-listener:8080/healthz)
+=== rest-api-service ===
+rest-api-service-1  | INFO:     Started server process [1]
+rest-api-service-1  | INFO:     Waiting for application startup.
+rest-api-service-1  | INFO:     Application startup complete.
+rest-api-service-1  | INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
+=== db-adapter-mysql ===
+db-adapter-mysql-1  | WARNING:jetcore.bus_client:publishing to events.db.orders.RowChanged with no registered recipients yet
+db-adapter-mysql-1  | WARNING:jetcore.bus_client:publishing to events.db.orders.RowChanged with no registered recipients yet
+db-adapter-mysql-1  | WARNING:jetcore.bus_client:publishing to events.db.orders.RowChanged with no registered recipients yet
+db-adapter-mysql-1  | WARNING:jetcore.bus_client:publishing to events.db.orders.RowChanged with no registered recipients yet
+db-adapter-mysql-1  | WARNING:jetcore.bus_client:publishing to events.db.orders.RowChanged with no registered recipients yet
+db-adapter-mysql-1  | WARNING:jetcore.bus_client:publishing to events.db.orders.RowChanged with no registered recipients yet
+db-adapter-mysql-1  | WARNING:jetcore.bus_client:publishing to events.db.orders.RowChanged with no registered recipients yet
+db-adapter-mysql-1  | WARNING:jetcore.bus_client:publishing to events.db.orders.RowChanged with no registered recipients yet
+db-adapter-mysql-1  | WARNING:jetcore.bus_client:publishing to events.db.orders.RowChanged with no registered recipients yet
+db-adapter-mysql-1  | WARNING:jetcore.bus_client:publishing to events.db.orders.RowChanged with no registered recipients yet
+db-adapter-mysql-1  | WARNING:jetcore.bus_client:publishing to events.db.orders.RowChanged with no registered recipients yet
+db-adapter-mysql-1  | WARNING:jetcore.bus_client:publishing to events.db.orders.RowChanged with no registered recipients yet
+db-adapter-mysql-1  | WARNING:jetcore.bus_client:publishing to events.db.orders.RowChanged with no registered recipients yet
+db-adapter-mysql-1  | WARNING:jetcore.bus_client:publishing to events.db.orders.RowChanged with no registered recipients yet
+db-adapter-mysql-1  | WARNING:jetcore.bus_client:publishing to events.db.orders.RowChanged with no registered recipients yet
+Bash
+IN
+sleep 20
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sg docker -c "docker compose logs db-adapter-mysql --tail 3" 2>&1
+
+OUT
+db-adapter-mysql-1  | WARNING:jetcore.bus_client:publishing to events.db.orders.RowChanged with no registered recipients yet
+db-adapter-mysql-1  | WARNING:jetcore.bus_client:publishing to events.db.orders.RowChanged with no registered recipients yet
+db-adapter-mysql-1  | WARNING:jetcore.bus_client:publishing to events.db.orders.RowChanged with no registered recipients yet
+Let's just reset the binlog/state cleanly for K3's smoke test rather than waiting out the replay.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sg docker -c "docker compose restart db-adapter-mysql" 2>&1 | tail -5
+sg docker -c "docker compose exec -T mysql mysql -uroot -pdev-only-change-me jetcore -e \"DELETE FROM orders;\"" 2>&1
+sg docker -c "docker compose exec -T mysql mysql -uroot -pdev-only-change-me -e \"RESET BINARY LOGS AND GTIDS;\"" 2>&1
+sg docker -c "docker compose restart db-adapter-mysql" 2>&1 | tail -5
+
+OUT
+ Container jetcore-db-adapter-mysql-1 Restarting 
+ Container jetcore-db-adapter-mysql-1 Started 
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+ Container jetcore-db-adapter-mysql-1 Restarting 
+ Container jetcore-db-adapter-mysql-1 Started
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -5
+sleep 3
+sg docker -c "docker compose logs db-adapter-mysql --tail 10" 2>&1
+
+OUT
+            Messages: 0
+               Bytes: 0 B
+      First Sequence: 10,651
+       Last Sequence: 10,650 @ 2026-08-31 00:29:15
+    Active Consumers: 497
+db-adapter-mysql-1  | INFO:pymysqlreplication:only_schemas: ['jetcore']
+db-adapter-mysql-1  | INFO:pymysqlreplication:enable_logging: True
+db-adapter-mysql-1  | INFO:pymysqlreplication:allowed_events_in_packet: frozenset({<class 'pymysqlreplication.row_event.UpdateRowsEvent'>, <class 'pymysqlreplication.event.FormatDescriptionEvent'>, <class 'pymysqlreplication.row_event.WriteRowsEvent'>, <class 'pymysqlreplication.event.RotateEvent'>, <class 'pymysqlreplication.row_event.DeleteRowsEvent'>, <class 'pymysqlreplication.row_event.TableMapEvent'>})
+db-adapter-mysql-1  | INFO:pymysqlreplication:server_id: 100
+db-adapter-mysql-1  | INFO:__main__:database adapter started (service_id=db-adapter-mysql-01)
+db-adapter-mysql-1  | INFO:pymysqlreplication:only_tables: ['orders']
+db-adapter-mysql-1  | INFO:pymysqlreplication:only_schemas: ['jetcore']
+db-adapter-mysql-1  | INFO:pymysqlreplication:enable_logging: True
+db-adapter-mysql-1  | INFO:pymysqlreplication:allowed_events_in_packet: frozenset({<class 'pymysqlreplication.row_event.TableMapEvent'>, <class 'pymysqlreplication.event.FormatDescriptionEvent'>, <class 'pymysqlreplication.event.RotateEvent'>, <class 'pymysqlreplication.row_event.UpdateRowsEvent'>, <class 'pymysqlreplication.row_event.WriteRowsEvent'>, <class 'pymysqlreplication.row_event.DeleteRowsEvent'>})
+db-adapter-mysql-1  | INFO:pymysqlreplication:server_id: 100
+Now K3: the manual end-to-end smoke test through the real, fully-wired stack.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+ls infra/files/ 2>&1
+mkdir -p infra/files
+echo "smoke test seed content" > infra/files/k3-seed.txt
+cat infra/files/k3-seed.txt
+
+OUT
+smoke test seed content
+Write k3_smoke_test.py
+203 lines
+"""Design.md §13 Step K3 — manual end-to-end smoke test against the real,
+fully-wired docker-compose stack. Not pytest; a throwaway script run
+directly, matching every prior track's manual-verification style."""
+
+import asyncio
+import base64
+import json
+
+from jetcore.bus_client import BusClient
+from jetcore.config import AdapterSettings
+from jetcore.crypto import generate_encryption_keypair, generate_signing_keypair
+
+NATS_URL = "nats://localhost:4222"
+CREDS_DIR = "infra/nats/operator/creds"
+
+LIST_REQUESTED = "events.files.FileListRequested"
+LIST_COMPLETED = "events.files.FileListCompleted"
+READ_REQUESTED = "events.files.FileReadRequested"
+READ_COMPLETED = "events.files.FileReadCompleted"
+DELETE_REQUESTED = "events.files.FileDeleteRequested"
+DELETE_COMPLETED = "events.files.FileDeleteCompleted"
+REQUEST_COMPLETED = "events.http.RequestCompleted"
+ROW_CHANGED = "events.db.orders.RowChanged"
+
+
+async def connect(service_id: str) -> BusClient:
+    signing = generate_signing_keypair()
+    encryption = generate_encryption_keypair()
+    settings = AdapterSettings(
+        service_id=service_id,
+        nats_url=NATS_URL,
+        nats_creds_path=f"{CREDS_DIR}/{service_id}.creds",
+    )
+    return await BusClient.connect(
+        settings,
+        adapter_type="k3-smoke-test",
+        encryption_keypair=encryption,
+        signing_seed=signing.seed,
+        signing_public_key=signing.public_key,
+    )
+
+
+async def wait_cache(client: BusClient, subject: str, count: int = 1, timeout: float = 5.0) -> None:
+    cache = await client._cache_for(subject)
+
+    async def _poll() -> None:
+        while len(cache.current()) < count:
+            await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(_poll(), timeout=timeout)
+
+
+async def part1_file_storage_list_read_delete() -> None:
+    print("\n=== Part 1: File Storage list/read/delete via direct bus publish ===")
+    observer = await connect("test-observer-01")
+    try:
+        list_durable = await observer.subscribe(LIST_COMPLETED, durable_name="k3-list")
+        read_durable = await observer.subscribe(READ_COMPLETED, durable_name="k3-read")
+        delete_durable = await observer.subscribe(DELETE_COMPLETED, durable_name="k3-delete")
+        await wait_cache(observer, LIST_REQUESTED)
+        await wait_cache(observer, READ_REQUESTED)
+        await wait_cache(observer, DELETE_REQUESTED)
+
+        await observer.publish(LIST_REQUESTED, json.dumps({"path": ""}).encode(), event_type="FileListRequested")
+        [listed] = await observer.fetch(list_durable, timeout=5)
+        entries = json.loads(listed.payload)["entries"]
+        print("FileListCompleted entries:", entries)
+        assert any(e["name"] == "k3-seed.txt" for e in entries), "seed file not found in listing"
+
+        await observer.publish(
+            READ_REQUESTED, json.dumps({"path": "k3-seed.txt"}).encode(), event_type="FileReadRequested"
+        )
+        [read] = await observer.fetch(read_durable, timeout=5)
+        read_data = json.loads(read.payload)
+        content = base64.b64decode(read_data["content"])
+        print("FileReadCompleted content:", content)
+        assert content == b"smoke test seed content\n"
+
+        await observer.publish(
+            DELETE_REQUESTED, json.dumps({"path": "k3-seed.txt"}).encode(), event_type="FileDeleteRequested"
+        )
+        [deleted] = await observer.fetch(delete_durable, timeout=5)
+        print("FileDeleteCompleted:", json.loads(deleted.payload))
+        print("Part 1: PASS")
+    finally:
+        await observer.close()
+
+
+async def part2_order_created_fan_out() -> tuple[str, str]:
+    """One real POST to the deployed REST API Service triggers THREE
+    independent real consumers at once: the Webhook Sender (relays to
+    the Webhook Listener -> FileWriteRequested -> a real file on disk),
+    the HTTP Adapter (POSTs to the Webhook Listener's /healthz -> a real
+    405 -> RequestCompleted), and the Database Adapter's write path
+    (upsert -> OrderPersisted, resolved synchronously by the REST API
+    Service's own ?wait= reply). Returns (order_id, rest_api_response)."""
+    print("\n=== Part 2: one real POST fans out to Webhook Sender + HTTP Adapter + Database Adapter ===")
+    import uuid
+
+    import httpx
+
+    observer = await connect("test-observer-01")
+    try:
+        request_completed_durable = await observer.subscribe(
+            REQUEST_COMPLETED, durable_name="k3-request-completed"
+        )
+        await wait_cache(observer, REQUEST_COMPLETED)
+
+        order_id = f"k3-smoke-{uuid.uuid4().hex[:8]}"
+        body = json.dumps({"orderId": order_id, "item": "k3-widget", "quantity": 2}).encode()
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "http://localhost:8081/api/orders?wait=10", content=body, timeout=15
+            )
+        print(f"POST /api/orders?wait=10 -> {response.status_code} {response.text}")
+        assert response.status_code == 200, "REST API Service's real sync-reply round trip failed"
+        persisted = response.json()
+        assert persisted["orderId"] == order_id
+        assert persisted["status"] == "persisted"
+        print("REST API Service <-> Database Adapter sync-reply round trip: PASS")
+
+        [http_result] = await observer.fetch(request_completed_durable, timeout=10)
+        http_data = json.loads(http_result.payload)
+        print("HTTP Adapter's RequestCompleted (from POSTing to /healthz):", http_data)
+        assert http_data["statusCode"] == 405  # /healthz only accepts GET
+        print("HTTP Adapter real outbound call: PASS")
+
+        return order_id, json.dumps(persisted)
+    finally:
+        await observer.close()
+
+
+def part3_webhook_sender_relay_landed_on_disk(order_id: str) -> None:
+    print("\n=== Part 3: Webhook Sender's relay actually reached disk via the Webhook Listener ===")
+    import time
+
+    path = "infra/files/orders/relayed.json"
+    for _ in range(50):
+        if __import__("os").path.exists(path):
+            break
+        time.sleep(0.2)
+    with open(path, "rb") as f:
+        content = f.read()
+    print("relayed.json content:", content)
+    data = json.loads(content)
+    assert data["orderId"] == order_id
+    print("Webhook Sender -> Webhook Listener -> File Storage Adapter relay chain: PASS")
+
+
+async def part4_cdc_direct_sql_write() -> None:
+    print("\n=== Part 4: direct SQL INSERT bypassing the bus entirely -> CDC still fires ===")
+    import uuid
+
+    import pymysql
+
+    observer = await connect("test-observer-01")
+    try:
+        row_changed_durable = await observer.subscribe(ROW_CHANGED, durable_name="k3-rowchanged")
+        await wait_cache(observer, ROW_CHANGED)
+
+        order_id = f"k3-direct-sql-{uuid.uuid4().hex[:8]}"
+        conn = pymysql.connect(
+            host="localhost", port=3306, user="root", password="dev-only-change-me",
+            database="jetcore", autocommit=True,
+        )
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO orders (order_id, item, quantity) VALUES (%s, %s, %s)",
+                (order_id, "direct-sql-widget", 5),
+            )
+        finally:
+            conn.close()
+        print(f"direct SQL INSERT for {order_id} — bus never touched")
+
+        async def _poll() -> dict:
+            while True:
+                received = await observer.fetch(row_changed_durable, batch=10, timeout=2.0)
+                for event in received:
+                    data = json.loads(event.payload)
+                    if data.get("row", {}).get("order_id") == order_id:
+                        return data
+
+        row_changed = await asyncio.wait_for(_poll(), timeout=15)
+        print("RowChanged (from a write the bus never saw):", row_changed)
+        assert row_changed["operation"] == "insert"
+        assert row_changed["row"]["item"] == "direct-sql-widget"
+        print("Part 4 (CDC read path is real, not an echo of bus writes): PASS")
+    finally:
+        await observer.close()
+
+
+async def main() -> None:
+    await part1_file_storage_list_read_delete()
+    order_id, _ = await part2_order_created_fan_out()
+    part3_webhook_sender_relay_landed_on_disk(order_id)
+    await part4_cdc_direct_sql_write()
+    print("\n=== Step K3: ALL PARTS PASSED ===")
+
+
+asyncio.run(main())
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "encode_list_completed\|entries\|class ListEntry\|def encode_list" adapters/file_storage_adapter/file_storage_adapter/payloads.py adapters/file_storage_adapter/file_storage_adapter/list_handler.py
+
+OUT
+adapters/file_storage_adapter/file_storage_adapter/payloads.py:119:def encode_list_completed(
+adapters/file_storage_adapter/file_storage_adapter/payloads.py:120:    *, path: str, entries: list[FileEntry], occurred_at: datetime | None = None
+adapters/file_storage_adapter/file_storage_adapter/payloads.py:125:            "entries": [
+adapters/file_storage_adapter/file_storage_adapter/payloads.py:127:                for e in entries
+adapters/file_storage_adapter/file_storage_adapter/list_handler.py:19:    encode_list_completed,
+adapters/file_storage_adapter/file_storage_adapter/list_handler.py:92:            entries = [
+adapters/file_storage_adapter/file_storage_adapter/list_handler.py:111:            encode_list_completed(path=request.path, entries=entries),
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '100,135p' adapters/file_storage_adapter/file_storage_adapter/payloads.py
+
+OUT
+    *, path: str, content: bytes, occurred_at: datetime | None = None
+) -> bytes:
+    return json.dumps(
+        {
+            "path": path,
+            "content": base64.b64encode(content).decode(),
+            "sizeBytes": len(content),
+            "occurredAt": _iso(occurred_at or utc_now()),
+        }
+    ).encode()
+
+
+@dataclass(frozen=True)
+class FileEntry:
+    name: str
+    is_directory: bool
+    size_bytes: int
+
+
+def encode_list_completed(
+    *, path: str, entries: list[FileEntry], occurred_at: datetime | None = None
+) -> bytes:
+    return json.dumps(
+        {
+            "path": path,
+            "entries": [
+                {"name": e.name, "isDirectory": e.is_directory, "sizeBytes": e.size_bytes}
+                for e in entries
+            ],
+            "occurredAt": _iso(occurred_at or utc_now()),
+        }
+    ).encode()
+
+
+def encode_delete_completed(*, path: str, occurred_at: datetime | None = None) -> bytes:
+    return json.dumps({"path": path, "occurredAt": _iso(occurred_at or utc_now())}).encode()
+Good, my script's shape assumptions match exactly. Let's run the smoke test.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+timeout 90 uv run --package jetcore-db-adapter-mysql python /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/k3_smoke_test.py 2>&1 | tail -150
+
+OUT
+=== Part 1: File Storage list/read/delete via direct bus publish ===
+FileListCompleted entries: [{'name': 'k3-seed.txt', 'isDirectory': False, 'sizeBytes': 24}]
+FileReadCompleted content: b'smoke test seed content\n'
+FileDeleteCompleted: {'path': 'k3-seed.txt', 'occurredAt': '2026-08-31T00:30:42.895592Z'}
+Part 1: PASS
+
+=== Part 2: one real POST fans out to Webhook Sender + HTTP Adapter + Database Adapter ===
+POST /api/orders?wait=10 -> 200 {"orderId": "k3-smoke-52243968", "status": "persisted", "occurredAt": "2026-08-31T00:30:43.032243Z"}
+REST API Service <-> Database Adapter sync-reply round trip: PASS
+HTTP Adapter's RequestCompleted (from POSTing to /healthz): {'status': 'error', 'statusCode': 405, 'body': 'eyJkZXRhaWwiOiJNZXRob2QgTm90IEFsbG93ZWQifQ==', 'occurredAt': '2026-08-31T00:30:43.052577Z'}
+HTTP Adapter real outbound call: PASS
+
+=== Part 3: Webhook Sender's relay actually reached disk via the Webhook Listener ===
+relayed.json content: b'{"orderId": "k3-smoke-52243968", "item": "k3-widget", "quantity": 2}'
+Webhook Sender -> Webhook Listener -> File Storage Adapter relay chain: PASS
+
+=== Part 4: direct SQL INSERT bypassing the bus entirely -> CDC still fires ===
+direct SQL INSERT for k3-direct-sql-f2b18c08 — bus never touched
+RowChanged (from a write the bus never saw): {'operation': 'insert', 'table': 'orders', 'row': {'order_id': 'k3-direct-sql-f2b18c08', 'item': 'direct-sql-widget', 'quantity': 5, 'created_at': '2026-08-31T00:30:43', 'updated_at': '2026-08-31T00:30:43'}}
+Part 4 (CDC read path is real, not an echo of bus writes): PASS
+
+=== Step K3: ALL PARTS PASSED ===
+All four parts of K3 passed cleanly on the first real run. Let's clean up the demo artifacts and bus state.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+find infra/files -type f
+rm -rf infra/files/orders infra/files/k3-seed.txt
+find infra/files -type f
+
+OUT
+infra/files/orders/relayed.json
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -5
+sg docker -c "docker compose exec -T mysql mysql -uroot -pdev-only-change-me jetcore -e \"DELETE FROM orders;\"" 2>&1
+ls tests/
+
+OUT
+            Messages: 0
+               Bytes: 0 B
+      First Sequence: 10,712
+       Last Sequence: 10,711 @ 2026-08-31 00:30:56
+    Active Consumers: 502
+mysql: [Warning] Using a password on the command line interface can be insecure.
+conftest.py
+_e2e_helpers.py
+__pycache__
+test_webhook_to_file_storage_end_to_end.py
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+cat tests/test_webhook_to_file_storage_end_to_end.py
+echo "---conftest---"
+cat tests/conftest.py
+echo "---helpers---"
+cat tests/_e2e_helpers.py
+
+OUT
+"""End-to-end test for the Webhook Listener -> File Storage Adapter
+vertical slice (Design.md §12 Step E4) — the automated, repeatable
+counterpart to Step E3's manual smoke test (already run against the real
+`docker compose` stack: real curl, real containers, real bind mount).
+
+Runs both adapters' REAL entrypoint wiring concurrently in-process —
+`webhook_listener.app.create_app` via `TestClient` (Step D5's pattern) and
+`file_storage_adapter.__main__.run` as a background task (Step C7's
+pattern) — rather than orchestrating real Docker containers from pytest;
+E3 already proved the container/Compose layer works, so this proves the
+two adapters' actual application code works *together*, the same
+separation of concerns Steps C7/D5 each already established for one
+adapter alone. Closes the loop the way Step B7 did for the library by
+itself, this time for two real adapters.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import file_storage_adapter.__main__ as file_storage_entrypoint
+from _e2e_helpers import connect
+from fastapi.testclient import TestClient
+from file_storage_adapter.write_handler import CREATE_COMPLETED_SUBJECT
+from jetcore.bus_client import BusClient
+from jetcore.config import AdapterSettings
+from webhook_listener.app import create_app
+from webhook_listener.settings import WebhookListenerSettings
+
+WEBHOOK_SECRET = "e4-end-to-end-secret"
+
+
+async def test_real_webhook_post_ends_up_as_a_real_file_and_completion_event(
+    tmp_path: Path, durable_name: str
+) -> None:
+    fsa_settings = AdapterSettings(
+        service_id="file-storage-01",
+        nats_url="nats://localhost:4222",
+        nats_creds_path="infra/nats/operator/creds/file-storage-01.creds",
+    )
+    fsa_client = await BusClient.connect_as_adapter(
+        fsa_settings, adapter_type="file-storage-adapter"
+    )
+    observer = await connect("test-observer-01")
+    shutdown = asyncio.Event()
+    fsa_task: asyncio.Task[None] | None = None
+    try:
+        completed_durable = await observer.subscribe(
+            CREATE_COMPLETED_SUBJECT, durable_name=durable_name
+        )
+
+        # The real File Storage Adapter, running its real entrypoint loop
+        # (write-path handler + external-creation watch, Steps C4/C5),
+        # exactly as `python -m file_storage_adapter` does.
+        fsa_task = asyncio.create_task(
+            file_storage_entrypoint.run(
+                fsa_client,
+                watch_dir=tmp_path,
+                service_id="file-storage-01",
+                shutdown=shutdown,
+            )
+        )
+        await asyncio.sleep(0.2)  # let subscribe()/awatch actually start
+
+        # The real Webhook Listener, driven through a real HTTP request —
+        # its own lifespan connects a real, independent BusClient (Step
+        # C6/D4's connect_as_adapter), exactly as `python -m
+        # webhook_listener` does.
+        whl_settings = WebhookListenerSettings(
+            service_id="webhook-listener-01",
+            nats_url="nats://localhost:4222",
+            nats_creds_path="infra/nats/operator/creds/webhook-listener-01.creds",
+            webhook_secret=WEBHOOK_SECRET,
+        )
+        app = create_app(whl_settings)
+        body = b"E4 end-to-end proof: real webhook POST -> real file storage adapter"
+        with TestClient(app) as client:
+            response = client.post(
+                "/webhooks/e4/proof.txt",
+                content=body,
+                headers={"X-Webhook-Secret": WEBHOOK_SECRET},
+            )
+            assert response.status_code == 202
+
+        received = await observer.fetch(completed_durable, timeout=5)
+        assert len(received) == 1
+        assert received[0].details.event_type == "FileCreateCompleted"
+        assert received[0].details.source_service_id == "file-storage-01"
+
+        written = tmp_path / "e4" / "proof.txt"
+        assert written.read_bytes() == body
+    finally:
+        shutdown.set()
+        if fsa_task is not None:
+            await asyncio.wait_for(fsa_task, timeout=5)
+        await fsa_client.close()
+        await observer.close()
+---conftest---
+"""Shared fixtures for the cross-adapter end-to-end test (Design.md §12
+Step E4). Mirrors the same _clean_state pattern used throughout
+libs/jetcore/tests and adapters/*/tests — re-implemented locally rather
+than imported, for the self-containment reasons those already explain.
+
+Also deletes the File Storage Adapter entrypoint's FIXED (non-random)
+durable consumer names, same reasoning as
+adapters/file_storage_adapter/tests/conftest.py: a real deployment resumes
+its own cursor across restarts, so this test (which drives that real
+entrypoint) reuses the real names on purpose — which means leftover
+consumers from an earlier run need explicit cleanup, not just a stream
+purge. `run()` (Steps C6/F5) always starts all four command handlers
+together, so all four fixed names need cleaning here even though this
+test only exercises the write path.
+"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import AsyncGenerator
+
+import nats
+import pytest
+from nats.js.errors import NoKeysError, NotFoundError
+
+NATS_URL = "nats://localhost:4222"
+CREDS_DIR = "infra/nats/operator/creds"
+WRITE_REQUESTED_SUBJECT = "events.files.FileWriteRequested"
+CREATE_COMPLETED_SUBJECT = "events.files.FileCreateCompleted"
+WRITE_COMPLETED_SUBJECT = "events.files.FileWriteCompleted"
+READ_REQUESTED_SUBJECT = "events.files.FileReadRequested"
+READ_COMPLETED_SUBJECT = "events.files.FileReadCompleted"
+LIST_REQUESTED_SUBJECT = "events.files.FileListRequested"
+LIST_COMPLETED_SUBJECT = "events.files.FileListCompleted"
+DELETE_REQUESTED_SUBJECT = "events.files.FileDeleteRequested"
+DELETE_COMPLETED_SUBJECT = "events.files.FileDeleteCompleted"
+OPERATION_FAILED_SUBJECT = "events.files.FileOperationFailed"
+FIXED_ENTRYPOINT_DURABLE_NAMES = (
+    "file-storage-01-write-handler",
+    "file-storage-01-read-handler",
+    "file-storage-01-list-handler",
+    "file-storage-01-delete-handler",
+)
+
+
+@pytest.fixture(autouse=True)
+async def _clean_state() -> AsyncGenerator[None]:
+    nc = await nats.connect(NATS_URL, user_credentials=f"{CREDS_DIR}/jetcore-admin.creds")
+    js = nc.jetstream()
+    await js.purge_stream("EVENTS")
+    for name in FIXED_ENTRYPOINT_DURABLE_NAMES:
+        try:
+            await js.delete_consumer("EVENTS", name)
+        except NotFoundError:
+            pass
+    kv = await js.key_value("service-directory")
+    for subject in (
+        WRITE_REQUESTED_SUBJECT,
+        CREATE_COMPLETED_SUBJECT,
+        WRITE_COMPLETED_SUBJECT,
+        READ_REQUESTED_SUBJECT,
+        READ_COMPLETED_SUBJECT,
+        LIST_REQUESTED_SUBJECT,
+        LIST_COMPLETED_SUBJECT,
+        DELETE_REQUESTED_SUBJECT,
+        DELETE_COMPLETED_SUBJECT,
+        OPERATION_FAILED_SUBJECT,
+    ):
+        try:
+            for key in await kv.keys(filters=[f"{subject}."]):
+                await kv.delete(key)
+        except NoKeysError:
+            pass
+    await nc.close()
+    yield
+
+
+@pytest.fixture
+def durable_name() -> str:
+    return f"test-{uuid.uuid4().hex[:8]}"
+---helpers---
+"""Test-only helpers for the cross-adapter end-to-end test (Design.md §12
+Step E4). A local copy of the connect() pattern used throughout this
+project's other test suites — not a cross-package import, for the
+self-containment reasons already explained in
+libs/jetcore/tests/_helpers.py, adapters/file_storage_adapter/tests/
+_file_storage_helpers.py, and adapters/webhook_listener/tests/
+_webhook_listener_helpers.py."""
+
+from __future__ import annotations
+
+from jetcore.bus_client import BusClient
+from jetcore.config import AdapterSettings
+from jetcore.crypto import generate_encryption_keypair, generate_signing_keypair
+
+NATS_URL = "nats://localhost:4222"
+CREDS_DIR = "infra/nats/operator/creds"
+
+
+def settings(service_id: str) -> AdapterSettings:
+    return AdapterSettings(
+        service_id=service_id,
+        nats_url=NATS_URL,
+        nats_creds_path=f"{CREDS_DIR}/{service_id}.creds",
+    )
+
+
+async def connect(service_id: str) -> BusClient:
+    signing = generate_signing_keypair()
+    encryption = generate_encryption_keypair()
+    return await BusClient.connect(
+        settings(service_id),
+        adapter_type="test-adapter",
+        encryption_keypair=encryption,
+        signing_seed=signing.seed,
+        signing_public_key=signing.public_key,
+    )
+Read conftest.py
+Edit conftest.py
+Added 25 lines
+Now the K4 test itself, mirroring E4's pattern exactly.
+
+Write test_rest_api_service_to_db_adapter_end_to_end.py
+89 lines
+"""End-to-end test for the REST API Service <-> Database Adapter
+synchronous round trip (Design.md §13 Step K4) — the genuinely new
+"two real adapters, one waiting on the other's reply" pattern Phase 3
+introduces (Decision #24/#26), the automated counterpart to Step K3's
+manual smoke test (already run against the real `docker compose` stack:
+a real `curl`-equivalent POST, real containers, a real MySQL).
+
+Runs both adapters' REAL entrypoint wiring concurrently in-process —
+`rest_api_service.app.create_app` via `TestClient` (Step I7/D5's pattern)
+and `db_adapter_mysql.__main__.run` as a background task (Step J7/C7's
+pattern) — rather than orchestrating real Docker containers from pytest;
+K3 already proved that layer works, so this proves the two adapters' real
+application code works *together* end to end, the same separation of
+concerns Step E4 already established for the Phase 2 vertical slice.
+File Storage's four commands and Webhook Sender/HTTP Adapter's one-way
+relays are already covered at the adapter level (Tracks F/G/H) and via
+K3's manual proof — this is the one pair that actually needed its own
+dedicated cross-adapter test (Design.md §13 Track K's own sequencing
+note): a real synchronous reply, not just a one-way relay.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+
+import db_adapter_mysql.__main__ as db_adapter_entrypoint
+from db_adapter_mysql.settings import DbAdapterSettings
+from fastapi.testclient import TestClient
+from jetcore.bus_client import BusClient
+from rest_api_service.app import create_app
+from rest_api_service.settings import RestApiServiceSettings
+
+
+async def test_real_post_gets_a_real_sync_reply_from_the_real_database_adapter() -> None:
+    db_settings = DbAdapterSettings(
+        service_id="db-adapter-mysql-01",
+        nats_url="nats://localhost:4222",
+        nats_creds_path="infra/nats/operator/creds/db-adapter-mysql-01.creds",
+        mysql_host="localhost",
+        mysql_write_user="jetcore_write",
+        mysql_write_password="jetcore-write-dev-only",
+        mysql_cdc_user="jetcore_cdc",
+        mysql_cdc_password="jetcore-cdc-dev-only",
+    )
+    db_client = await BusClient.connect_as_adapter(db_settings, adapter_type="database-adapter-mysql")
+    db_shutdown = asyncio.Event()
+    db_task: asyncio.Task[None] | None = None
+    try:
+        # The real Database Adapter, running its real entrypoint loop
+        # (write path + CDC watcher, Step J6), exactly as
+        # `python -m db_adapter_mysql` does.
+        db_task = asyncio.create_task(
+            db_adapter_entrypoint.run(db_client, settings=db_settings, shutdown=db_shutdown)
+        )
+        await asyncio.sleep(0.3)  # let subscribe()/the CDC watcher's thread actually start
+
+        # The real REST API Service, driven through a real HTTP request —
+        # its own lifespan connects a real, independent BusClient (Step
+        # I5/I6's connect_as_adapter), exactly as
+        # `python -m rest_api_service` does.
+        rest_settings = RestApiServiceSettings(
+            service_id="rest-api-service-01",
+            nats_url="nats://localhost:4222",
+            nats_creds_path="infra/nats/operator/creds/rest-api-service-01.creds",
+            default_reply_timeout_seconds=10.0,
+        )
+        app = create_app(rest_settings)
+        body = json.dumps(
+            {"orderId": "k4-end-to-end-proof", "item": "cross-adapter-widget", "quantity": 7}
+        ).encode()
+        with TestClient(app) as client:
+            response = await asyncio.to_thread(
+                client.post, "/api/orders?wait=8", content=body
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["orderId"] == "k4-end-to-end-proof"
+        assert data["status"] == "persisted"
+
+        db_shutdown.set()
+        await asyncio.wait_for(db_task, timeout=5)
+        db_task = None
+    finally:
+        if db_task is not None:
+            db_task.cancel()
+        await db_client.close()
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+timeout 60 uv run pytest tests/test_rest_api_service_to_db_adapter_end_to_end.py -q 2>&1 | tail -100
+
+OUT
+.                                                                        [100%]
+=============================== warnings summary ===============================
+tests/test_rest_api_service_to_db_adapter_end_to_end.py::test_real_post_gets_a_real_sync_reply_from_the_real_database_adapter
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/binlogstream.py:604: DeprecationWarning: 'passwd' is deprecated, use 'password'
+    self.__connect_to_stream()
+
+tests/test_rest_api_service_to_db_adapter_end_to_end.py::test_real_post_gets_a_real_sync_reply_from_the_real_database_adapter
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/binlogstream.py:607: DeprecationWarning: 'db' is deprecated, use 'database'
+    self.__connect_to_ctl()
+
+tests/test_rest_api_service_to_db_adapter_end_to_end.py::test_real_post_gets_a_real_sync_reply_from_the_real_database_adapter
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/binlogstream.py:607: DeprecationWarning: 'passwd' is deprecated, use 'password'
+    self.__connect_to_ctl()
+
+tests/test_rest_api_service_to_db_adapter_end_to_end.py::test_real_post_gets_a_real_sync_reply_from_the_real_database_adapter
+tests/test_rest_api_service_to_db_adapter_end_to_end.py::test_real_post_gets_a_real_sync_reply_from_the_real_database_adapter
+tests/test_rest_api_service_to_db_adapter_end_to_end.py::test_real_post_gets_a_real_sync_reply_from_the_real_database_adapter
+tests/test_rest_api_service_to_db_adapter_end_to_end.py::test_real_post_gets_a_real_sync_reply_from_the_real_database_adapter
+tests/test_rest_api_service_to_db_adapter_end_to_end.py::test_real_post_gets_a_real_sync_reply_from_the_real_database_adapter
+tests/test_rest_api_service_to_db_adapter_end_to_end.py::test_real_post_gets_a_real_sync_reply_from_the_real_database_adapter
+tests/test_rest_api_service_to_db_adapter_end_to_end.py::test_real_post_gets_a_real_sync_reply_from_the_real_database_adapter
+tests/test_rest_api_service_to_db_adapter_end_to_end.py::test_real_post_gets_a_real_sync_reply_from_the_real_database_adapter
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/row_event.py:328: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    datetime.datetime.utcfromtimestamp(self.packet.read_int_be_by_size(4)),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 11 warnings in 2.74s
+Now let's confirm E4's test still passes alongside the extended conftest, then run the full toolchain.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+timeout 60 uv run pytest tests/ -q 2>&1 | tail -15
+
+OUT
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/binlogstream.py:607: DeprecationWarning: 'db' is deprecated, use 'database'
+    self.__connect_to_ctl()
+
+tests/test_rest_api_service_to_db_adapter_end_to_end.py: 16 warnings
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/binlogstream.py:607: DeprecationWarning: 'passwd' is deprecated, use 'password'
+    self.__connect_to_ctl()
+
+tests/test_rest_api_service_to_db_adapter_end_to_end.py: 182 warnings
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/row_event.py:328: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    datetime.datetime.utcfromtimestamp(self.packet.read_int_be_by_size(4)),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_rest_api_service_to_db_adapter_end_to_end.py::test_real_post_gets_a_real_sync_reply_from_the_real_database_adapter
+1 failed, 1 passed, 230 warnings in 11.23s
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+timeout 60 uv run pytest tests/ -q 2>&1 | grep -A 40 "FAILED\|Error\|assert" | head -80
+
+OUT
+(Bash completed with no output)
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+timeout 60 uv run pytest tests/ -q 2>&1 | tail -150 | head -100
+
+OUT
+.F                                                                       [100%]
+=================================== FAILURES ===================================
+______ test_real_webhook_post_ends_up_as_a_real_file_and_completion_event ______
+
+tmp_path = PosixPath('/tmp/pytest-of-bherring/pytest-178/test_real_webhook_post_ends_up0')
+durable_name = 'test-45c2a124'
+
+    async def test_real_webhook_post_ends_up_as_a_real_file_and_completion_event(
+        tmp_path: Path, durable_name: str
+    ) -> None:
+        fsa_settings = AdapterSettings(
+            service_id="file-storage-01",
+            nats_url="nats://localhost:4222",
+            nats_creds_path="infra/nats/operator/creds/file-storage-01.creds",
+        )
+        fsa_client = await BusClient.connect_as_adapter(
+            fsa_settings, adapter_type="file-storage-adapter"
+        )
+        observer = await connect("test-observer-01")
+        shutdown = asyncio.Event()
+        fsa_task: asyncio.Task[None] | None = None
+        try:
+            completed_durable = await observer.subscribe(
+                CREATE_COMPLETED_SUBJECT, durable_name=durable_name
+            )
+    
+            # The real File Storage Adapter, running its real entrypoint loop
+            # (write-path handler + external-creation watch, Steps C4/C5),
+            # exactly as `python -m file_storage_adapter` does.
+            fsa_task = asyncio.create_task(
+                file_storage_entrypoint.run(
+                    fsa_client,
+                    watch_dir=tmp_path,
+                    service_id="file-storage-01",
+                    shutdown=shutdown,
+                )
+            )
+            await asyncio.sleep(0.2)  # let subscribe()/awatch actually start
+    
+            # The real Webhook Listener, driven through a real HTTP request —
+            # its own lifespan connects a real, independent BusClient (Step
+            # C6/D4's connect_as_adapter), exactly as `python -m
+            # webhook_listener` does.
+            whl_settings = WebhookListenerSettings(
+                service_id="webhook-listener-01",
+                nats_url="nats://localhost:4222",
+                nats_creds_path="infra/nats/operator/creds/webhook-listener-01.creds",
+                webhook_secret=WEBHOOK_SECRET,
+            )
+            app = create_app(whl_settings)
+            body = b"E4 end-to-end proof: real webhook POST -> real file storage adapter"
+            with TestClient(app) as client:
+                response = client.post(
+                    "/webhooks/e4/proof.txt",
+                    content=body,
+                    headers={"X-Webhook-Secret": WEBHOOK_SECRET},
+                )
+                assert response.status_code == 202
+    
+            received = await observer.fetch(completed_durable, timeout=5)
+>           assert len(received) == 1
+E           assert 0 == 1
+E            +  where 0 = len([])
+
+tests/test_webhook_to_file_storage_end_to_end.py:87: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+------------------------------ Captured log call -------------------------------
+ERROR    jetcore.bus_client:bus_client.py:305 failed to process message on events.files.FileWriteRequested, leaving unacked for redelivery
+Traceback (most recent call last):
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 303, in fetch
+    received.append(await self._process(msg))
+                    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/bus_client.py", line 316, in _process
+    plaintext = decrypt(ciphertext, self._encryption_keypair.private_key)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/libs/jetcore/jetcore/crypto.py", line 87, in decrypt
+    return bytes(pyrage.decrypt(ciphertext, [identity]))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pyrage.DecryptError: No matching keys found
+=============================== warnings summary ===============================
+tests/test_rest_api_service_to_db_adapter_end_to_end.py::test_real_post_gets_a_real_sync_reply_from_the_real_database_adapter
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/binlogstream.py:604: DeprecationWarning: 'passwd' is deprecated, use 'password'
+    self.__connect_to_stream()
+
+tests/test_rest_api_service_to_db_adapter_end_to_end.py::test_real_post_gets_a_real_sync_reply_from_the_real_database_adapter
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/binlogstream.py:607: DeprecationWarning: 'db' is deprecated, use 'database'
+    self.__connect_to_ctl()
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+for i in 1 2 3; do echo "=== run $i ==="; timeout 60 uv run pytest tests/ -q 2>&1 | tail -5; done
+
+OUT
+=== run 1 ===
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_webhook_to_file_storage_end_to_end.py::test_real_webhook_post_ends_up_as_a_real_file_and_completion_event
+1 failed, 1 passed, 23 warnings in 9.07s
+=== run 2 ===
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/row_event.py:328: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    datetime.datetime.utcfromtimestamp(self.packet.read_int_be_by_size(4)),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2 passed, 27 warnings in 5.10s
+=== run 3 ===
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_rest_api_service_to_db_adapter_end_to_end.py::test_real_post_gets_a_real_sync_reply_from_the_real_database_adapter
+1 failed, 1 passed, 470 warnings in 11.38s
+Confirmed reproducible — 2 of 3 runs, alternating between E4 and K4. Let's isolate it the same way as before.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sg docker -c "docker compose stop file-storage-adapter webhook-listener db-adapter-mysql rest-api-service" 2>&1 | tail -10
+
+OUT
+ Container jetcore-db-adapter-mysql-1 Stopping 
+ Container jetcore-webhook-listener-1 Stopping 
+ Container jetcore-rest-api-service-1 Stopping 
+ Container jetcore-file-storage-adapter-1 Stopping 
+ Container jetcore-webhook-listener-1 Stopped 
+ Container jetcore-rest-api-service-1 Stopped 
+ Container jetcore-db-adapter-mysql-1 Stopped 
+ Container jetcore-file-storage-adapter-1 Stopped
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+for i in 1 2 3 4 5; do echo "=== run $i (containers stopped) ==="; timeout 60 uv run pytest tests/ -q 2>&1 | tail -5; done
+
+OUT
+=== run 1 (containers stopped) ===
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/row_event.py:328: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    datetime.datetime.utcfromtimestamp(self.packet.read_int_be_by_size(4)),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2 passed, 31 warnings in 5.03s
+=== run 2 (containers stopped) ===
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/row_event.py:328: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    datetime.datetime.utcfromtimestamp(self.packet.read_int_be_by_size(4)),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2 passed, 35 warnings in 5.04s
+=== run 3 (containers stopped) ===
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/row_event.py:328: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    datetime.datetime.utcfromtimestamp(self.packet.read_int_be_by_size(4)),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2 passed, 39 warnings in 5.05s
+=== run 4 (containers stopped) ===
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/row_event.py:328: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    datetime.datetime.utcfromtimestamp(self.packet.read_int_be_by_size(4)),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2 passed, 43 warnings in 5.07s
+=== run 5 (containers stopped) ===
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/row_event.py:328: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    datetime.datetime.utcfromtimestamp(self.packet.read_int_be_by_size(4)),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2 passed, 47 warnings in 5.06s
+5-for-5 clean with containers stopped, confirming the extended finding decisively. Let's restart the stack and write this up properly.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sg docker -c "docker compose up -d file-storage-adapter webhook-listener db-adapter-mysql rest-api-service" 2>&1 | tail -10
+sleep 3
+sg docker -c "docker compose ps" 2>&1
+
+OUT
+ Container jetcore-mysql-1 Running 
+ Container jetcore-nats-1 Running 
+ Container jetcore-db-adapter-mysql-1 Starting 
+ Container jetcore-file-storage-adapter-1 Starting 
+ Container jetcore-webhook-listener-1 Starting 
+ Container jetcore-rest-api-service-1 Starting 
+ Container jetcore-db-adapter-mysql-1 Started 
+ Container jetcore-webhook-listener-1 Started 
+ Container jetcore-rest-api-service-1 Started 
+ Container jetcore-file-storage-adapter-1 Started 
+NAME                             IMAGE                          COMMAND                  SERVICE                CREATED         STATUS         PORTS
+jetcore-db-adapter-mysql-1       jetcore-db-adapter-mysql       "python -m db_adapte…"   db-adapter-mysql       6 minutes ago   Up 3 seconds   
+jetcore-file-storage-adapter-1   jetcore-file-storage-adapter   "python -m file_stor…"   file-storage-adapter   3 hours ago     Up 3 seconds   
+jetcore-http-adapter-1           jetcore-http-adapter           "python -m http_adap…"   http-adapter           6 minutes ago   Up 6 minutes   
+jetcore-mysql-1                  mysql:8.4.11                   "docker-entrypoint.s…"   mysql                  3 hours ago     Up 3 hours     0.0.0.0:3306->3306/tcp, [::]:3306->3306/tcp, 33060/tcp
+jetcore-nats-1                   nats:2.14.5                    "/nats-server -c /et…"   nats                   3 hours ago     Up 3 hours     0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+jetcore-rest-api-service-1       jetcore-rest-api-service       "python -m rest_api_…"   rest-api-service       6 minutes ago   Up 3 seconds   0.0.0.0:8081->8080/tcp, [::]:8081->8080/tcp
+jetcore-webhook-listener-1       jetcore-webhook-listener       "python -m webhook_l…"   webhook-listener       3 hours ago     Up 3 seconds   0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp
+jetcore-webhook-sender-1         jetcore-webhook-sender         "python -m webhook_s…"   webhook-sender         6 minutes ago   Up 6 minutes
+All 8 services healthy. Now let's purge state and finish the rest of the toolchain checks.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -5
+sg docker -c "docker compose exec -T mysql mysql -uroot -pdev-only-change-me jetcore -e \"DELETE FROM orders;\"" 2>&1
+
+OUT
+            Messages: 0
+               Bytes: 0 B
+      First Sequence: 14,479
+       Last Sequence: 14,478 @ 2026-08-31 00:35:21
+    Active Consumers: 513
+mysql: [Warning] Using a password on the command line interface can be insecure.
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+echo "== ruff =="
+uv run ruff check . 2>&1 | tail -30
+
+OUT
+== ruff ==
+E501 Line too long (102 > 100)
+  --> tests/test_rest_api_service_to_db_adapter_end_to_end.py:46:101
+   |
+44 |         mysql_cdc_password="jetcore-cdc-dev-only",
+45 |     )
+46 |     db_client = await BusClient.connect_as_adapter(db_settings, adapter_type="database-adapter-mysql")
+   |                                                                                                     ^^
+47 |     db_shutdown = asyncio.Event()
+48 |     db_task: asyncio.Task[None] | None = None
+   |
+
+Found 1 error.
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run ruff check . --fix 2>&1 | tail -20
+uv run ruff format . 2>&1 | tail -10
+uv run ruff check . 2>&1 | tail -10
+
+OUT
+E501 Line too long (102 > 100)
+  --> tests/test_rest_api_service_to_db_adapter_end_to_end.py:46:101
+   |
+44 |         mysql_cdc_password="jetcore-cdc-dev-only",
+45 |     )
+46 |     db_client = await BusClient.connect_as_adapter(db_settings, adapter_type="database-adapter-mysql")
+   |                                                                                                     ^^
+47 |     db_shutdown = asyncio.Event()
+48 |     db_task: asyncio.Task[None] | None = None
+   |
+
+Found 1 error.
+4 files reformatted, 110 files left unchanged
+All checks passed!
+[This command modified 2 files you've previously read: adapters/http_adapter/http_adapter/__main__.py, tests/test_rest_api_service_to_db_adapter_end_to_end.py. Call Read before editing.]
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+git diff adapters/http_adapter/http_adapter/__main__.py
+
+OUT
+diff --git a/adapters/http_adapter/http_adapter/__main__.py b/adapters/http_adapter/http_adapter/__main__.py
+index 96adf62..a6a19ae 100644
+--- a/adapters/http_adapter/http_adapter/__main__.py
++++ b/adapters/http_adapter/http_adapter/__main__.py
+@@ -95,9 +95,7 @@ async def main() -> None:
+     for sig in (signal.SIGTERM, signal.SIGINT):
+         loop.add_signal_handler(sig, _request_shutdown, sig)
+ 
+-    auth_token = (
+-        settings.auth_token.get_secret_value() if settings.auth_token is not None else None
+-    )
++    auth_token = settings.auth_token.get_secret_value() if settings.auth_token is not None else None
+ 
+     async with httpx.AsyncClient() as http_client:
+         try:
+Harmless — just a line-wrap preference, no functional change. Let's re-run the full toolchain.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run ruff check . 2>&1 | tail -10
+echo "== mypy =="
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -40
+
+OUT
+All checks passed!
+== mypy ==
+Success: no issues found in 100 source files
+Clean. Let's rerun the K4/E4 tests once more to confirm they pass with the current (running) stack.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+timeout 60 uv run pytest tests/ -q 2>&1 | tail -10
+
+OUT
+    self.__connect_to_ctl()
+
+tests/test_rest_api_service_to_db_adapter_end_to_end.py: 48 warnings
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/row_event.py:328: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    datetime.datetime.utcfromtimestamp(self.packet.read_int_be_by_size(4)),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_webhook_to_file_storage_end_to_end.py::test_real_webhook_post_ends_up_as_a_real_file_and_completion_event
+1 failed, 1 passed, 51 warnings in 8.90s
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -5
+sg docker -c "docker compose exec -T mysql mysql -uroot -pdev-only-change-me jetcore -e \"DELETE FROM orders;\"" 2>&1
+timeout 90 uv run pytest -q 2>&1 | tail -10
+
+OUT
+            Messages: 0
+               Bytes: 0 B
+      First Sequence: 16,117
+       Last Sequence: 16,116 @ 2026-08-31 00:36:01
+    Active Consumers: 513
+mysql: [Warning] Using a password on the command line interface can be insecure.
+    datetime.datetime.utcfromtimestamp(self.packet.read_int_be_by_size(4)),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED adapters/db_adapter_mysql/tests/test_db_adapter_mysql_entrypoint.py::test_real_entrypoint_processes_write_and_cdc_together_and_shuts_down_cleanly
+FAILED adapters/file_storage_adapter/tests/test_entrypoint.py::test_real_entrypoint_processes_a_command_and_shuts_down_cleanly
+FAILED adapters/file_storage_adapter/tests/test_write_handler.py::test_new_file_creates_and_publishes_file_create_completed
+FAILED adapters/http_adapter/tests/test_http_adapter_entrypoint.py::test_real_entrypoint_calls_and_shuts_down_cleanly
+FAILED adapters/webhook_sender/tests/test_webhook_sender_entrypoint.py::test_real_entrypoint_relays_and_shuts_down_cleanly
+5 failed, 225 passed, 1231 warnings in 67.80s (0:01:07)
+This matches the K2 forward-looking prediction exactly — now confirmed across five different adapters simultaneously. Let's do one final isolation check with everything stopped, then restore and document properly.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sg docker -c "docker compose stop file-storage-adapter webhook-listener db-adapter-mysql rest-api-service webhook-sender http-adapter" 2>&1 | tail -10
+
+OUT
+ Container jetcore-http-adapter-1 Stopping 
+ Container jetcore-file-storage-adapter-1 Stopping 
+ Container jetcore-db-adapter-mysql-1 Stopping 
+ Container jetcore-webhook-listener-1 Stopping 
+ Container jetcore-webhook-listener-1 Stopped 
+ Container jetcore-rest-api-service-1 Stopped 
+ Container jetcore-http-adapter-1 Stopped 
+ Container jetcore-webhook-sender-1 Stopped 
+ Container jetcore-db-adapter-mysql-1 Stopped 
+ Container jetcore-file-storage-adapter-1 Stopped
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -5
+sg docker -c "docker compose exec -T mysql mysql -uroot -pdev-only-change-me jetcore -e \"DELETE FROM orders;\"" 2>&1
+timeout 90 uv run pytest -q 2>&1 | tail -10
+
+OUT
+            Messages: 0
+               Bytes: 0 B
+      First Sequence: 22,292
+       Last Sequence: 22,291 @ 2026-08-31 00:37:29
+    Active Consumers: 577
+mysql: [Warning] Using a password on the command line interface can be insecure.
+    self.__connect_to_ctl()
+
+adapters/db_adapter_mysql/tests/test_cdc_watcher.py: 736 warnings
+adapters/db_adapter_mysql/tests/test_db_adapter_mysql_entrypoint.py: 102 warnings
+tests/test_rest_api_service_to_db_adapter_end_to_end.py: 116 warnings
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/row_event.py:328: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    datetime.datetime.utcfromtimestamp(self.packet.read_int_be_by_size(4)),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+230 passed, 984 warnings in 56.07s
+100% clean with the containers stopped — decisive final confirmation. Let's restart the full stack and finalize.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sg docker -c "docker compose up -d" 2>&1 | tail -15
+sleep 3
+sg docker -c "docker compose ps" 2>&1
+
+OUT
+ Container jetcore-mysql-1 Running 
+ Container jetcore-nats-1 Running 
+ Container jetcore-file-storage-adapter-1 Starting 
+ Container jetcore-http-adapter-1 Starting 
+ Container jetcore-db-adapter-mysql-1 Starting 
+ Container jetcore-rest-api-service-1 Starting 
+ Container jetcore-webhook-listener-1 Starting 
+ Container jetcore-webhook-sender-1 Starting 
+ Container jetcore-webhook-sender-1 Started 
+ Container jetcore-webhook-listener-1 Started 
+ Container jetcore-http-adapter-1 Started 
+ Container jetcore-rest-api-service-1 Started 
+ Container jetcore-db-adapter-mysql-1 Started 
+ Container jetcore-file-storage-adapter-1 Started 
+NAME                             IMAGE                          COMMAND                  SERVICE                CREATED          STATUS         PORTS
+jetcore-db-adapter-mysql-1       jetcore-db-adapter-mysql       "python -m db_adapte…"   db-adapter-mysql       10 minutes ago   Up 3 seconds   
+jetcore-file-storage-adapter-1   jetcore-file-storage-adapter   "python -m file_stor…"   file-storage-adapter   3 hours ago      Up 3 seconds   
+jetcore-http-adapter-1           jetcore-http-adapter           "python -m http_adap…"   http-adapter           10 minutes ago   Up 3 seconds   
+jetcore-mysql-1                  mysql:8.4.11                   "docker-entrypoint.s…"   mysql                  3 hours ago      Up 3 hours     0.0.0.0:3306->3306/tcp, [::]:3306->3306/tcp, 33060/tcp
+jetcore-nats-1                   nats:2.14.5                    "/nats-server -c /et…"   nats                   3 hours ago      Up 3 hours     0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+jetcore-rest-api-service-1       jetcore-rest-api-service       "python -m rest_api_…"   rest-api-service       10 minutes ago   Up 3 seconds   0.0.0.0:8081->8080/tcp, [::]:8081->8080/tcp
+jetcore-webhook-listener-1       jetcore-webhook-listener       "python -m webhook_l…"   webhook-listener       3 hours ago      Up 3 seconds   0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp
+jetcore-webhook-sender-1         jetcore-webhook-sender         "python -m webhook_s…"   webhook-sender         10 minutes ago   Up 3 seconds
+All 8 services healthy. Let's purge state, run bandit/pip-audit, and finalize documentation.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -5
+sg docker -c "docker compose exec -T mysql mysql -uroot -pdev-only-change-me jetcore -e \"DELETE FROM orders;\"" 2>&1
+echo "== bandit (add rest of adapters, tests dir not scanned - source only) =="
+uv run bandit -r libs/jetcore/jetcore adapters/webhook_listener/webhook_listener adapters/file_storage_adapter/file_storage_adapter adapters/webhook_sender/webhook_sender adapters/http_adapter/http_adapter adapters/rest_api_service/rest_api_service adapters/db_adapter_mysql/db_adapter_mysql -q 2>&1 | tail -30
+echo "== pip-audit =="
+uv run pip-audit 2>&1 | tail -20
+
+OUT
+               Bytes: 1.2 KiB
+      First Sequence: 23,791 @ 2026-08-31 00:38:51
+       Last Sequence: 23,791 @ 2026-08-31 00:38:51
+    Active Consumers: 642
+  Number of Subjects: 1
+mysql: [Warning] Using a password on the command line interface can be insecure.
+== bandit (add rest of adapters, tests dir not scanned - source only) ==
+== pip-audit ==
+No known vulnerabilities found
+Name                     Skip Reason
+------------------------ ---------------------------------------------------------------------------------------
+file-storage-adapter     Dependency not found on PyPI and could not be audited: file-storage-adapter (0.1.0)
+jetcore                  Dependency not found on PyPI and could not be audited: jetcore (0.1.0)
+jetcore-db-adapter-mysql Dependency not found on PyPI and could not be audited: jetcore-db-adapter-mysql (0.1.0)
+jetcore-http-adapter     Dependency not found on PyPI and could not be audited: jetcore-http-adapter (0.1.0)
+jetcore-rest-api-service Dependency not found on PyPI and could not be audited: jetcore-rest-api-service (0.1.0)
+jetcore-webhook-listener Dependency not found on PyPI and could not be audited: jetcore-webhook-listener (0.1.0)
+jetcore-webhook-sender   Dependency not found on PyPI and could not be audited: jetcore-webhook-sender (0.1.0)
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -6
+
+OUT
+  Required API Level: 0 hosted at level 4
+            Messages: 0
+               Bytes: 0 B
+      First Sequence: 25,122
+       Last Sequence: 25,121 @ 2026-08-31 00:39:05
+    Active Consumers: 642
+Clean. Now let's update Design.md's Track K checklist with everything found this track.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "### Track K" Design.md
+
+OUT
+712:### Track K — Integration
+Read Design.md (lines 713-737)
+Edit Design.md
+Added 6 lines
+Now let's update §9 item #5 with this major confirmation.
+
+Read Design.md (lines 400-401)
+Edit Design.md
+Modified
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sg docker -c "docker compose config -q" 2>&1 && echo "compose config valid"
+
+OUT
+compose config valid
+Let's do one last full-suite run for an honest closing data point, then deliver the summary.
+
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+timeout 90 uv run pytest -q 2>&1 | tail -10
+
+OUT
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/row_event.py:328: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    datetime.datetime.utcfromtimestamp(self.packet.read_int_be_by_size(4)),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED adapters/db_adapter_mysql/tests/test_db_adapter_mysql_entrypoint.py::test_real_entrypoint_processes_write_and_cdc_together_and_shuts_down_cleanly
+FAILED adapters/file_storage_adapter/tests/test_create_watch.py::test_external_file_creation_is_detected_and_published
+FAILED adapters/http_adapter/tests/test_http_adapter_entrypoint.py::test_real_entrypoint_calls_and_shuts_down_cleanly
+FAILED adapters/webhook_sender/tests/test_webhook_sender_entrypoint.py::test_real_entrypoint_relays_and_shuts_down_cleanly
+4 failed, 226 passed, 2316 warnings in 65.57s (0:01:05)
+Bash
+IN
+export PATH="$HOME/.local/bin:$PATH"
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS="$(pwd)/infra/nats/operator/creds"
+NB="docker run --rm --network jetcore_default -v $CREDS:/creds natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds"
+sg docker -c "$NB stream purge EVENTS -f" 2>&1 | tail -5
+sg docker -c "docker compose exec -T mysql mysql -uroot -pdev-only-change-me jetcore -e \"DELETE FROM orders;\"" 2>&1
+sg docker -c "docker compose ps" 2>&1
+
+OUT
+            Messages: 0
+               Bytes: 0 B
+      First Sequence: 40,103
+       Last Sequence: 40,102 @ 2026-08-31 00:41:24
+    Active Consumers: 705
+mysql: [Warning] Using a password on the command line interface can be insecure.
+NAME                             IMAGE                          COMMAND                  SERVICE                CREATED          STATUS          PORTS
+jetcore-db-adapter-mysql-1       jetcore-db-adapter-mysql       "python -m db_adapte…"   db-adapter-mysql       12 minutes ago   Up 7 seconds    
+jetcore-file-storage-adapter-1   jetcore-file-storage-adapter   "python -m file_stor…"   file-storage-adapter   3 hours ago      Up 12 seconds   
+jetcore-http-adapter-1           jetcore-http-adapter           "python -m http_adap…"   http-adapter           12 minutes ago   Up 2 minutes    
+jetcore-mysql-1                  mysql:8.4.11                   "docker-entrypoint.s…"   mysql                  3 hours ago      Up 3 hours      0.0.0.0:3306->3306/tcp, [::]:3306->3306/tcp, 33060/tcp
+jetcore-nats-1                   nats:2.14.5                    "/nats-server -c /et…"   nats                   3 hours ago      Up 3 hours      0.0.0.0:4222->4222/tcp, [::]:4222->4222/tcp, 0.0.0.0:8222->8222/tcp, [::]:8222->8222/tcp, 6222/tcp
+jetcore-rest-api-service-1       jetcore-rest-api-service       "python -m rest_api_…"   rest-api-service       12 minutes ago   Up 2 minutes    0.0.0.0:8081->8080/tcp, [::]:8081->8080/tcp
+jetcore-webhook-listener-1       jetcore-webhook-listener       "python -m webhook_l…"   webhook-listener       3 hours ago      Up 2 minutes    0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp
+jetcore-webhook-sender-1         jetcore-webhook-sender         "python -m webhook_s…"   webhook-sender         12 minutes ago   Up 2 minutes
+All 8 services running, state clean. Track K is complete.
+
+Track K — Integration: complete. Phase 3 is complete.
+All 4 steps built and verified against the real, fully-wired stack:
+
+K1: four more Dockerfiles (webhook_sender, http_adapter, rest_api_service, db_adapter_mysql). Real correction to Step E2's own documented reasoning: with the workspace now at 8 members, uv sync --frozen --package X only needs X's own dependency subgraph present, not every sibling's pyproject.toml — confirmed by testing, so the four new Dockerfiles use a simpler, minimal copy set than the two originals.
+K2: all 6 adapters + mysql wired into docker-compose.yml, real .creds mounted, deliberately in-network (never unreachable, never a no-op) demo targets — Webhook Sender relays into the Webhook Listener for real, HTTP Adapter POSTs to /healthz for a real 405. All 8 services built and started healthy together.
+K3: one manual smoke-test script against the live stack — File Storage list/read/delete, one real POST fanning out to three independent consumers at once (Webhook Sender, HTTP Adapter, Database Adapter's sync-reply), and a direct SQL write proving CDC is real. All four parts passed on the first run.
+K4: tests/test_rest_api_service_to_db_adapter_end_to_end.py — the REST API Service ↔ Database Adapter sync-reply pair, mirroring Step E4's in-process-real-entrypoints pattern. Passes standing alone.
+Exit criteria met — K3 and K4 each demonstrated a real, passing run against the complete stack.
+
+The one significant thing to flag: K2 triggered exactly the consequence I flagged in advance last session. With all 6 adapters now long-running containers, the §9 item #5 identity-collision issue (documented from Track J) went from affecting 1-2 adapters' test suites to 5 simultaneous failures across 4 adapters in a single full-suite run — confirmed via the same stop/rerun isolation (230/230 clean with containers stopped). Two refinements this track added to that finding: it now also reaches Step E4's long-standing cross-adapter test and the new K4 test, and it manifests through both identity directories (not just the no-TTL signing-key one — the TTL'd encryption-key directory races the same way via normal heartbeat timing). Design.md §9 item #5 is updated with the full mechanism and scale; not fixed at the root, same as before, but the case for prioritizing a real fix is now considerably stronger given how much more of the suite it touches.
+
+Design.md's Track K checklist, §9, Dependencies.md are all current. This closes out the whole Phase 3 breakdown — every adapter type in §8 is now built, tested, containerized, and proven working together. Let me know what's next.
+
+------------------ Track K Completed ------------------

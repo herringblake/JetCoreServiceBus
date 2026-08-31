@@ -95,9 +95,7 @@ async def main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _request_shutdown, sig)
 
-    auth_token = (
-        settings.auth_token.get_secret_value() if settings.auth_token is not None else None
-    )
+    auth_token = settings.auth_token.get_secret_value() if settings.auth_token is not None else None
 
     async with httpx.AsyncClient() as http_client:
         try:

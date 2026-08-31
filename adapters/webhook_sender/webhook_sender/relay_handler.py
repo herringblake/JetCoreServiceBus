@@ -65,8 +65,7 @@ class RelayHandler:
             # downstream outage this represents was an accepted risk from
             # the moment that decision was made (Design.md §8).
             logger.exception(
-                "best-effort relay of event %s on %s to %s failed — not retrying "
-                "(Decision #12)",
+                "best-effort relay of event %s on %s to %s failed — not retrying (Decision #12)",
                 event.details.event_id,
                 self._subject,
                 self._target_url,

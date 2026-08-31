@@ -68,9 +68,7 @@ class DeleteCommandHandler:
         if not target.is_file():
             await self._client.publish(
                 OPERATION_FAILED_SUBJECT,
-                encode_operation_failed(
-                    path=request.path, operation="delete", reason="not_found"
-                ),
+                encode_operation_failed(path=request.path, operation="delete", reason="not_found"),
                 event_type="FileOperationFailed",
                 correlation_id=event.details.event_id,
             )
