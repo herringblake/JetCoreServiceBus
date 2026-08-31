@@ -1,0 +1,96 @@
+# Design.md §14 Step L2 (Decision #29). Three independent jobs, not one
+# monolithic one — lint/security fail fast with no infra needed; `test`
+# is the one job that needs real NATS+MySQL and dominates CI runtime.
+#
+# `test` starts ONLY nats/mysql (`infra/nats/up.sh` + `docker compose up
+# -d mysql`) — never the six adapter application containers. That's not
+# an oversight: bringing the adapter fleet up before pytest is exactly
+# what Defects.md Defect 3 found causes real, reproducible test failures
+# (a real adapter reacting to a test's own trigger on a shared subject).
+# CI never starts that fleet in the first place, so `test.sh`'s own
+# stop/restart dance (built for local dev, where the fleet is often
+# already running) isn't needed here — a bare `uv run --all-packages
+# pytest` is the correct, sufficient invocation for this job.
+
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+jobs:
+  lint-and-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      # --locked: fail if uv.lock is out of date rather than silently
+      # re-resolving — CI should catch a forgotten `uv lock` the same
+      # way it catches a forgotten `ruff format`, not paper over it.
+      - run: uv sync --all-packages --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run --all-packages mypy libs adapters tests
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --all-packages --locked
+      # Every adapter's own source dir — kept in sync with README.md's
+      # own bandit command (Design.md §14 Step L2's own note: this list
+      # drifted stale once before, missing four adapters, found and
+      # fixed while planning this same track).
+      - run: >
+          uv run bandit -r
+          libs/jetcore/jetcore
+          adapters/webhook_listener/webhook_listener
+          adapters/file_storage_adapter/file_storage_adapter
+          adapters/webhook_sender/webhook_sender
+          adapters/http_adapter/http_adapter
+          adapters/rest_api_service/rest_api_service
+          adapters/db_adapter_mysql/db_adapter_mysql
+      - run: uv run pip-audit
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --all-packages --locked
+
+      - name: Start nats (infra/nats/up.sh — auth bootstrap + JetStream objects)
+        run: bash infra/nats/up.sh
+
+      - name: Start mysql
+        run: docker compose up -d mysql
+
+      - name: Wait for mysql to accept connections and finish init.sql
+        run: |
+          for i in $(seq 1 60); do
+            if docker compose exec -T mysql \
+              mysql -uroot -pdev-only-change-me jetcore \
+              -e "SELECT 1 FROM orders LIMIT 1" >/dev/null 2>&1; then
+              echo "mysql ready (orders table exists — init.sql has run)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "mysql did not become ready within 120s" >&2
+          docker compose logs mysql
+          exit 1
+
+      - run: uv run --all-packages pytest
+
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose logs
