@@ -28754,3 +28754,58 @@ Also updated §10's own summary line (Phase 4 is narrower than originally sketch
 Nothing's been built yet — this is the scoping pass. Say the word when you want me to start on Track L.
 
 ============== Phase 4 Planning Complete ==============
+
+github repo has been created. all code in development will go to brach 'develop', production code will be in 'main'.
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+git remote -v
+git branch -a
+git status
+
+OUT
+origin	https://github.com/herringblake/JetCoreServiceBus.git (fetch)
+origin	https://github.com/herringblake/JetCoreServiceBus.git (push)
+* develop
+  main
+  remotes/origin/develop
+  remotes/origin/main
+On branch develop
+Your branch is up to date with 'origin/develop'.
+
+nothing to commit, working tree clean
+Good — checked git state directly: the remote is already configured (origin → github.com/herringblake/JetCoreServiceBus), both develop and main exist locally and on the remote, and the working tree is clean and up to date. That resolves L1's actual blocker. Let me update the Phase 4 plan to reflect this and the two-branch model, since it directly shapes CI triggers and branch protection.
+
+Read Design.md (lines 749-770)
+Edit Design.md
+Modified
+Edit Design.md
+Modified
+Now let's update L7 to reflect the concrete branch-protection target now that main/develop exist.
+
+Edit Design.md
+Modified
+Let me save this as a project memory, since it's exactly the kind of constraint that isn't derivable from the code and matters for how I should handle git work going forward.
+
+Write github-repo-and-branching.md
+13 lines
+---
+name: github-repo-and-branching
+description: JetCoreServiceBus's GitHub repo, remote, and develop/main branching convention
+metadata:
+  type: reference
+---
+
+The project now has a real GitHub repo: `origin` → `https://github.com/herringblake/JetCoreServiceBus.git`, already configured locally (confirmed via `git remote -v`).
+
+**Branching convention (the user's own words):** "all code in development will go to branch 'develop', production code will be in 'main'." Both branches already exist locally and on the remote. In practice: day-to-day/in-progress work happens on `develop`; `main` is reserved for production-ready code, presumably merged in from `develop` (the user hasn't specified the exact merge mechanism — PR vs. direct merge — beyond this).
+
+**Why this matters going forward:** the standing instruction is "I will manage all git commits for now" (still in force) — this doesn't change that Claude shouldn't run `git add`/`commit`/`push` unprompted, but it does mean: (a) when discussing or planning git-related work, `develop` is the assumed working branch unless the user says otherwise; (b) Design.md §14 (Phase 4/Track L, GitHub Actions CI) was written assuming CI triggers on push/PR to both `develop` and `main`; (c) if the user ever does ask Claude to commit, default to `develop`, not `main`, absent other instruction. See [[defects-md-convention]] for the other standing project-specific convention from this same phase of work.
+Read MEMORY.md
+Edit MEMORY.md
+Added 1 line
+Design.md's §14 is updated: L1 is now marked done (repo, remote, and both branches confirmed directly via git remote -v/git branch -a), and the CI trigger/branch-protection guidance (L2, L7) is scoped to the develop/main model you described. Saved the repo URL and branching convention as a project memory too, since it affects how any future git work here should default.
+
+Track L is otherwise unchanged — L2 through L6 are still open. Let me know when you want me to proceed with building it.
+
+------------------ Step L1 Completed --------------------
