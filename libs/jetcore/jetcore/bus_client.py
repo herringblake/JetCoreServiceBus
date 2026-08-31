@@ -84,11 +84,29 @@ class ReceivedEvent:
         await self._msg.nak()
 
 
+# Defects.md Defect 2's own recommended-next-step: this module's docstring
+# already documented "left unacked (→ redelivery, and eventually the
+# consumer's own max-deliver handling)" as the intended design from the
+# start — this constant is what actually makes that true, rather than
+# NATS's own default (unlimited) silently applying instead. Bounds a
+# genuinely-undecryptable message (e.g. Defect 2's own root cause: a
+# recipient's registration was deleted, then the message was published,
+# before that recipient re-registered) to a finite number of attempts
+# instead of redelivering forever — while still allowing several retries
+# for a truly transient failure (a brief NATS hiccup, a momentary
+# registration gap that resolves on its own). Redelivery of an unacked
+# message waits for the consumer's AckWait (NATS default 30s) between
+# attempts, so 5 attempts is on the order of minutes, not seconds — long
+# enough to ride out this project's own observed gaps (Defect 2: 8-59s).
+MAX_DELIVER_ATTEMPTS = 5
+
+
 def _consumer_config(subject: str) -> ConsumerConfig:
     return ConsumerConfig(
         filter_subject=subject,
         ack_policy=AckPolicy.EXPLICIT,
         deliver_policy=DeliverPolicy.ALL,
+        max_deliver=MAX_DELIVER_ATTEMPTS,
     )
 
 

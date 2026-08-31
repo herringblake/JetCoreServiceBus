@@ -2,12 +2,13 @@
 
 Companion to [Design.md](Design.md) — tracks real, confirmed defects found while building this project: what's broken, how it was diagnosed, and the recommended (or applied) fix. Distinct from [Design.md §9](Design.md#9-open-questions-summary)'s "Open Questions," which are deliberate, deferred *design* choices, not bugs — a defect here may reference an §9 item (or vice versa) when the two are related, but they're tracked separately: §9 is "not decided yet, on purpose," this document is "decided, and it's wrong, here's the fix."
 
-**Status: 1 fixed, 1 open.** See the management instructions at the bottom for how entries get added, updated, and closed.
+**Status: 2 fixed, 1 open.** See the management instructions at the bottom for how entries get added, updated, and closed.
 
 | # | Name | Status | Severity | Found |
 |---|---|---|---|---|
 | 1 | [Test/Production Identity Collision](#defect-1-testproduction-identity-collision) | Fixed — Verified | Medium (test-reliability, not a production data-loss/security bug on its own) | Design.md §12 Step E4; root cause isolated §13 Step J7; confirmed at full scale §13 Step K2 |
-| 2 | [Ambient Test Traffic Undecryptable by Real Containers](#defect-2-ambient-test-traffic-undecryptable-by-real-containers) | Open — root cause not yet isolated | Low-Medium (log noise + unbounded redelivery on the real containers; no observed effect on pytest's own pass/fail results) | Found verifying Defect 1's fix |
+| 2 | [Ambient Test Traffic Undecryptable by Real Containers](#defect-2-ambient-test-traffic-undecryptable-by-real-containers) | Fixed — Verified | Low-Medium (log noise + unbounded redelivery on the real containers; no observed effect on pytest's own pass/fail results) | Found and reproduced verifying Defect 1's fix |
+| 3 | [Real Adapters React to Shared-Subject Test Traffic](#defect-3-real-adapters-react-to-shared-subject-test-traffic) | Open — root cause confirmed, fix needs a design decision | Medium (8 real pytest failures per run, a regression from Defects 1/2 fully working) | Found immediately after applying Defect 2's fix |
 
 ---
 
@@ -65,6 +66,8 @@ Six new manifest entries added to [infra/nats/adapter_identities.yaml](infra/nat
 
 Purely a manifest + test-fixture change, as designed: no `jetcore` library code changes, no new bus mechanism, no change to what `docker-compose.yml` deploys.
 
+**A second gap found later, while verifying Defect 2's fix, not at the time**: `libs/jetcore/tests/test_bus_client.py` — Track B's own foundational `BusClient` tests, predating every adapter tracked above — was missed by the original file search entirely (scoped to `adapters/` and root `tests/`, never `libs/jetcore/tests/`). It connects as bare `webhook-listener-01`/`file-storage-01` in ten places (`connect()`, `connect_as_adapter()`, and forged-event `sourceServiceId` literals alike). Fixed the same way, connecting as `webhook-listener-01-test`/`file-storage-01-test` instead. Its earlier absence from this fix is why a `SignatureVerificationError` referencing bare `webhook-listener-01` turned up during Defect 2's own verification — not a new defect, just this one's rollout finishing late.
+
 **Complementary practice, not yet applied** — when Phase 4's CI workflow is actually built, it should start only `nats` + `mysql` before running pytest, never the six adapter application containers (see the original recommendation below); left as forward guidance for that step, not something to retrofit here.
 
 **Considered and not applied:**
@@ -89,8 +92,8 @@ Fixes the observed test-reliability defect — pytest's own pass/fail results ar
 
 ## Defect 2: Ambient Test Traffic Undecryptable by Real Containers
 
-**Status:** Open — root cause confirmed and reproduced deterministically; fix not yet designed/applied.
-**Severity:** Low-Medium. No observed effect on pytest's own pass/fail results (this is about the real containers' *own* logs, not test outcomes) — but real messages apparently going permanently undecryptable and then redelivering indefinitely (no `max_deliver` cap is set anywhere in `bus_client.py`'s `_consumer_config()`) is a genuine, unbounded resource cost on a long-running deployment, and the log noise alone makes real errors harder to spot.
+**Status:** Fixed — Verified. See "Applied fix" and "Verification" below. (Fixing this surfaced a third, structural issue — see [Defect 3](#defect-3-real-adapters-react-to-shared-subject-test-traffic).)
+**Severity:** Low-Medium. No observed effect on pytest's own pass/fail results (this is about the real containers' *own* logs, not test outcomes) — but real messages apparently going permanently undecryptable and then redelivering indefinitely (no `max_deliver` cap was set anywhere in `bus_client.py`'s `_consumer_config()`) was a genuine, unbounded resource cost on a long-running deployment, and the log noise alone made real errors harder to spot.
 **Found:** while verifying Defect 1's fix — with 5 consecutive clean full-suite pytest runs (host-side, Defect 1 confirmed fixed), the real containers' own `docker compose logs` still showed dozens of `pyrage.DecryptError` (`"No matching keys found"` and, distinctly, `"failed to fill whole buffer"`) and `SignatureVerificationError` entries accumulating *during* those same runs.
 
 ### Symptom
@@ -100,15 +103,67 @@ The real, long-running adapter containers occasionally fail to decrypt/verify a 
 - `pyrage.DecryptError: No matching keys found` — a real, well-formed ciphertext, just not encrypted for this recipient's key.
 - `pyrage.DecryptError: failed to fill whole buffer` — looks consistent with attempting to decrypt an *empty* ciphertext, which `bus_client.py`'s `publish()` produces verbatim (`ciphertext = encrypt_for_recipients(payload, recipients) if recipients else b""`) whenever the publisher's recipient cache was empty at publish time.
 
-### Working theory, not yet confirmed
+### Root cause (confirmed)
 
-Test code publishing to a subject a real container subscribes to only waits for *its own* test-relevant recipient(s) to register (`wait_until_cache_has(...)`) before publishing — it has no reason to also wait for every other real-world subscriber on that subject to be visible in its recipient cache. If the real container's own registration hasn't yet propagated into the *publisher's* cache at the moment of encryption (a timing/propagation question, not an identity collision), the real container is silently left out of that message's recipient list and can never decrypt it, no matter how many times it's redelivered — since nothing about the message itself can retroactively include it. This would be a pre-existing characteristic of running ephemeral test publishers against subjects a long-running real fleet also subscribes to, not something Defect 1's fix introduced or changed; Defect 1 and this defect are two different mechanisms that happen to produce the same class of on-the-wire symptom (`pyrage.DecryptError`/`SignatureVerificationError`), which is itself worth remembering — a decrypt/verify failure in this project's logs is not self-diagnosing; it takes isolation work to tell which cause is in play.
+Not a cache-propagation timing issue (the first theory, now ruled out — see "Theory considered and ruled out" below). The actual mechanism is direct, active deletion:
 
-Not isolated the way Defect 1 was (no controlled toggle test run yet) — recorded now, precisely, so it doesn't need rediscovering from scratch, rather than left to accumulate as unexplained log noise.
+**Five different `conftest.py` files' `_clean_state` autouse fixtures blanket-delete *every* `service-directory` KV entry under a shared subject prefix (e.g. `events.orders.OrderCreated.*`) before every single test — including the real, live adapter containers' own registrations, not just test identities.** `adapters/db_adapter_mysql/tests/conftest.py`, `adapters/rest_api_service/tests/conftest.py`, `adapters/webhook_sender/tests/conftest.py`, `adapters/http_adapter/tests/conftest.py`, and the root `tests/conftest.py` all do the same thing: `for key in await kv.keys(filters=[f"{subject}."]): await kv.delete(key)`, unconditionally, for `ORDER_CREATED_SUBJECT` (and other shared subjects). This was always safe when no real adapter was also registered under that subject — it stopped being safe the moment Step K2 made `http-adapter-01`, `webhook-sender-01`, and `db-adapter-mysql-01` real, permanently-subscribed, always-registered containers on that exact subject.
 
-### Recommended next step
+Once deleted, a real container's entry doesn't come back until its *next* scheduled 20s heartbeat re-`PUT`s it — and since dozens of tests across five files each re-trigger the same delete, often faster than 20s apart, a real container's registration is realistically **absent for a large fraction of any full-suite run**, not a rare edge case. Any message published during one of those gaps (by a test, or by the real REST API Service container itself) is encrypted only for whichever recipients happen to be currently registered — permanently excluding whichever real containers were mid-gap, with no way for a later heartbeat to retroactively fix an already-published ciphertext. With no `max_deliver` cap on `bus_client.py`'s `_consumer_config()`, that message then redelivers forever, logging the same decrypt/verify failure every time.
 
-Needs its own isolation pass before a fix can be designed: reproduce deliberately (a test that publishes to a subject a real container subscribes to, immediately, without waiting for the real container's own recipient-cache propagation) and confirm whether the theory above actually holds. If it does, candidate directions include: adding a `max_deliver` cap + dead-letter/log-and-drop handling to `_consumer_config()` (bounds the resource cost regardless of root cause) and/or having `publish()` wait for cache staleness to clear past some bound before encrypting (addresses the root cause directly, at the cost of publish latency). Not designed further here — out of scope for what this session was asked to fix.
+**Reproduced and confirmed directly, not inferred**: polled `db-adapter-mysql-01`'s and `http-adapter-01`'s real `service-directory` entries once per second (`nats kv get`, bypassing any client-side cache entirely) while running a normal full pytest suite. Both entries showed real, direct evidence of the mechanism:
+
+- `http-adapter-01`: present continuously, then **absent for ~8 consecutive seconds** (01:57:24–01:57:31), then present again — one delete-then-heartbeat-recovery cycle.
+- `db-adapter-mysql-01`: **absent for 59 consecutive seconds** (01:57:32–01:58:31) — `db_adapter_mysql`'s own 26-test suite alone re-triggers the delete faster than any single heartbeat can catch up.
+
+Cross-checked against `docker compose logs` for that exact same window: `db-adapter-mysql-01` logged 20 `DecryptError`/`SignatureVerificationError` entries and `http-adapter-01` logged 13, both concentrated in that window — not spread evenly across the run.
+
+### Theory considered and ruled out
+
+The first hypothesis (recorded in this entry's earlier draft) was that a fresh test publisher's own `RecipientCache` might not have "caught up" to a real container's registration yet at publish time — a client-side propagation-lag bug. Reading `registry.py`'s own implementation argues against this: `RecipientCache.start()` genuinely blocks on the KV watch's initial "caught up" marker before returning, and nats-py's watch semantics deliver a real, complete snapshot before that marker (confirmed behavior, not assumed — see `registry.py`'s own module docstring on this exact point). A freshly-started cache should therefore already be accurate as of the moment it starts, which it is — the actual problem isn't a stale read, it's that the entry it's accurately reading has genuinely, currently, been deleted.
+
+### Applied fix
+
+Both candidate directions from the original recommendation were applied together:
+
+1. **Scoped every `_clean_state` fixture's KV-delete to test-only identities only.** All eight `conftest.py` files with this pattern (`libs/jetcore/tests`, `adapters/{webhook_listener,file_storage_adapter,webhook_sender,http_adapter,rest_api_service,db_adapter_mysql}/tests`, and the root `tests/conftest.py`) now check `service_id.endswith("-test") or service_id.startswith("test-")` before deleting a `service-directory` key — a real adapter's own registration (no matching suffix/prefix) is now never touched, no matter which subject it shares with test traffic.
+2. **Added a `max_deliver` cap** (`MAX_DELIVER_ATTEMPTS = 5` in `bus_client.py`) to `_consumer_config()` — completing what the module's own docstring already described as the intended design ("eventually the consumer's own max-deliver handling") but had never actually been set, leaving NATS's own unlimited default in effect. Bounds any *remaining* undecryptable-message case (this defect's now-fixed one, or any other) to a finite number of redelivery attempts instead of forever. Required rebuilding all 6 adapter images and clearing existing durable consumers for the new config to take effect (an existing durable *attaches to*, not replaces, its prior config on `pull_subscribe` — the same finding already documented elsewhere in this project).
+
+### Verification
+
+Direct, targeted re-check of the exact mechanism found under Evidence: polled `http-adapter-01`'s real `service-directory` entry once a second (bypassing any cache) while running an entire 26-test `db_adapter_mysql` suite — a suite that, before the fix, reliably produced a 59-second continuous gap. **The entry's `registeredAt` timestamp never changed across the whole run** — it was never deleted, so it never needed a heartbeat to recover. `ruff`, `mypy --all-packages` clean on every changed file.
+
+### A consequence of fixing this, not a failure of the fix itself
+
+Applying this fix (plus completing Defect 1's own rollout — see its "Applied fix" section) made the real adapter containers *reliably* live and registered for the first time in this project's test-suite history. That, in turn, fully exposed a third, previously partially-masked issue: several tests assume they have exclusive control over a shared "placeholder" subject (`events.files.FileWriteRequested`, `events.orders.OrderCreated`) that a real, permanently-deployed adapter also legitimately subscribes to. With the real container now reliably present and responsive, it races the test's own assertions — logged as **[Defect 3](#defect-3-real-adapters-react-to-shared-subject-test-traffic)**, not fixed here.
+
+---
+
+## Defect 3: Real Adapters React to Shared-Subject Test Traffic
+
+**Status:** Open — root cause confirmed; fix needs a design decision, not applied.
+**Severity:** Medium. Directly causes real, reproducible pytest failures (8 in the run that surfaced it) — a regression in observed test-suite reliability versus before Defects 1/2 were fixed, even though neither of those fixes is wrong on its own terms (see each entry's own Verification section).
+**Found:** immediately after applying Defect 2's fix (plus completing Defect 1's rollout) — the very next full-suite run went from 0 failures to 8, all newly, not present in the same form before either fix.
+
+### Symptom
+
+Tests that publish to a "placeholder" subject a real adapter also subscribes to (`events.files.FileWriteRequested`, `events.orders.OrderCreated`) get an extra, unwanted reaction from that real container — which now reliably receives, decrypts, and acts on the *same* message the test published, via its own independent durable consumer (JetStream fans out to every interested durable, regardless of which identity created it). Two ways this manifests, both confirmed directly:
+
+- **A shared *result* subject gets two competing publishers.** `test_success_response_publishes_request_completed` (`http_adapter`) publishes `OrderCreated`; the real `http-adapter-01` container reacts to it independently (confirmed: its own logs show a real `POST http://webhook-listener:8080/healthz` for every single test-published `OrderCreated`, at the exact cadence of the test run) and publishes its *own* `RequestCompleted` — racing the test's own handler's `RequestCompleted` for whichever one `test-observer-01`'s `[result] = await observer.fetch(...)` happens to see first. Same mechanism produced `SignatureVerificationError` noise on `file-storage-01` earlier, before Defect 1's `libs/jetcore/tests` gap was closed — a message from one of *its* tests, landing on the same shared `FileWriteRequested` subject the real container also processes.
+- **A test's own precondition becomes false.** `test_publish_with_no_recipients_does_not_crash` asserts a `"no registered recipients yet"` warning fires — true only when *nothing* is registered for that subject. The real `file-storage-01` container is now always registered for `events.files.FileWriteRequested` (that's Defect 2's fix working correctly), so the precondition the test depends on no longer holds, full stop, regardless of timing.
+
+### Root cause (confirmed)
+
+Structural, not a bug in either Defect 1 or Defect 2's own fix: `-test` identities were deliberately given **identical** publish/subscribe permissions to their real counterparts (Defect 1's own design choice, to keep exercising the real subject/permission set). That means a real adapter and its `-test` twin are *both* legitimate, simultaneous subscribers to the same subject whenever that subject is one the real adapter also owns — which is every "placeholder" subject in this project's manifest (Decision #14), since there's no test-only subject namespace distinct from the real one. Before Defects 1/2 were fixed, the real container was often *unable* to actually complete this reaction (killed by the identity collision, or missing its own registration from the KV-delete bug) — partially masking this exact race. Fixing both made the real container a reliable, fast responder, which is what turned a rare, easy-to-miss flake into an 8-failure regression in a single run.
+
+### Options, not decided here
+
+- **Give up subscribe-permission parity between `-test` identities and their real counterparts** for subjects a real container also owns — the `-test` twin would need a different mechanism to prove it can be triggered (defeats part of Defect 1's own rationale for exact parity).
+- **Route test traffic through entirely separate, test-only subjects**, distinct from whatever the real fleet listens to — the more architecturally clean answer, but a bigger change (new manifest entries, new subject constants throughout the test suite, and it means tests no longer exercise the literal production subject).
+- **Make assertions robust to a second, unrelated publisher on a shared result subject** — tag test-generated triggers with a unique marker and filter for it when observing (the pattern this project's own `test_cdc_watcher.py`/K3 manual verification already use for unrelated reasons), rather than assuming `[result] = await observer.fetch(...)` sees exactly one message. Doesn't fix `test_publish_with_no_recipients_does_not_crash`'s precondition problem, which has no such fix available — that test's premise is simply no longer achievable with a real adapter fleet running.
+- **Stop the real adapter containers before running the full test suite locally**, matching the complementary CI practice already recommended under Defect 1 — sidesteps the problem entirely for local dev, at the cost of the "always leave the stack running" convenience this project has otherwise maintained throughout.
+
+Not decided or applied — needs a choice among the above (or some combination) before implementing.
 
 ---
 

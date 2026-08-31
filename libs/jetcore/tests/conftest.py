@@ -31,6 +31,19 @@ async def _clean_state() -> AsyncGenerator[None]:
     entries have no TTL, but `BusClient.connect()` overwrites its own
     entry every call, so there's no analogous staleness risk to guard
     against.
+
+    Defects.md Defect 2: this KV cleanup used to blanket-delete every
+    registered recipient for SUBJECT — including the REAL, live
+    file-storage-01 container's own registration (SUBJECT is
+    FileWriteRequested, which it subscribes to), not just this test
+    suite's own ephemeral ones. Confirmed by direct reproduction (polling
+    a real container's KV entry once a second during a normal pytest run)
+    that this left real containers unregistered for up to 59 consecutive
+    seconds, each occurrence producing a real, permanently-undecryptable
+    message on their end. Only ever clean up entries this project's own
+    test identities own — the `-test` suffix (Defect 1's dedicated twins)
+    or the `test-` prefix (test-observer-01) — never a bare real adapter
+    serviceId.
     """
     nc = await nats.connect(NATS_URL, user_credentials=f"{CREDS_DIR}/jetcore-admin.creds")
     js = nc.jetstream()
@@ -38,7 +51,9 @@ async def _clean_state() -> AsyncGenerator[None]:
     kv = await js.key_value("service-directory")
     try:
         for key in await kv.keys(filters=[f"{SUBJECT}."]):
-            await kv.delete(key)
+            service_id = key.removeprefix(f"{SUBJECT}.")
+            if service_id.endswith("-test") or service_id.startswith("test-"):
+                await kv.delete(key)
     except NoKeysError:
         pass
     await nc.close()

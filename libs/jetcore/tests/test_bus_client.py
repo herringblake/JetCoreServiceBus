@@ -4,13 +4,15 @@ Requires a live NATS server, bootstrapped per Steps A3-A6 (`bash
 infra/nats/up.sh`, or `docker compose up -d nats` if already bootstrapped).
 
 Unlike registry.py's tests (Step B5), these can't use arbitrary unique
-subjects — real adapter identities (webhook-listener-01, file-storage-01)
-only have permission for the exact subjects Step A2's manifest grants them.
-Tests use the real Phase 2 pair on their real subject
-(events.files.FileWriteRequested), with an autouse fixture purging the
-EVENTS stream before each test for isolation, and a unique durable
-consumer name per test (a stale consumer's cursor could otherwise point at
-sequence numbers a purge just invalidated).
+subjects — real adapter identities only have permission for the exact
+subjects Step A2's manifest grants them. Tests use webhook-listener-01-TEST
+and file-storage-01-TEST — dedicated test-only twins of the real
+webhook-listener-01/file-storage-01 pair (Defects.md Defect 1), with
+identical permissions on their real subject (events.files.FileWriteRequested)
+but no live production counterpart to collide with — with an autouse
+fixture purging the EVENTS stream before each test for isolation, and a
+unique durable consumer name per test (a stale consumer's cursor could
+otherwise point at sequence numbers a purge just invalidated).
 """
 
 import base64
@@ -31,8 +33,8 @@ _wait_until_cache_nonempty = wait_until_cache_nonempty
 
 
 async def test_publish_and_fetch_round_trip(durable_name: str) -> None:
-    publisher = await _connect("webhook-listener-01")
-    consumer = await _connect("file-storage-01")
+    publisher = await _connect("webhook-listener-01-test")
+    consumer = await _connect("file-storage-01-test")
     try:
         await consumer.subscribe(SUBJECT, durable_name=durable_name)
         # subscribe() starts the heartbeat; wait for the publisher's
@@ -48,7 +50,7 @@ async def test_publish_and_fetch_round_trip(durable_name: str) -> None:
         assert len(received) == 1
         assert received[0].payload == b"hello from the round trip"
         assert received[0].details.event_type == "FileWriteRequested"
-        assert received[0].details.source_service_id == "webhook-listener-01"
+        assert received[0].details.source_service_id == "webhook-listener-01-test"
         # Design.md §13 Step I1 — publish() now returns the generated
         # eventId, and it must be the *same* id the receiver actually sees.
         assert event_id == received[0].details.event_id
@@ -77,7 +79,7 @@ async def test_publish_with_no_recipients_does_not_crash(
     understood — worth recording so no one "fixes" this again by
     reaching for a manual logging handler."""
     caplog.set_level("WARNING", logger="jetcore.bus_client")
-    publisher = await _connect("webhook-listener-01")
+    publisher = await _connect("webhook-listener-01-test")
     try:
         await publisher.publish(
             SUBJECT, b"no one is listening yet", event_type="FileWriteRequested"
@@ -90,8 +92,8 @@ async def test_publish_with_no_recipients_does_not_crash(
 async def test_tampered_ciphertext_is_not_returned(durable_name: str) -> None:
     """A message whose payload was corrupted in transit should fail to
     decrypt, and fetch() should not hand it back as if it were valid."""
-    publisher = await _connect("webhook-listener-01")
-    consumer = await _connect("file-storage-01")
+    publisher = await _connect("webhook-listener-01-test")
+    consumer = await _connect("file-storage-01-test")
     try:
         await consumer.subscribe(SUBJECT, durable_name=durable_name)
         await _wait_until_cache_nonempty(await publisher._cache_for(SUBJECT))
@@ -142,8 +144,8 @@ async def test_signature_not_matching_claimed_key_is_rejected(durable_name: str)
     `test_impersonation_with_self_consistent_key_is_rejected` immediately
     below for the exact original scenario, now correctly rejected.
     """
-    publisher = await _connect("webhook-listener-01")
-    consumer = await _connect("file-storage-01")
+    publisher = await _connect("webhook-listener-01-test")
+    consumer = await _connect("file-storage-01-test")
     try:
         await consumer.subscribe(SUBJECT, durable_name=durable_name)
 
@@ -158,7 +160,7 @@ async def test_signature_not_matching_claimed_key_is_rejected(durable_name: str)
                 eventDetails=EventDetails(
                     eventType="FileWriteRequested",
                     eventSchemaVersion="1.0.0",
-                    sourceServiceId="webhook-listener-01",
+                    sourceServiceId="webhook-listener-01-test",
                     sourcePublicKey=claimed_signer.public_key,  # doesn't match the signature below
                     signature=base64.b64encode(mismatched_signature).decode(),
                 ),
@@ -184,11 +186,11 @@ async def test_impersonation_with_self_consistent_key_is_rejected(durable_name: 
     `sourcePublicKey` — internally self-consistent, so a verifier that
     only checked the message's own embedded claim would (wrongly) accept
     it. This must now be rejected, because verification looks up the
-    trusted key registered for "webhook-listener-01" (by the real
+    trusted key registered for "webhook-listener-01-test" (by the real
     `publisher` below, at connect time) instead of trusting the embedded
     claim — and the impostor's key doesn't match it."""
-    publisher = await _connect("webhook-listener-01")
-    consumer = await _connect("file-storage-01")
+    publisher = await _connect("webhook-listener-01-test")
+    consumer = await _connect("file-storage-01-test")
     try:
         await consumer.subscribe(SUBJECT, durable_name=durable_name)
 
@@ -202,7 +204,7 @@ async def test_impersonation_with_self_consistent_key_is_rejected(durable_name: 
                 eventDetails=EventDetails(
                     eventType="FileWriteRequested",
                     eventSchemaVersion="1.0.0",
-                    sourceServiceId="webhook-listener-01",  # claims to be the real sender
+                    sourceServiceId="webhook-listener-01-test",  # claims to be the real sender
                     sourcePublicKey=impostor.public_key,  # self-consistent with the signature below
                     signature=base64.b64encode(self_consistent_signature).decode(),
                 ),
@@ -225,7 +227,7 @@ async def test_impersonation_with_self_consistent_key_is_rejected(durable_name: 
 async def test_message_from_unregistered_sender_is_rejected(durable_name: str) -> None:
     """A sourceServiceId that never registered an identity can't be
     verified at all — rejected as unverifiable, not accepted by default."""
-    consumer = await _connect("file-storage-01")
+    consumer = await _connect("file-storage-01-test")
     try:
         await consumer.subscribe(SUBJECT, durable_name=durable_name)
 
@@ -250,7 +252,7 @@ async def test_message_from_unregistered_sender_is_rejected(durable_name: str) -
         )
         # Publish via a real, permissioned identity — this test is about
         # sourceServiceId being unregistered, not about publish permissions.
-        publisher = await _connect("webhook-listener-01")
+        publisher = await _connect("webhook-listener-01-test")
         try:
             await publisher._js.publish(SUBJECT, forged.to_wire())
         finally:
@@ -264,7 +266,7 @@ async def test_message_from_unregistered_sender_is_rejected(durable_name: str) -
 
 
 async def test_fetch_without_subscribe_raises() -> None:
-    consumer = await _connect("file-storage-01")
+    consumer = await _connect("file-storage-01-test")
     try:
         with pytest.raises(ValueError, match="call subscribe"):
             await consumer.fetch("never-subscribed-durable")
@@ -279,7 +281,7 @@ async def test_connect_as_adapter_uses_a_stable_signing_identity(durable_name: s
     B7 found (repeated/concurrent connections invalidating each other's
     registered identity). Two separate connections for the same
     serviceId must agree on the same signing public key."""
-    wl_settings = settings("webhook-listener-01")
+    wl_settings = settings("webhook-listener-01-test")
     client_a = await BusClient.connect_as_adapter(wl_settings, adapter_type="test")
     client_b = await BusClient.connect_as_adapter(wl_settings, adapter_type="test")
     try:
@@ -298,9 +300,9 @@ async def test_connect_as_adapter_signature_verifies_against_creds_derived_key(
     connect_as_adapter, fetch via the ordinary test connect(), and
     confirm the message verifies and decrypts normally."""
     publisher = await BusClient.connect_as_adapter(
-        settings("webhook-listener-01"), adapter_type="test"
+        settings("webhook-listener-01-test"), adapter_type="test"
     )
-    consumer = await _connect("file-storage-01")
+    consumer = await _connect("file-storage-01-test")
     try:
         await consumer.subscribe(SUBJECT, durable_name=durable_name)
         await _wait_until_cache_nonempty(await publisher._cache_for(SUBJECT))
@@ -311,7 +313,7 @@ async def test_connect_as_adapter_signature_verifies_against_creds_derived_key(
 
         assert len(received) == 1
         assert received[0].payload == b"signed with the real creds identity"
-        assert received[0].details.source_service_id == "webhook-listener-01"
+        assert received[0].details.source_service_id == "webhook-listener-01-test"
     finally:
         await publisher.close()
         await consumer.close()

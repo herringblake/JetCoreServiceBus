@@ -63,6 +63,22 @@ FIXED_ENTRYPOINT_DURABLE_NAMES = (
 )
 
 
+def _is_test_identity(service_id: str) -> bool:
+    """Defects.md Defect 2: this fixture's own KV cleanup below used to
+    blanket-delete every registered recipient for a shared subject —
+    including the REAL, live file-storage-01/webhook-listener-01/
+    rest-api-service-01/db-adapter-mysql-01 containers' own registrations,
+    not just this test suite's own ephemeral ones. Confirmed by direct
+    reproduction (polling a real container's KV entry once a second during
+    a normal pytest run) that this left real containers unregistered for
+    up to 59 consecutive seconds, each occurrence producing a real,
+    permanently-undecryptable message on their end. Only ever clean up
+    entries this project's own test identities own — the `-test` suffix
+    (Defect 1's dedicated twins) or the `test-` prefix (test-observer-01) —
+    never a bare real adapter serviceId."""
+    return service_id.endswith("-test") or service_id.startswith("test-")
+
+
 @pytest.fixture(autouse=True)
 async def _clean_state() -> AsyncGenerator[None]:
     nc = await nats.connect(NATS_URL, user_credentials=f"{CREDS_DIR}/jetcore-admin.creds")
@@ -90,7 +106,8 @@ async def _clean_state() -> AsyncGenerator[None]:
     ):
         try:
             for key in await kv.keys(filters=[f"{subject}."]):
-                await kv.delete(key)
+                if _is_test_identity(key.removeprefix(f"{subject}.")):
+                    await kv.delete(key)
         except NoKeysError:
             pass
     await nc.close()
