@@ -32891,3 +32891,317 @@ Also added a pointer from the root README's "Repository layout" section so a fir
 
 --------------- Adapter Documentation ----------------
 
+Are there any applicable features of JetStream NATS that we are overlooking?
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+cat infra/nats/bootstrap_jetstream.sh
+
+OUT
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra/nats/bootstrap_jetstream.sh
+# Phase 1, Step A5 — JetStream objects (Design.md §11 Track A)
+#
+# Idempotently creates, using the jetcore-admin identity from Step A3 (a
+# dedicated infra-provisioning user, not any particular adapter's creds):
+#   - the EVENTS stream (events.>, file storage, limits retention, 7-day
+#     max-age, 1G max-bytes backstop) — Design.md §6.
+#   - the service-directory KV bucket (60s per-key TTL, uniform across all
+#     entries — Design.md §4.5, §11 parameter table).
+#   - the service-identity KV bucket (Design.md §9 item #4 / §11 Step B6
+#     follow-up) — no TTL. Unlike service-directory (which tracks "is this
+#     adapter currently alive to receive"), an identity's signing key
+#     doesn't need to expire on a heartbeat; a decommissioned adapter's
+#     stale identity entry is harmless (worst case: a claim to be that old
+#     serviceId still needs that old service's real private key), whereas
+#     a *missing* entry for a still-live service would wrongly reject
+#     legitimate messages. Registered once at BusClient.connect(), not on
+#     a repeating heartbeat.
+#
+# Requires a running nats-server reachable at $NATS_URL, already bootstrapped
+# per Steps A3/A4 — in particular, the JETCORE account needs JetStream storage
+# granted (bootstrap_auth.sh does this; it's disabled per-account by default
+# under decentralized JWT auth, independent of the server's global
+# jetstream{} block — see that script's comments for how this was found).
+#
+# Everything runs containerized (natsio/nats-box), no native install.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CREDS_DIR="$SCRIPT_DIR/operator/creds"
+CREDS_FILE="$CREDS_DIR/jetcore-admin.creds"
+NATS_BOX_IMAGE="natsio/nats-box:0.19.7-nonroot"
+
+# Overridable for local testing; defaults to the service name Step A6's
+# docker-compose uses. For that hostname to resolve, this script's
+# containerized `nats` calls need to join the compose network — set
+# DOCKER_NETWORK (up.sh does this automatically; e.g. `jetcore_default`).
+NATS_URL="${NATS_URL:-nats://nats:4222}"
+DOCKER_NETWORK="${DOCKER_NETWORK:-}"
+
+STREAM_NAME="EVENTS"
+STREAM_SUBJECTS="events.>"
+STREAM_MAX_AGE="7d"      # Design.md §6, Decision #9
+STREAM_MAX_BYTES="1G"    # dev-sized backstop; comfortably under the JETCORE
+                          # account's 2G js-disk-storage cap (bootstrap_auth.sh)
+                          # since the KV bucket below shares that same budget
+
+KV_BUCKET="service-directory"
+KV_TTL="60s"              # Design.md §11 parameter table
+
+IDENTITY_KV_BUCKET="service-identity"   # no TTL — see note above
+
+if [ ! -f "$CREDS_FILE" ]; then
+  echo "Missing $CREDS_FILE — run bootstrap_auth.sh (Step A3) first." >&2
+  exit 1
+fi
+
+nats() {
+  local net_args=()
+  [ -n "$DOCKER_NETWORK" ] && net_args=(--network "$DOCKER_NETWORK")
+  docker run --rm "${net_args[@]}" \
+    -v "$CREDS_DIR:/creds:ro" \
+    "$NATS_BOX_IMAGE" \
+    nats --server "$NATS_URL" --creds /creds/jetcore-admin.creds "$@"
+}
+
+echo "== Stream: $STREAM_NAME =="
+if nats stream ls -n 2>/dev/null | grep -qx "$STREAM_NAME"; then
+  echo "already exists, skipping add"
+else
+  nats stream add "$STREAM_NAME" \
+    --subjects "$STREAM_SUBJECTS" \
+    --storage file \
+    --retention limits \
+    --discard old \
+    --max-age "$STREAM_MAX_AGE" \
+    --max-bytes "$STREAM_MAX_BYTES" \
+    --replicas 1 \
+    --defaults
+fi
+
+echo "== KV bucket: $KV_BUCKET =="
+if nats kv ls -n 2>/dev/null | grep -qx "$KV_BUCKET"; then
+  echo "already exists, skipping add"
+else
+  nats kv add "$KV_BUCKET" \
+    --storage file \
+    --ttl "$KV_TTL" \
+    --replicas 1 \
+    --history 1
+fi
+
+echo "== KV bucket: $IDENTITY_KV_BUCKET =="
+if nats kv ls -n 2>/dev/null | grep -qx "$IDENTITY_KV_BUCKET"; then
+  echo "already exists, skipping add"
+else
+  nats kv add "$IDENTITY_KV_BUCKET" \
+    --storage file \
+    --replicas 1 \
+    --history 1
+fi
+
+echo "Done. Next: Step A6 wires everything into docker-compose."
+Read registry.py
+Web SearchNATS JetStream 2.11 2.12 per-message TTL KV bucket AllowMsgTTL Nats-TTL header
+OUT
+Web search results for query: "NATS JetStream 2.11 2.12 per-message TTL KV bucket AllowMsgTTL Nats-TTL header"
+
+Links: [{"title":"NATS KV should allow mirrors to set --allow-msg-ttl in mirrors. Otherwise, mirrors are forced to perform periodic compats. · Issue #1430 · nats-io/natscli","url":"https://github.com/nats-io/natscli/issues/1430"},{"title":"Per-Message TTL: Unlocking Ephemeral State Patterns in NATS | Synadia","url":"https://www.synadia.com/blog/per-message-ttl-nats-2-11"},{"title":"Delayed Message Scheduling in NATS JetStream | Synadia","url":"https://www.synadia.com/blog/delayed-message-scheduling-nats-jetstream"},{"title":"nats-architecture-and-design/adr/ADR-43.md at main · nats-io/nats-architecture-and-design","url":"https://github.com/nats-io/nats-architecture-and-design/blob/main/adr/ADR-43.md"},{"title":"nats-architecture-and-design/adr/ADR-8.md at main · nats-io/nats-architecture-and-design","url":"https://github.com/nats-io/nats-architecture-and-design/blob/main/adr/ADR-8.md"},{"title":"Class StreamConfig","url":"https://nats-io.github.io/nats.net/api/NATS.Client.JetStream.Models.StreamConfig.html"},{"title":"Message Lifecycle Management | nats-io/nats-architecture-and-design | DeepWiki","url":"https://deepwiki.com/nats-io/nats-architecture-and-design/2.6-message-lifecycle-management"},{"title":"github.com","url":"https://github.com/hartl3y94/httpmq"}]
+
+Here are the search results for your query about NATS JetStream per-message TTL functionality:
+
+## Key Findings:
+
+**Per-Message TTL Feature Overview:**
+Per-Message TTLs have been supported in NATS Server since version 2.11, enabling per-key TTL settings for Key-Value buckets.
+
+**AllowMsgTTL Configuration:**
+AllowMsgTTL allows header initiated per-message TTLs. If disabled, then the NATS-TTL header will be ignored. The AllowMsgTTL field can be enabled on existing streams but not disabled.
+
+**Nats-TTL Header:**
+To implement per-message TTL, messages can set the "Nats-TTL" header with a duration value. The Nats-TTL header value has a minimum value of 1 second.
+
+**KV Bucket TTL Support:**
+KV tombstones can have a TTL to make them expire once not useful anymore, and a stream may have a general MaxAge but some messages may have infinite retention while general keys have TTLs.
+
+**Mirror Stream Limitations:**
+When creating a KV mirror, it's impossible to enable per-message TTL support (AllowMsgTTL), even when the source KV bucket has this feature enabled. The SubjectDeleteMarkerTTL setting may not be set on a Mirror Stream.
+
+**Related Feature - Message Scheduling (2.12):**
+If you want to use Nats-Schedule-TTL, the stream must also have AllowMsgTTL set to true. It is not automatically enabled by AllowMsgSchedules.
+
+
+REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.
+Web SearchNATS JetStream consumer multiple filter subjects deduplication Nats-Msg-Id window
+OUT
+Web search results for query: "NATS JetStream consumer multiple filter subjects deduplication Nats-Msg-Id window"
+
+Links: [{"title":"NATS JetStream Deduplication for LinuxForHealth Blockchain Smart Contract Messaging | NATS blog","url":"https://nats.io/blog/nats-jetstream-deduplication-for-lfh/"},{"title":"Streams | NATS Docs","url":"https://docs.nats.io/nats-concepts/jetstream/streams"},{"title":"Consumers | NATS Docs","url":"https://docs.nats.io/nats-concepts/jetstream/consumers"},{"title":"How to Use NATS JetStream for Persistence","url":"https://oneuptime.com/blog/post/2026-01-26-nats-jetstream-persistence/view"},{"title":"Allow headers in NATS Jetstream sink · Issue #23509 · vectordotdev/vector","url":"https://github.com/vectordotdev/vector/issues/23509"},{"title":"JetStream Model Deep Dive | NATS Docs","url":"https://docs.nats.io/using-nats/developer/develop_jetstream/model_deep_dive"},{"title":"Infinite message deduplication in JetStream | NATS blog","url":"https://nats.io/blog/new-per-subject-discard-policy/"},{"title":"Streams and Consumers | nats-io/nats-server | DeepWiki","url":"https://deepwiki.com/nats-io/nats-server/3.1-streams-and-consumers"},{"title":"JetStream - NATS Server","url":"https://mintlify.wiki/nats-io/nats-server/features/jetstream"},{"title":"github.com","url":"https://github.com/nats-io/nats.py/releases/tag/v2.7.0"}]
+
+Here are the search results for your NATS JetStream query:
+
+## Key Findings
+
+**Message Deduplication:**
+Streams support deduplication using a Nats-Msg-Id header and a sliding window within which to track duplicate messages. The default window to track duplicates in is 2 minutes, this can be set on the command line using --dupe-window when creating streams.
+
+**Multiple Filter Subjects in Consumers:**
+A set of subjects that overlap with the subjects bound to the stream to filter delivery to subscribers. This cannot be used with the FilterSubject field. Additionally, support for multiple filter consumers is available when using nats-server +v2.10, which is only supported when using the pull_subscribe_bind API.
+
+**Consumer Filter Configuration:**
+The –filter value is the original subject the eligibility result is published to, while the –target value is what the subscriber will use to consume messages from the consumer.
+
+**How Deduplication Works:**
+Publishers can set a unique message ID, and JetStream will reject duplicates within a configurable window.
+
+These results show that NATS JetStream provides robust deduplication capabilities through the Nats-Msg-Id header combined with a configurable time window, and modern versions support multiple filter subjects for consumers.
+
+
+REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "nats-py\|^nats" libs/jetcore/pyproject.toml uv.lock 2>/dev/null | grep -i nats | head -10
+python3 -c "
+import nats.js.api as api
+import inspect
+print(inspect.signature(api.ConsumerConfig.__init__) if hasattr(api.ConsumerConfig,'__init__') else '')
+" 2>&1 | head -5
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+.venv/bin/python3 -c "
+from nats.js.api import ConsumerConfig, StreamConfig
+import dataclasses
+print([f.name for f in dataclasses.fields(ConsumerConfig)])
+print()
+print([f.name for f in dataclasses.fields(StreamConfig)])
+" 2>&1
+
+OUT
+libs/jetcore/pyproject.toml:5:# (B3), nats-py (B5/B6) etc. still pending.
+libs/jetcore/pyproject.toml:12:    "nats-py[nkeys]>=2.15.0",
+uv.lock:915:    { name = "nats-py", extra = ["nkeys"] },
+uv.lock:924:    { name = "nats-py", extras = ["nkeys"], specifier = ">=2.15.0" },
+uv.lock:1306:name = "nats-py"
+(self, name: 'Optional[str]' = None, durable_name: 'Optional[str]' = None, description: 'Optional[str]' = None, deliver_policy: 'Optional[DeliverPolicy]' = <DeliverPolicy.ALL: 'all'>, opt_start_seq: 'Optional[int]' = None, opt_start_time: 'Optional[datetime.datetime]' = None, ack_policy: 'Optional[AckPolicy]' = <AckPolicy.EXPLICIT: 'explicit'>, ack_wait: 'Optional[float]' = None, max_deliver: 'Optional[int]' = None, backoff: 'Optional[List[float]]' = None, filter_subject: 'Optional[str]' = None, filter_subjects: 'Optional[List[str]]' = None, replay_policy: 'Optional[ReplayPolicy]' = <ReplayPolicy.INSTANT: 'instant'>, rate_limit_bps: 'Optional[int]' = None, sample_freq: 'Optional[str]' = None, max_waiting: 'Optional[int]' = None, max_ack_pending: 'Optional[int]' = None, flow_control: 'Optional[bool]' = None, idle_heartbeat: 'Optional[float]' = None, headers_only: 'Optional[bool]' = None, deliver_subject: 'Optional[str]' = None, deliver_group: 'Optional[str]' = None, inactive_threshold: 'Optional[float]' = None, num_replicas: 'Optional[int]' = None, mem_storage: 'Optional[bool]' = None, metadata: 'Optional[Dict[str, str]]' = None, pause_until: 'Optional[str]' = None) -> None
+['name', 'durable_name', 'description', 'deliver_policy', 'opt_start_seq', 'opt_start_time', 'ack_policy', 'ack_wait', 'max_deliver', 'backoff', 'filter_subject', 'filter_subjects', 'replay_policy', 'rate_limit_bps', 'sample_freq', 'max_waiting', 'max_ack_pending', 'flow_control', 'idle_heartbeat', 'headers_only', 'deliver_subject', 'deliver_group', 'inactive_threshold', 'num_replicas', 'mem_storage', 'metadata', 'pause_until']
+
+['name', 'description', 'subjects', 'retention', 'max_consumers', 'max_msgs', 'max_bytes', 'discard', 'discard_new_per_subject', 'max_age', 'max_msgs_per_subject', 'max_msg_size', 'storage', 'num_replicas', 'no_ack', 'template_owner', 'duplicate_window', 'placement', 'mirror', 'sources', 'sealed', 'deny_delete', 'deny_purge', 'allow_rollup_hdrs', 'first_seq', 'republish', 'subject_transform', 'allow_direct', 'mirror_direct', 'compression', 'allow_msg_ttl', 'allow_msg_schedules', 'allow_atomic', 'allow_batched', 'persist_mode', 'metadata', 'consumer_limits', 'subject_delete_marker_ttl']
+Let me check the actual live bucket/stream config rather than guess:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+for bucket in service-directory service-identity; do
+  echo "=== $bucket ==="
+  docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+    nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+    stream info "KV_$bucket" --json 2>&1 | python3 -c "import json,sys; d=json.load(sys.stdin); c=d['config']; print(json.dumps({k:c[k] for k in ['allow_direct','allow_msg_ttl','duplicate_window','discard'] if k in c}, indent=2))"
+done
+echo "=== EVENTS stream ==="
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+  stream info EVENTS --json 2>&1 | python3 -c "import json,sys; d=json.load(sys.stdin); c=d['config']; print(json.dumps({k:c[k] for k in ['allow_direct','allow_msg_ttl','duplicate_window','discard','retention'] if k in c}, indent=2))"
+
+OUT
+=== service-directory ===
+{
+  "allow_direct": true,
+  "duplicate_window": 60000000000,
+  "discard": "new"
+}
+=== service-identity ===
+{
+  "allow_direct": true,
+  "duplicate_window": 120000000000,
+  "discard": "new"
+}
+=== EVENTS stream ===
+{
+  "allow_direct": true,
+  "duplicate_window": 120000000000,
+  "discard": "old",
+  "retention": "limits"
+}
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "Nats-Msg-Id\|headers\|js.publish" libs/jetcore/jetcore/bus_client.py
+
+OUT
+256:        await self._js.publish(subject, Event(event=envelope).to_wire())
+Good question — I went and checked the live server config rather than going from memory, since this project always verifies rather than assumes. A few real, concrete things stand out.
+
+Directly relevant to gaps already on record
+1. Redelivery backoff — not set, and it bears directly on Defect 2. bus_client.py's _consumer_config() sets max_deliver=5 but no ack_wait/backoff, so every redelivery attempt waits the flat 30s server default. ConsumerConfig.backoff is a real field in the pinned client (nats-py>=2.15.0 — confirmed by introspecting it directly). Defect 2's own evidence was 8-59 second registration gaps; a backoff like [2s, 5s, 15s, 30s, 60s] would let the first retry land almost immediately — much likelier to catch a transient gap closing — while still backing off if the problem persists. Small, additive, no schema/behavior change elsewhere.
+
+2. Message dedup — already provisioned on every stream, never actually used. I checked live: EVENTS, service-directory, and service-identity all already have a duplicate_window set (120s / 60s / 120s — NATS's own defaults from nats stream add/kv add). But nothing in bus_client.py's publish() ever sets a Nats-Msg-Id header — so the capability is paid for and sitting idle. It would matter the moment a client retries an HTTP call to REST API Service or Webhook Listener after a network blip that actually succeeded server-side (a duplicate OrderCreated/FileWriteRequested publish, no way for downstream to know it's a dupe). Nothing currently supplies an idempotency key to plumb through, so this is latent rather than an active bug — but it's a real gap in the two HTTP front doors, and the infra is already there waiting.
+
+3. Per-key TTL (allow_msg_ttl) on service-identity — a narrower angle on an already-flagged limitation. Confirmed live: not enabled on any bucket. Decision #20 and Defect 1 both flag service-identity's "no revocation beyond overwrite" as future hardening, but the option actually evaluated and rejected there was a heartbeat-refreshed TTL (correctly rejected — it doesn't fix the dual-live-instance race, just changes the flip-flop cadence). Per-key TTL is a different shape: a set-once, long expiry (say 90 days) on each identity registration would let a genuinely decommissioned identity eventually age out with zero ongoing cost — pure garbage collection, never actually evaluated on its own terms since it got bundled with the rejected idea.
+
+4. KV --history 1 on both buckets — currently destroys its own forensic evidence. Decision #20's whole risk is "whichever registration lands last simply overwrites the previous one, permanently" — with history 1, there's nothing left to even investigate after the fact. Bumping to --history 5 or so is a one-line change to bootstrap_jetstream.sh, no code change (nats-py's KeyValue.history() already exists), small storage cost. Doesn't fix the race, but currently a collision is un-investigable after the fact, and that's fixable for free.
+
+Available, but not clearly worth adopting here
+filter_subjects (multi-subject consumers, NATS 2.10+/nats-py confirmed supported) — could collapse File Storage Adapter's 4 durable consumers into 1. But several handler docstrings explicitly call out "each subject gets its own durable consumer, per §6's design" as deliberate (independent concurrency/backpressure per subject) — consolidating trades that away. An option, not obviously a win.
+max_ack_pending — unset (server default 1000). No evidence this project has ever gotten near that ceiling.
+JetStream Object Store — could back File Storage Adapter instead of the host bind-mount. Interesting for a real distributed deployment, but that adapter's whole stated purpose is local file ops — this would be redesigning it, not extending it.
+republish, mirrors/sources, num_replicas>1 — all real, all deliberately unused: this is explicitly a single-node dev/demo bus (--replicas 1 throughout), matching Phase 5's own scope. Not a gap.
+Items 1 and 4 are cheap and low-risk enough to just do; 2 and 3 both imply a small design decision (where does an idempotency key come from; what's the right TTL value and who sets it) worth a short discussion first — want me to write these up as new Design.md Open Questions/Decisions, or pick one to scope out now?
+
+Let's write them up as Open Questions
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '/^## 9\./,/^---/p' Design.md | head -30
+
+OUT
+## 9. Open Questions Summary
+
+Architectural questions have been resolved and folded into §2–§8 above (Decisions #1–#27). What's left is deliberately deferred, not blocking:
+
+1. **File Storage Adapter command/response schema** — exact subject names and payload shape for the `list`/`read`/`write`/`delete` commands are TBD. **Fully resolved as of Phase 3 scoping**: the write path was already settled in §12 (Decision #22); `list`/`read`/`delete` plus the "not found" failure case are now settled too (§13, Decision #23). No longer an open item — struck out below the list, kept only as a numbering anchor for item #2 onward.
+2. **Subject naming** — real bounded-context names are deferred by choice; `events.<context>.<EventType>` stays a placeholder pattern (`orders` as stand-in) until real domains are known. Nothing else in the design depends on the specific names chosen — Phase 3 builds four more real adapters against the same placeholder rather than force-resolving this early. Reconfirmed still deferred, not blocking.
+3. **Externally-triggered file *updates*** — Decision #19 has the File Storage Adapter detect externally-created files (→ `FileCreateCompleted`), but not externally-triggered updates to existing files. **Reconfirmed still deferred past Phase 3 too** — Phase 3's File Storage Adapter scope (§13 Track F) is specifically the `list`/`read`/`delete` commands (item #1 above), not folder-watch expansion; the real usage pattern this needs to be clearer still isn't.
+4. **Encryption keypair persistence across restarts** — found while building Step C6. The *signing* identity is now stable across restarts (`BusClient.connect_as_adapter()`, derived from the adapter's own `.creds` file). The *encryption* keypair still isn't — generated fresh every process start, since Design.md has no answer yet for where a second, independent secret would live. Consequence: a message encrypted for this adapter and still unconsumed across a restart becomes permanently undecryptable. Low-stakes for Phase 2's command/response flow (a lost `FileWriteRequested` is retriable by its sender); deliberately not solved by deriving it from the signing seed (considered and rejected — undermines §4.1's "two independent keypairs" rationale). **Still relevant for Phase 3**: every new adapter that both publishes and subscribes (Database Adapter, REST API Service) inherits the same gap. Worth resolving before any real production deployment; deferred, not blocking Phase 3 either.
+5. **Test-suite flakiness — root cause was a test/production identity collision, now fixed.** First symptom at Step E4 (`pyrage.DecryptError`/`SignatureVerificationError` in an unrelated test), initially misdiagnosed as generic NATS server strain through Steps H5/I7, root cause actually isolated at Step J7 (reproduces standalone, disproving the "cross-test churn" theory), confirmed at full 6-adapter scale at Step K2 (5 simultaneous entrypoint-test failures across 4 adapters in one run, vs. 230/230 clean with the adapter containers stopped), and **fixed**: tests now connect under a dedicated `<adapter>-01-test` identity distinct from the real, live `docker-compose` container's own `serviceId`, verified 5-for-5 clean full-suite runs with the entire fleet running throughout. **Full mechanism, evidence, and applied fix: [Defects.md#defect-1-testproduction-identity-collision](Defects.md#defect-1-testproduction-identity-collision).**
+6. **Database Adapter CDC read position isn't persisted across restarts** — found while building Step J5. `python-mysql-replication`'s `BinLogStreamReader`, given no explicit `log_file`/`log_pos`, starts from the earliest binlog MySQL still retains, not "now" — confirmed by testing, not assumed. Consequence: every restart replays the adapter's entire available binlog history as a fresh burst of `RowChanged` publishes (bounded by MySQL's own binlog retention, not unbounded). Acceptable for this phase's single-demo-instance scope (a full resync is a defensible restart behavior for a CDC reader, arguably even correct for some consumers); a real deployment would need to persist and resume from the last-seen `log_file`/`log_pos`, the same "not yet solved for real production use" caveat already recorded for item #4's encryption-keypair gap. Deferred, not blocking.
+7. **Ambient test traffic occasionally undecryptable by the real adapter containers — a distinct issue from item #5, now fixed.** With item #5 fixed (identity collision, no longer in play), the real containers' own logs still showed `pyrage.DecryptError`/`SignatureVerificationError` from ordinary test-generated traffic on subjects they legitimately subscribe to. Root cause, reproduced directly (polling a real container's `service-directory` KV entry once per second during a normal pytest run, bypassing any client-side cache): eight different `conftest.py` files' `_clean_state` fixtures blanket-deleted *every* KV entry under a shared subject prefix before every test — including the real containers' own registrations, not just test identities — and a deleted entry doesn't come back until that container's next 20s heartbeat. Confirmed absences of 8-59 consecutive seconds, correlated directly against real `DecryptError`/`SignatureVerificationError` log entries in that same window. **Fixed**: those fixtures now only delete keys belonging to test-only identities, plus a `max_deliver` cap added to `_consumer_config()` as a backstop. Verified: a real container's KV entry survived a full 26-test suite run with its `registeredAt` timestamp unchanged. **Full mechanism and applied fix: [Defects.md#defect-2-ambient-test-traffic-undecryptable-by-real-containers](Defects.md#defect-2-ambient-test-traffic-undecryptable-by-real-containers).**
+8. **Real adapters react to shared-subject test traffic — surfaced by fixing item #7, now fixed.** Once items #5/#7's fixes made the real adapter fleet reliably live and registered (rather than intermittently disabled by either bug), a structural issue that both bugs had been partially masking became fully visible: `-test` identities were deliberately given identical permissions to their real counterparts (item #5's own design), so a real adapter and its `-test` twin are both legitimate, simultaneous subscribers to the same "placeholder" subject — meaning a test's own published trigger also reliably triggered the real container's real behavior, racing the test's own assertions or invalidating a test's stated precondition (e.g. "no recipients registered yet," no longer true once a real container is always registered). Caused 8 real pytest failures in the very next full-suite run after items #5/#7 were fixed. **Fixed**: [test.sh](test.sh) stops the six adapter containers (leaving `nats`/`mysql` up) before running pytest, restarting them afterward regardless of outcome — removes the whole class of problem rather than patching the 8 tests that happened to surface it first. Verified: 3 consecutive `./test.sh` runs, 230/230 passing each time. **Full mechanism and applied fix: [Defects.md#defect-3-real-adapters-react-to-shared-subject-test-traffic](Defects.md#defect-3-real-adapters-react-to-shared-subject-test-traffic).**
+
+Item #4 in the original numbering here (the sender-authentication gap found in Step B6) is **resolved** — see Decision #20 and §4.6. It's noted there as a v1-scoped mechanism (trusts whoever registers first for a serviceId, no revocation beyond overwrite), not a fully solved problem for all time, but it's no longer an open design question — it's a documented, implemented, tested decision. (Renumbered above to avoid two different "item #4"s in this document — the encryption-keypair item is the new one.)
+
+---
+Edit Design.md
+Added 4 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '/^## 9\./,/^---/p' Design.md | tail -15
+
+OUT
+2. **Subject naming** — real bounded-context names are deferred by choice; `events.<context>.<EventType>` stays a placeholder pattern (`orders` as stand-in) until real domains are known. Nothing else in the design depends on the specific names chosen — Phase 3 builds four more real adapters against the same placeholder rather than force-resolving this early. Reconfirmed still deferred, not blocking.
+3. **Externally-triggered file *updates*** — Decision #19 has the File Storage Adapter detect externally-created files (→ `FileCreateCompleted`), but not externally-triggered updates to existing files. **Reconfirmed still deferred past Phase 3 too** — Phase 3's File Storage Adapter scope (§13 Track F) is specifically the `list`/`read`/`delete` commands (item #1 above), not folder-watch expansion; the real usage pattern this needs to be clearer still isn't.
+4. **Encryption keypair persistence across restarts** — found while building Step C6. The *signing* identity is now stable across restarts (`BusClient.connect_as_adapter()`, derived from the adapter's own `.creds` file). The *encryption* keypair still isn't — generated fresh every process start, since Design.md has no answer yet for where a second, independent secret would live. Consequence: a message encrypted for this adapter and still unconsumed across a restart becomes permanently undecryptable. Low-stakes for Phase 2's command/response flow (a lost `FileWriteRequested` is retriable by its sender); deliberately not solved by deriving it from the signing seed (considered and rejected — undermines §4.1's "two independent keypairs" rationale). **Still relevant for Phase 3**: every new adapter that both publishes and subscribes (Database Adapter, REST API Service) inherits the same gap. Worth resolving before any real production deployment; deferred, not blocking Phase 3 either.
+5. **Test-suite flakiness — root cause was a test/production identity collision, now fixed.** First symptom at Step E4 (`pyrage.DecryptError`/`SignatureVerificationError` in an unrelated test), initially misdiagnosed as generic NATS server strain through Steps H5/I7, root cause actually isolated at Step J7 (reproduces standalone, disproving the "cross-test churn" theory), confirmed at full 6-adapter scale at Step K2 (5 simultaneous entrypoint-test failures across 4 adapters in one run, vs. 230/230 clean with the adapter containers stopped), and **fixed**: tests now connect under a dedicated `<adapter>-01-test` identity distinct from the real, live `docker-compose` container's own `serviceId`, verified 5-for-5 clean full-suite runs with the entire fleet running throughout. **Full mechanism, evidence, and applied fix: [Defects.md#defect-1-testproduction-identity-collision](Defects.md#defect-1-testproduction-identity-collision).**
+6. **Database Adapter CDC read position isn't persisted across restarts** — found while building Step J5. `python-mysql-replication`'s `BinLogStreamReader`, given no explicit `log_file`/`log_pos`, starts from the earliest binlog MySQL still retains, not "now" — confirmed by testing, not assumed. Consequence: every restart replays the adapter's entire available binlog history as a fresh burst of `RowChanged` publishes (bounded by MySQL's own binlog retention, not unbounded). Acceptable for this phase's single-demo-instance scope (a full resync is a defensible restart behavior for a CDC reader, arguably even correct for some consumers); a real deployment would need to persist and resume from the last-seen `log_file`/`log_pos`, the same "not yet solved for real production use" caveat already recorded for item #4's encryption-keypair gap. Deferred, not blocking.
+7. **Ambient test traffic occasionally undecryptable by the real adapter containers — a distinct issue from item #5, now fixed.** With item #5 fixed (identity collision, no longer in play), the real containers' own logs still showed `pyrage.DecryptError`/`SignatureVerificationError` from ordinary test-generated traffic on subjects they legitimately subscribe to. Root cause, reproduced directly (polling a real container's `service-directory` KV entry once per second during a normal pytest run, bypassing any client-side cache): eight different `conftest.py` files' `_clean_state` fixtures blanket-deleted *every* KV entry under a shared subject prefix before every test — including the real containers' own registrations, not just test identities — and a deleted entry doesn't come back until that container's next 20s heartbeat. Confirmed absences of 8-59 consecutive seconds, correlated directly against real `DecryptError`/`SignatureVerificationError` log entries in that same window. **Fixed**: those fixtures now only delete keys belonging to test-only identities, plus a `max_deliver` cap added to `_consumer_config()` as a backstop. Verified: a real container's KV entry survived a full 26-test suite run with its `registeredAt` timestamp unchanged. **Full mechanism and applied fix: [Defects.md#defect-2-ambient-test-traffic-undecryptable-by-real-containers](Defects.md#defect-2-ambient-test-traffic-undecryptable-by-real-containers).**
+8. **Real adapters react to shared-subject test traffic — surfaced by fixing item #7, now fixed.** Once items #5/#7's fixes made the real adapter fleet reliably live and registered (rather than intermittently disabled by either bug), a structural issue that both bugs had been partially masking became fully visible: `-test` identities were deliberately given identical permissions to their real counterparts (item #5's own design), so a real adapter and its `-test` twin are both legitimate, simultaneous subscribers to the same "placeholder" subject — meaning a test's own published trigger also reliably triggered the real container's real behavior, racing the test's own assertions or invalidating a test's stated precondition (e.g. "no recipients registered yet," no longer true once a real container is always registered). Caused 8 real pytest failures in the very next full-suite run after items #5/#7 were fixed. **Fixed**: [test.sh](test.sh) stops the six adapter containers (leaving `nats`/`mysql` up) before running pytest, restarting them afterward regardless of outcome — removes the whole class of problem rather than patching the 8 tests that happened to surface it first. Verified: 3 consecutive `./test.sh` runs, 230/230 passing each time. **Full mechanism and applied fix: [Defects.md#defect-3-real-adapters-react-to-shared-subject-test-traffic](Defects.md#defect-3-real-adapters-react-to-shared-subject-test-traffic).**
+9. **No redelivery backoff configured — every retry waits the flat server-default AckWait (30s), including the first.** Found during a JetStream feature audit (post-Phase 5), not a build step: `bus_client.py`'s `_consumer_config()` sets `max_deliver=5` (Defect 2's own fix) but never sets `ack_wait`/`backoff`, so a genuinely transient failure (the exact shape Defect 2 diagnosed — 8-59 second registration gaps) waits a full 30s before its first retry even attempts to land inside the window where the problem may have already resolved. `ConsumerConfig.backoff: list[float]` is a real, present field in the pinned client (`nats-py>=2.15.0`, confirmed via direct introspection of the installed library, not docs) — an escalating schedule (e.g. `[2, 5, 15, 30, 60]` seconds) would let the first retry happen fast while still backing off for a persistent problem. Purely additive (one new field on an existing `ConsumerConfig` call); no schema or behavior change elsewhere. Deferred, not blocking — worth adopting, not yet decided on a concrete schedule.
+10. **JetStream message deduplication is already paid for on every stream and completely unused.** Found the same audit: live `stream info` on `EVENTS`, `service-directory`, and `service-identity` all show a `duplicate_window` already set (120s/60s/120s — NATS's own `nats stream add`/`kv add` defaults), but nothing in `bus_client.py`'s `publish()` ever sets the `Nats-Msg-Id` header that capability keys off — confirmed by direct inspection of the one `publish()` call site. Currently latent rather than an active bug: nothing in this project produces a client-supplied idempotency key today. It would become a real gap the moment a caller retries a `POST /api/orders` (REST API Service) or `POST /webhooks/{path}` (Webhook Listener) after a network blip that actually succeeded server-side — a second, indistinguishable publish, with no way for any downstream consumer to know it's a duplicate. Needs a design decision before it's actionable: where the idempotency key comes from (a caller-supplied HTTP header? an adapter-derived hash of the body?) and which of the two HTTP front doors actually need it. Deferred, not blocking.
+11. **Per-key TTL (`allow_msg_ttl`) on `service-identity` — a narrower angle on Decision #20's flagged limitation, not previously evaluated on its own terms.** Confirmed live (`stream info`): `allow_msg_ttl` is not enabled on any bucket today. Decision #20 and [Defects.md Defect 1](Defects.md#defect-1-testproduction-identity-collision) both flag `service-identity`'s "no revocation beyond overwrite" as future hardening, and Defect 1's own "Considered and not applied" section rejected *a heartbeat-refreshed TTL matching `service-directory`'s own model* — correctly, since re-heartbeating doesn't fix the dual-live-instance race, it just changes the flip-flop cadence. Per-key TTL is a different, cheaper mechanism that was never itself evaluated: a long, set-once expiry (e.g. 90 days) on each identity registration, refreshed only if the adapter ever reconnects, would let a genuinely decommissioned identity age out on its own with zero ongoing cost — pure garbage collection, not a fix for the concurrent-registration race (item stays open for that half). Deferred, not blocking — needs a concrete TTL value and confirmation this doesn't complicate a long-lived production adapter that legitimately never reconnects.
+12. **KV `--history 1` on both buckets destroys the only evidence a collision under Decision #20 would leave behind.** Found the same audit. Decision #20's stated risk is "whichever registration lands last simply overwrites the previous one, permanently" — with `--history 1` (both buckets, [infra/nats/bootstrap_jetstream.sh](infra/nats/bootstrap_jetstream.sh)), the overwritten prior value isn't retrievable even moments later to confirm a suspected collision actually happened. Bumping to `--history 5` (or similar) is a one-line change to that script, no application code change (`nats-py`'s `KeyValue.history()` already exists), a small, bounded storage cost. Doesn't fix the underlying race — pure post-hoc observability. Deferred, not blocking; the only real question is what history depth is worth the storage cost, not whether to do it.
+
+Item #4 in the original numbering here (the sender-authentication gap found in Step B6) is **resolved** — see Decision #20 and §4.6. It's noted there as a v1-scoped mechanism (trusts whoever registers first for a serviceId, no revocation beyond overwrite), not a fully solved problem for all time, but it's no longer an open design question — it's a documented, implemented, tested decision. (Renumbered above to avoid two different "item #4"s in this document — the encryption-keypair item is the new one.)
+
+---
+Added as items #9-12 in Design.md §9, each grounded in the live server config I checked (not restated from memory), and cross-linked to the existing decisions/defects they extend:
+
+#9 — no redelivery backoff configured; every retry waits the flat 30s default, including the first — bears directly on Defect 2's own 8-59s gap evidence.
+#10 — dedup (duplicate_window) is already live on all three streams; nothing ever sets Nats-Msg-Id, so it's unused capacity, latent until an HTTP front door needs idempotent retries.
+#11 — per-key TTL on service-identity, framed explicitly as narrower than (and not the same as) the heartbeat-TTL idea Defect 1 already correctly rejected — a fresh angle on Decision #20, not a re-litigation.
+#12 — --history 1 on both KV buckets currently means a suspected Decision #20 collision leaves no evidence to investigate; cheap, config-only fix.
+Each states what's confirmed vs. what still needs deciding (a backoff schedule, an idempotency-key source, a TTL value, a history depth) so none of them read as silently settled. Let me know if you want to pick one to scope into an actual Decision/Track next, or leave them parked here for now.
+
+------------------- NATS Feature Audit -------------------
