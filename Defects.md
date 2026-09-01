@@ -2,13 +2,14 @@
 
 Companion to [Design.md](Design.md) — tracks real, confirmed defects found while building this project: what's broken, how it was diagnosed, and the recommended (or applied) fix. Distinct from [Design.md §9](Design.md#9-open-questions-summary)'s "Open Questions," which are deliberate, deferred *design* choices, not bugs — a defect here may reference an §9 item (or vice versa) when the two are related, but they're tracked separately: §9 is "not decided yet, on purpose," this document is "decided, and it's wrong, here's the fix."
 
-**Status: 3 fixed, 0 open.** See the management instructions at the bottom for how entries get added, updated, and closed. Running the test suite locally should always go through [test.sh](test.sh) (`./test.sh` in place of `uv run --all-packages pytest`) — see Defect 3.
+**Status: 4 fixed, 0 open.** See the management instructions at the bottom for how entries get added, updated, and closed. Running the test suite locally should always go through [test.sh](test.sh) (`./test.sh` in place of `uv run --all-packages pytest`) — see Defect 3.
 
 | # | Name | Status | Severity | Found |
 |---|---|---|---|---|
 | 1 | [Test/Production Identity Collision](#defect-1-testproduction-identity-collision) | Fixed — Verified | Medium (test-reliability, not a production data-loss/security bug on its own) | Design.md §12 Step E4; root cause isolated §13 Step J7; confirmed at full scale §13 Step K2 |
 | 2 | [Ambient Test Traffic Undecryptable by Real Containers](#defect-2-ambient-test-traffic-undecryptable-by-real-containers) | Fixed — Verified | Low-Medium (log noise + unbounded redelivery on the real containers; no observed effect on pytest's own pass/fail results) | Found and reproduced verifying Defect 1's fix |
 | 3 | [Real Adapters React to Shared-Subject Test Traffic](#defect-3-real-adapters-react-to-shared-subject-test-traffic) | Fixed — Verified | Medium (8 real pytest failures per run, a regression from Defects 1/2 fully working) | Found immediately after applying Defect 2's fix |
+| 4 | [`bootstrap_auth.sh` Idempotency Check Races Against Its Own Pipeline](#defect-4-bootstrap_authsh-idempotency-check-races-against-its-own-pipeline) | Fixed — Verified | Medium (script aborts, or hangs, on a genuinely idempotent rerun — blocks local dev and would intermittently break CI's own `infra/nats/up.sh` step, Design.md §14 Step L2) | Design.md §15 Step M3, a fresh-teardown `docker compose down -v` rebuild |
 
 ---
 
@@ -172,6 +173,60 @@ Documented in the script's own header that CI (Design.md §10 Phase 4, not yet b
 ### Verification
 
 `./test.sh -q`, three consecutive runs, all 6 containers left running from a prior session (the actual condition that produces the race): **230/230 passing every time**, including both symptoms from this entry (the `RequestCompleted` race and `test_publish_with_no_recipients_does_not_crash`'s precondition test). Confirmed the six containers are healthy and running again after each run (`docker compose ps`).
+
+---
+
+## Defect 4: `bootstrap_auth.sh` Idempotency Check Races Against Its Own Pipeline
+
+**Status:** Fixed — Verified. See "Applied fix" and "Verification" below.
+**Severity:** Medium. Doesn't corrupt any NATS state — every failure mode here is the script refusing to finish a rerun that should be a no-op. But `infra/nats/up.sh` (which calls this) is exactly what [Design.md §14 Step L6](Design.md#14-phase-4--detailed-breakdown)'s fresh-clone verification and Step L2's CI `test` job both depend on — an intermittent failure here would show up as flaky CI, not a one-off local annoyance.
+**Found:** [Design.md §15 Step M3](Design.md#15-phase-5--detailed-breakdown), while rebuilding the stack from a genuine `docker compose down -v` teardown as part of writing the Phase 5 demo walkthrough — not something Step L6's own fresh-*clone* verification happened to hit, since a fresh clone's `operator/nsc` store starts empty rather than already populated with all 14 identities (the count that made this race reliably reproducible; see Root cause).
+
+### Symptom
+
+Re-running `infra/nats/bootstrap_auth.sh` against an *already-provisioned* `operator/nsc` store — the exact case the whole script is written to make a safe no-op — intermittently either:
+
+- Aborts with `write /dev/stdout: broken pipe` immediately followed by `Error: the user "<some-identity>" already exists`, at a different identity on different runs (not deterministically the same one — direct evidence this is a live race, not a fixed bug tied to one specific manifest entry), or
+- Hangs indefinitely partway through the `== Users ==` loop, with no error printed at all.
+
+### Root cause
+
+`nsc_has()` (the idempotency check every `if nsc_has ...; then skip; else add; fi` guard in the script depends on) piped three live processes straight through each other:
+
+```bash
+nsc "$@" --json 2>&1 | yqjson '(. // []) | .[].name' | grep -qx "$name"
+```
+
+`grep -qx` exits the instant it finds a matching line — which, for a store with 14 identities, is usually well before `nsc`'s `docker run` has finished writing its full JSON listing. Closing `grep`'s stdin early sends `SIGPIPE` back up the pipe to `yq`, and potentially to `nsc` itself if `yq` was still mid-read when it died — surfacing as `nsc`'s own `write /dev/stdout: broken pipe` message (part of `nsc`'s `2>&1`-merged output, so it can itself get mistaken for part of the JSON `yq` is parsing). Under `set -o pipefail`, bash reports a pipeline's exit status as the *rightmost* command with a non-zero exit — so even though `grep` genuinely found the name (a true "yes, it exists"), a `SIGPIPE`-killed `yq` sitting to its left can make the whole `nsc_has` call report failure anyway. The `if nsc_has ...` guard then takes the `else` branch and calls `nsc add user` on an identity that already exists → the observed `Error: the user "..." already exists` abort. The hang (observed once, not reliably reproduced on demand) is consistent with the same race leaving one of the `docker run` processes in a state where it's not exiting cleanly on `SIGPIPE`, though the exact mechanism there wasn't isolated further — the fix removes the race entirely rather than needing to.
+
+This didn't surface earlier because it's a genuine race that gets *more* likely to fire as the JSON payload `nsc list users --json` produces grows — with only a handful of identities (Phase 1, when this script was written and "3 consecutive idempotent reruns" was verified per its own header comment), the whole listing fits well within a single pipe buffer and `nsc`/`yq` typically finish writing before `grep` ever reads far enough to match and exit. By Phase 3/4 the manifest has grown to 13 adapter identities (6 real + 6 `-test` twins, Defect 1's fix, + `test-observer-01`) plus `jetcore-admin` — 14 users total, per [adapter_identities.yaml](infra/nats/adapter_identities.yaml) — large enough to make the race a real, frequent occurrence rather than a theoretical one.
+
+### Evidence
+
+Reproduced directly, not inferred: after a `docker compose down -v` + fresh `infra/nats/up.sh` (Step M3), a second, purely idempotent rerun of `bootstrap_auth.sh` failed with `Error: the user "rest-api-service-01" already exists`. A third rerun succeeded cleanly. A tight loop of 5 further reruns hit the same failure mode again at a *different* identity (`http-adapter-01-test`) on attempt 1, and hung with no error on attempt 4 (verified no zombie `docker run`/container processes were left behind — `docker ps -a` showed nothing beyond the already-known, long-stopped unrelated container). Different failing identity each time — the signature of a live scheduling race, not a deterministic bug in one manifest entry's handling.
+
+### Applied fix
+
+Rewrote `nsc_has()` to fully materialize `nsc`'s (piped through `yq`) output into a shell variable via command substitution *before* running `grep` against it, rather than streaming all three through one live pipe:
+
+```bash
+nsc_has() {
+  local name="$1"; shift
+  local names
+  names="$(nsc "$@" --json 2>&1 | yqjson '(. // []) | .[].name')"
+  grep -qx "$name" <<<"$names"
+}
+```
+
+Command substitution (`$(...)`) waits for `nsc | yq` to run to completion and exit before assigning `$names` — there is no longer a live downstream reader that can exit early and `SIGPIPE` anything upstream. `grep` then runs alone, against a static string, with nothing left to race.
+
+### Verification
+
+Before the fix: 2 failures in a tight loop of 5 reruns against the fully-populated (21-identity) store, at two different identities, plus one hang — matching the intermittent, non-deterministic signature described above. After the fix: **7 consecutive reruns, 0 failures, 0 hangs** (2 individually observed clean, then 5 more in a single batch, all exit 0) — confirmed via each run's own captured log showing zero `broken pipe`/`Error:` lines, not just a clean process exit code. Every identity ended up in its correct, expected `already exists, skipping add` state on every rerun.
+
+### Scope
+
+Fixes the idempotency-check race in `bootstrap_auth.sh` specifically. Does **not** change anything about the identities/permissions the script provisions, and doesn't touch `bootstrap_jetstream.sh` or `up.sh`'s own orchestration — neither showed the same live-pipe-with-early-exit pattern on inspection.
 
 ---
 

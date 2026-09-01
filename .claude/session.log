@@ -30357,3 +30357,1081 @@ M4 (optional) — a short "what this demo is/isn't" disclaimer note.
 Exit criteria: M1's table is exact, M2 exists, M3's claims are all backed by real captured output. Ready for "Proceed with Track M" whenever you want to move on it.
 
 ================= Phase 5 Planning Complete =======================
+
+proceed with Track M
+Read Design.md (lines 365-378)
+Bash
+IN
+grep -rn "JETCORE_LOG_LEVEL" --include="*.py" --include="*.yml" . 2>/dev/null | grep -v ".git"
+
+OUT
+libs/jetcore/tests/test_config.py:97:    _env(monkeypatch, creds_file, JETCORE_LOG_LEVEL="VERBOSE")
+libs/jetcore/jetcore/config.py:23:  log_level        JETCORE_LOG_LEVEL        — defaults to INFO
+Edit Design.md
+Added 5 lines
+Bash
+IN
+docker compose ps --format "table {{.Name}}\t{{.Status}}"
+
+OUT
+NAME                             STATUS
+jetcore-db-adapter-mysql-1       Up 11 hours
+jetcore-file-storage-adapter-1   Up 11 hours
+jetcore-http-adapter-1           Up 11 hours
+jetcore-mysql-1                  Up 11 hours
+jetcore-nats-1                   Up 11 hours
+jetcore-rest-api-service-1       Up 11 hours
+jetcore-webhook-listener-1       Up 11 hours
+jetcore-webhook-sender-1         Up 11 hours
+AskUserQuestion
+OUT
+Your questions have been answered: "M3 (as scoped in Design.md) calls for running the demo walkthrough against a clean stack via `docker compose down -v`, which wipes the mysql-data and nats-data volumes (all MySQL rows, NATS JetStream state) before rebuilding fresh — mirroring L6's rigor. That's more disruptive to your running dev stack than L6's stop/restart was. How should I proceed?"="Full clean teardown (as scoped)". You can now continue with these answers in mind.
+Bash
+IN
+cat infra/nats/up.sh
+
+OUT
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra/nats/up.sh
+# Phase 1, Step A6 (Design.md §11 Track A)
+#
+# Orchestrates bringing the infra-only bus up in the order Compose alone
+# can't express (see the comment at the top of docker-compose.yml for why
+# this isn't wired in as Compose services with depends_on):
+#   1. bootstrap_auth.sh (A3)       — must run BEFORE `nats` starts, since
+#      nats-server.conf `include`s the resolver.conf this generates.
+#   2. docker compose up -d nats
+#   3. wait for the server to actually accept authenticated connections —
+#      the nats:2.14.5 image has no shell at all (confirmed: `sh` isn't
+#      found), so a Compose-native HEALTHCHECK isn't viable; checked
+#      externally instead, with the same nats-box tooling used throughout
+#      Phase 1 testing.
+#   4. bootstrap_jetstream.sh (A5)  — needs a live, authenticated server.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+NATS_BOX_IMAGE="natsio/nats-box:0.19.7-nonroot"
+COMPOSE_NETWORK="jetcore_default"   # matches docker-compose.yml's `name: jetcore`
+CREDS_DIR="$SCRIPT_DIR/operator/creds"
+
+echo "== Step A3: auth bootstrap =="
+bash "$SCRIPT_DIR/bootstrap_auth.sh"
+
+echo "== Starting nats service =="
+(cd "$REPO_ROOT" && docker compose up -d nats)
+
+echo "== Waiting for nats to accept authenticated connections =="
+ready=0
+for _ in $(seq 1 30); do
+  if docker run --rm --network "$COMPOSE_NETWORK" \
+    -v "$CREDS_DIR:/creds:ro" \
+    "$NATS_BOX_IMAGE" \
+    nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+    server check connection >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 1
+done
+if [ "$ready" -ne 1 ]; then
+  echo "nats did not become ready within 30s — check: docker compose logs nats" >&2
+  exit 1
+fi
+echo "nats is ready"
+
+echo "== Step A5: JetStream objects =="
+NATS_URL="nats://nats:4222" DOCKER_NETWORK="$COMPOSE_NETWORK" bash "$SCRIPT_DIR/bootstrap_jetstream.sh"
+
+echo "Done — infra is up. Try: docker compose logs -f nats"
+Bash
+IN
+docker compose down -v 2>&1 | tail -30
+
+OUT
+ Container jetcore-webhook-listener-1 Removed 
+ Container jetcore-rest-api-service-1 Stopped 
+ Container jetcore-rest-api-service-1 Removing 
+ Container jetcore-rest-api-service-1 Removed 
+ Container jetcore-file-storage-adapter-1 Stopped 
+ Container jetcore-file-storage-adapter-1 Removing 
+ Container jetcore-file-storage-adapter-1 Removed 
+ Container jetcore-webhook-sender-1 Stopped 
+ Container jetcore-webhook-sender-1 Removing 
+ Container jetcore-webhook-sender-1 Removed 
+ Container jetcore-http-adapter-1 Stopped 
+ Container jetcore-http-adapter-1 Removing 
+ Container jetcore-http-adapter-1 Removed 
+ Container jetcore-db-adapter-mysql-1 Stopped 
+ Container jetcore-db-adapter-mysql-1 Removing 
+ Container jetcore-db-adapter-mysql-1 Removed 
+ Container jetcore-nats-1 Stopping 
+ Container jetcore-mysql-1 Stopping 
+ Container jetcore-nats-1 Stopped 
+ Container jetcore-nats-1 Removing 
+ Container jetcore-nats-1 Removed 
+ Container jetcore-mysql-1 Stopped 
+ Container jetcore-mysql-1 Removing 
+ Container jetcore-mysql-1 Removed 
+ Volume jetcore_mysql-data Removing 
+ Volume jetcore_nats-data Removing 
+ Network jetcore_default Removing 
+ Volume jetcore_mysql-data Removed 
+ Network jetcore_default Removed 
+ Volume jetcore_nats-data Removed
+Stack fully torn down. Now bringing it back up fresh:
+
+Bash
+IN
+bash infra/nats/up.sh 2>&1 | tail -40
+
+OUT
+[ OK ] added sub "events.orders.OrderCreated"
+[ OK ] added sub "$JS.API.>"
+[ OK ] added sub "_INBOX.>"
+[ OK ] added sub "$KV.service-directory.>"
+[ OK ] added sub "$KV.service-identity.>"
+[ OK ] generated user creds file `/nsc/keys/creds/JetCoreServiceBus/JETCORE/webhook-sender-01.creds`
+[ OK ] edited user "webhook-sender-01"
+wrote /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/nats/operator/creds/webhook-sender-01.creds
+-- db-adapter-mysql-01 (database-adapter-mysql) --
+already exists, skipping add
+[ OK ] set max responses to 1
+[ OK ] added pub "events.db.orders.RowChanged"
+[ OK ] added pub "events.orders.OrderPersisted"
+[ OK ] added pub "$JS.API.>"
+[ OK ] added pub "$KV.service-directory.events.orders.OrderCreated.db-adapter-mysql-01"
+[ OK ] added pub "$KV.service-identity.db-adapter-mysql-01"
+[ OK ] added sub "events.orders.OrderCreated"
+[ OK ] added sub "$JS.API.>"
+[ OK ] added sub "_INBOX.>"
+[ OK ] added sub "$KV.service-directory.>"
+[ OK ] added sub "$KV.service-identity.>"
+[ OK ] generated user creds file `/nsc/keys/creds/JetCoreServiceBus/JETCORE/db-adapter-mysql-01.creds`
+[ OK ] edited user "db-adapter-mysql-01"
+wrote /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/nats/operator/creds/db-adapter-mysql-01.creds
+-- webhook-listener-01-test (webhook-listener) --
+already exists, skipping add
+[ OK ] set max responses to 1
+[ OK ] added pub "events.files.FileWriteRequested"
+[ OK ] added pub "$JS.API.>"
+[ OK ] added pub "$KV.service-identity.webhook-listener-01-test"
+[ OK ] added sub "$JS.API.>"
+[ OK ] added sub "_INBOX.>"
+[ OK ] added sub "$KV.service-directory.>"
+[ OK ] added sub "$KV.service-identity.>"
+[ OK ] generated user creds file `/nsc/keys/creds/JetCoreServiceBus/JETCORE/webhook-listener-01-test.creds`
+[ OK ] edited user "webhook-listener-01-test"
+wrote /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/nats/operator/creds/webhook-listener-01-test.creds
+-- file-storage-01-test (file-storage-adapter) --
+write /dev/stdout: broken pipe
+Error: the user "file-storage-01-test" already exists
+Bash
+IN
+docker compose ps --format "table {{.Name}}\t{{.Status}}" 2>&1
+
+OUT
+NAME      STATUS
+Bash
+IN
+bash infra/nats/up.sh > /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/nats-up.log 2>&1; echo "EXIT: $?"
+
+OUT
+EXIT: 1
+Bash
+IN
+tail -60 /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/nats-up.log
+
+OUT
+[ OK ] changed global max disk storage to 2000000000
+[ OK ] edited account "JETCORE"
+== Users (from /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/nats/adapter_identities.yaml) ==
+-- webhook-listener-01 (webhook-listener) --
+already exists, skipping add
+[ OK ] set max responses to 1
+[ OK ] added pub "events.files.FileWriteRequested"
+[ OK ] added pub "$JS.API.>"
+[ OK ] added pub "$KV.service-identity.webhook-listener-01"
+[ OK ] added sub "$JS.API.>"
+[ OK ] added sub "_INBOX.>"
+[ OK ] added sub "$KV.service-directory.>"
+[ OK ] added sub "$KV.service-identity.>"
+[ OK ] generated user creds file `/nsc/keys/creds/JetCoreServiceBus/JETCORE/webhook-listener-01.creds`
+[ OK ] edited user "webhook-listener-01"
+wrote /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/nats/operator/creds/webhook-listener-01.creds
+-- file-storage-01 (file-storage-adapter) --
+already exists, skipping add
+[ OK ] set max responses to 1
+[ OK ] added pub "events.files.FileCreateCompleted"
+[ OK ] added pub "events.files.FileWriteCompleted"
+[ OK ] added pub "events.files.FileReadCompleted"
+[ OK ] added pub "events.files.FileListCompleted"
+[ OK ] added pub "events.files.FileDeleteCompleted"
+[ OK ] added pub "events.files.FileOperationFailed"
+[ OK ] added pub "$JS.API.>"
+[ OK ] added pub "$KV.service-directory.events.files.FileWriteRequested.file-storage-01"
+[ OK ] added pub "$KV.service-directory.events.files.FileReadRequested.file-storage-01"
+[ OK ] added pub "$KV.service-directory.events.files.FileListRequested.file-storage-01"
+[ OK ] added pub "$KV.service-directory.events.files.FileDeleteRequested.file-storage-01"
+[ OK ] added pub "$KV.service-identity.file-storage-01"
+[ OK ] added sub "events.files.FileWriteRequested"
+[ OK ] added sub "events.files.FileReadRequested"
+[ OK ] added sub "events.files.FileListRequested"
+[ OK ] added sub "events.files.FileDeleteRequested"
+[ OK ] added sub "$JS.API.>"
+[ OK ] added sub "_INBOX.>"
+[ OK ] added sub "$KV.service-directory.>"
+[ OK ] added sub "$KV.service-identity.>"
+[ OK ] generated user creds file `/nsc/keys/creds/JetCoreServiceBus/JETCORE/file-storage-01.creds`
+[ OK ] edited user "file-storage-01"
+wrote /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/nats/operator/creds/file-storage-01.creds
+-- http-adapter-01 (http-adapter) --
+already exists, skipping add
+[ OK ] set max responses to 1
+[ OK ] added pub "events.http.RequestCompleted"
+[ OK ] added pub "$JS.API.>"
+[ OK ] added pub "$KV.service-directory.events.orders.OrderCreated.http-adapter-01"
+[ OK ] added pub "$KV.service-identity.http-adapter-01"
+[ OK ] added sub "events.orders.OrderCreated"
+[ OK ] added sub "$JS.API.>"
+[ OK ] added sub "_INBOX.>"
+[ OK ] added sub "$KV.service-directory.>"
+[ OK ] added sub "$KV.service-identity.>"
+[ OK ] generated user creds file `/nsc/keys/creds/JetCoreServiceBus/JETCORE/http-adapter-01.creds`
+[ OK ] edited user "http-adapter-01"
+wrote /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/nats/operator/creds/http-adapter-01.creds
+-- rest-api-service-01 (rest-api-service) --
+write /dev/stdout: broken pipe
+Error: the user "rest-api-service-01" already exists
+Read bootstrap_auth.sh
+This looks like a real, reproducible bug in bootstrap_auth.sh's idempotency check — not a fluke from my earlier tail piping. Let me confirm before jumping to a fix.
+
+Bash
+IN
+bash infra/nats/bootstrap_auth.sh > /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/auth2.log 2>&1; echo "EXIT: $?"; grep -n "already exists, skipping add\|Error:\|broken pipe" /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/auth2.log
+
+OUT
+EXIT: 0
+2:already exists, skipping add
+4:already exists, skipping add
+10:already exists, skipping add
+23:already exists, skipping add
+49:already exists, skipping add
+64:already exists, skipping add
+79:already exists, skipping add
+93:already exists, skipping add
+109:already exists, skipping add
+122:already exists, skipping add
+148:already exists, skipping add
+163:already exists, skipping add
+178:already exists, skipping add
+192:already exists, skipping add
+208:already exists, skipping add
+243:already exists, skipping add
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+for i in 1 2 3 4 5; do
+  bash infra/nats/bootstrap_auth.sh > /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/auth_run_$i.log 2>&1
+  echo "run $i exit: $?"
+done
+
+OUT
+Exit code 143
+Command timed out after 2m 0s
+run 1 exit: 1
+run 2 exit: 0
+run 3 exit: 0
+Bash
+IN
+grep -n "Error:\|broken pipe" /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/auth_run_1.log; echo ---; tail -5 /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/auth_run_4.log 2>/dev/null; echo ---; docker ps -a --format "{{.Names}} {{.Status}}" | grep -v "^jetcore-" 
+
+OUT
+148:write /dev/stdout: broken pipe
+149:Error: the user "http-adapter-01-test" already exists
+---
+[ OK ] changed global max mem storage to 256000000
+[ OK ] changed global max disk storage to 2000000000
+[ OK ] edited account "JETCORE"
+== Users (from /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/nats/adapter_identities.yaml) ==
+write /dev/stdout: broken pipe
+---
+exciting_shamir Exited (0) 8 days ago
+Bash
+IN
+docker ps --format "{{.ID}} {{.Image}} {{.Status}} {{.Command}}"
+
+OUT
+(Bash completed with no output)
+Confirmed reproducible — different identity fails each time (a live race, not a fixed bug at one spot), and one run even hung rather than erroring. Real bug, worth fixing properly. Let me document it and fix bootstrap_auth.sh's idempotency check.
+
+Read Defects.md
+Edit bootstrap_auth.sh
+Added 14 lines
+Now let's stress-test the fix with repeated runs — matching the script's own "3 consecutive runs" precedent:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+LOG_DIR="/tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad"
+for i in 1 2 3 4 5; do
+  bash infra/nats/bootstrap_auth.sh > "$LOG_DIR/fixed_run_$i.log" 2>&1
+  echo "run $i exit: $?"
+done
+
+OUT
+Exit code 143
+Command timed out after 2m 0s
+run 1 exit: 0
+run 2 exit: 0
+Bash
+IN
+LOG_DIR="/tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad"
+tail -15 "$LOG_DIR/fixed_run_3.log" 2>/dev/null; echo "---ps---"; docker ps -a --format "{{.Names}} {{.Status}} {{.Image}}" | grep -v "^jetcore-\|Exited"
+
+OUT
+[ OK ] added pub "$KV.service-directory.events.files.FileReadRequested.file-storage-01-test"
+[ OK ] added pub "$KV.service-directory.events.files.FileListRequested.file-storage-01-test"
+[ OK ] added pub "$KV.service-directory.events.files.FileDeleteRequested.file-storage-01-test"
+[ OK ] added pub "$KV.service-identity.file-storage-01-test"
+[ OK ] added sub "events.files.FileWriteRequested"
+[ OK ] added sub "events.files.FileReadRequested"
+[ OK ] added sub "events.files.FileListRequested"
+[ OK ] added sub "events.files.FileDeleteRequested"
+[ OK ] added sub "$JS.API.>"
+[ OK ] added sub "_INBOX.>"
+[ OK ] added sub "$KV.service-directory.>"
+[ OK ] added sub "$KV.service-identity.>"
+[ OK ] generated user creds file `/nsc/keys/creds/JetCoreServiceBus/JETCORE/file-storage-01-test.creds`
+[ OK ] edited user "file-storage-01-test"
+wrote /home/bherring/dev/clodhopper/JetCoreServiceBus/infra/nats/operator/creds/file-storage-01-test.creds
+---ps---
+That's just normal execution time, not a hang — 5 sequential runs doing dozens of docker run calls each takes a while. Let me give it more room.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+LOG_DIR="/tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad"
+for i in 3 4 5 6 7; do
+  bash infra/nats/bootstrap_auth.sh > "$LOG_DIR/fixed_run_$i.log" 2>&1
+  echo "run $i exit: $?"
+done
+
+OUT
+run 3 exit: 0
+run 4 exit: 0
+run 5 exit: 0
+run 6 exit: 0
+run 7 exit: 0
+5 more clean runs (7 total since the fix, all exit 0). Let's confirm there's no lingering "broken pipe" in any of the logs:
+
+Bash
+IN
+LOG_DIR="/tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad"
+grep -l "broken pipe\|Error:" "$LOG_DIR"/fixed_run_*.log 2>/dev/null; echo "done (empty = clean)"
+
+OUT
+done (empty = clean)
+Clean across all 7 runs. Now let me record this as Defect 4 in Defects.md:
+
+Edit Defects.md
+Added 1 line
+Edit Defects.md
+Added 54 lines
+Bash
+IN
+grep -c "serviceId:" infra/nats/adapter_identities.yaml
+
+OUT
+13
+Bash
+IN
+LOG_DIR="/tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad"
+grep -c "^-- " "$LOG_DIR/fixed_run_7.log"; echo ---; grep "^-- " "$LOG_DIR/fixed_run_7.log"
+
+OUT
+13
+---
+-- webhook-listener-01 (webhook-listener) --
+-- file-storage-01 (file-storage-adapter) --
+-- http-adapter-01 (http-adapter) --
+-- rest-api-service-01 (rest-api-service) --
+-- webhook-sender-01 (webhook-sender) --
+-- db-adapter-mysql-01 (database-adapter-mysql) --
+-- webhook-listener-01-test (webhook-listener) --
+-- file-storage-01-test (file-storage-adapter) --
+-- http-adapter-01-test (http-adapter) --
+-- rest-api-service-01-test (rest-api-service) --
+-- webhook-sender-01-test (webhook-sender) --
+-- db-adapter-mysql-01-test (database-adapter-mysql) --
+-- test-observer-01 (test-observer) --
+13 manifest identities + jetcore-admin = 14 total users, not 21. Let me correct that in the writeup:
+
+Edit Defects.md
+Edit failed
+Bash
+IN
+grep -n "usually well before\|21 identities\|15 real/test\|store with" Defects.md
+
+OUT
+183:**Found:** [Design.md §15 Step M3](Design.md#15-phase-5--detailed-breakdown), while rebuilding the stack from a genuine `docker compose down -v` teardown as part of writing the Phase 5 demo walkthrough — not something Step L6's own fresh-*clone* verification happened to hit, since a fresh clone's `operator/nsc` store starts empty rather than already populated with ~21 identities (the count that made this race reliably reproducible; see Root cause).
+200:`grep -qx` exits the instant it finds a matching line — which, for a store with ~21 identities, is usually well before `nsc`'s `docker run` has finished writing its full JSON listing. Closing `grep`'s stdin early sends `SIGPIPE` back up the pipe to `yq`, and potentially to `nsc` itself if `yq` was still mid-read when it died — surfacing as `nsc`'s own `write /dev/stdout: broken pipe` message (part of `nsc`'s `2>&1`-merged output, so it can itself get mistaken for part of the JSON `yq` is parsing). Under `set -o pipefail`, bash reports a pipeline's exit status as the *rightmost* command with a non-zero exit — so even though `grep` genuinely found the name (a true "yes, it exists"), a `SIGPIPE`-killed `yq` sitting to its left can make the whole `nsc_has` call report failure anyway. The `if nsc_has ...` guard then takes the `else` branch and calls `nsc add user` on an identity that already exists → the observed `Error: the user "..." already exists` abort. The hang (observed once, not reliably reproduced on demand) is consistent with the same race leaving one of the `docker run` processes in a state where it's not exiting cleanly on `SIGPIPE`, though the exact mechanism there wasn't isolated further — the fix removes the race entirely rather than needing to.
+202:This didn't surface earlier because it's a genuine race that gets *more* likely to fire as the JSON payload `nsc list users --json` produces grows — with only a handful of identities (Phase 1, when this script was written and "3 consecutive idempotent reruns" was verified per its own header comment), the whole listing fits well within a single pipe buffer and `nsc`/`yq` typically finish writing before `grep` ever reads far enough to match and exit. By Phase 3/4 the manifest has grown to 21 identities (15 real/test adapter identities + `jetcore-admin`, per [adapter_identities.yaml](infra/nats/adapter_identities.yaml)), large enough to make the race a real, frequent occurrence rather than a theoretical one.
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+python3 - <<'EOF'
+import re
+path = "Defects.md"
+with open(path) as f:
+    content = f.read()
+
+content = content.replace(
+    "since a fresh clone's `operator/nsc` store starts empty rather than already populated with ~21 identities (the count that made this race reliably reproducible; see Root cause).",
+    "since a fresh clone's `operator/nsc` store starts empty rather than already populated with all 14 identities (the count that made this race reliably reproducible; see Root cause)."
+)
+content = content.replace(
+    "`grep -qx` exits the instant it finds a matching line — which, for a store with ~21 identities, is usually well before `nsc`'s `docker run` has finished writing its full JSON listing.",
+    "`grep -qx` exits the instant it finds a matching line — which, for a store with 14 identities, is usually well before `nsc`'s `docker run` has finished writing its full JSON listing."
+)
+content = content.replace(
+    "By Phase 3/4 the manifest has grown to 21 identities (15 real/test adapter identities + `jetcore-admin`, per [adapter_identities.yaml](infra/nats/adapter_identities.yaml)), large enough to make the race a real, frequent occurrence rather than a theoretical one.",
+    "By Phase 3/4 the manifest has grown to 13 adapter identities (6 real + 6 `-test` twins, Defect 1's fix, + `test-observer-01`) plus `jetcore-admin` — 14 users total, per [adapter_identities.yaml](infra/nats/adapter_identities.yaml) — large enough to make the race a real, frequent occurrence rather than a theoretical one."
+)
+
+with open(path, "w") as f:
+    f.write(content)
+print("done")
+EOF
+
+OUT
+done
+Bash
+IN
+grep -n "14 identities\|13 adapter identities\|21 identities\|15 real/test" Defects.md
+
+OUT
+183:**Found:** [Design.md §15 Step M3](Design.md#15-phase-5--detailed-breakdown), while rebuilding the stack from a genuine `docker compose down -v` teardown as part of writing the Phase 5 demo walkthrough — not something Step L6's own fresh-*clone* verification happened to hit, since a fresh clone's `operator/nsc` store starts empty rather than already populated with all 14 identities (the count that made this race reliably reproducible; see Root cause).
+200:`grep -qx` exits the instant it finds a matching line — which, for a store with 14 identities, is usually well before `nsc`'s `docker run` has finished writing its full JSON listing. Closing `grep`'s stdin early sends `SIGPIPE` back up the pipe to `yq`, and potentially to `nsc` itself if `yq` was still mid-read when it died — surfacing as `nsc`'s own `write /dev/stdout: broken pipe` message (part of `nsc`'s `2>&1`-merged output, so it can itself get mistaken for part of the JSON `yq` is parsing). Under `set -o pipefail`, bash reports a pipeline's exit status as the *rightmost* command with a non-zero exit — so even though `grep` genuinely found the name (a true "yes, it exists"), a `SIGPIPE`-killed `yq` sitting to its left can make the whole `nsc_has` call report failure anyway. The `if nsc_has ...` guard then takes the `else` branch and calls `nsc add user` on an identity that already exists → the observed `Error: the user "..." already exists` abort. The hang (observed once, not reliably reproduced on demand) is consistent with the same race leaving one of the `docker run` processes in a state where it's not exiting cleanly on `SIGPIPE`, though the exact mechanism there wasn't isolated further — the fix removes the race entirely rather than needing to.
+202:This didn't surface earlier because it's a genuine race that gets *more* likely to fire as the JSON payload `nsc list users --json` produces grows — with only a handful of identities (Phase 1, when this script was written and "3 consecutive idempotent reruns" was verified per its own header comment), the whole listing fits well within a single pipe buffer and `nsc`/`yq` typically finish writing before `grep` ever reads far enough to match and exit. By Phase 3/4 the manifest has grown to 13 adapter identities (6 real + 6 `-test` twins, Defect 1's fix, + `test-observer-01`) plus `jetcore-admin` — 14 users total, per [adapter_identities.yaml](infra/nats/adapter_identities.yaml) — large enough to make the race a real, frequent occurrence rather than a theoretical one.
+Good, corrected. Now let's cross-link this in Design.md (§15 Step M3 should reference the defect) and finish standing up the stack for the actual demo walkthrough:
+
+Bash
+IN
+grep -n "M3\. Execute the walkthrough" Design.md
+
+OUT
+804:- [ ] **M3. Execute the walkthrough end to end, for real**, against a clean stack (`docker compose down -v` first, so it's provably not riding on state left over from months of manual testing — `infra/files/`'s existing `d5`/`e4`/notes/`proof` leftovers are exactly that kind of accumulated state, harmless since already git-ignored, but not what M2's documented output should be sourced from). Confirm each of the five effects actually occurs, capture the real output, fix the walkthrough if reality differs from the first draft.
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+bash infra/nats/up.sh 2>&1 | tail -20
+
+OUT
+            Bucket Name: service-identity
+           History Kept: 1
+          Values Stored: 0
+             Compressed: false
+  Per-Key TTL Supported: false
+     Backing Store Kind: JetStream
+            Bucket Size: 0 B
+    Maximum Bucket Size: unlimited
+     Maximum Value Size: unlimited
+            Maximum Age: unlimited
+       JetStream Stream: KV_service-identity
+                Storage: File
+
+Cluster Information:
+
+                   Name: 
+                 Leader: NBZRTRFZH2R5NX3EF72ODAI7UC46IQBLFOLW3LOB4LBKJCIRKT4HWPZF
+Done. Next: Step A6 wires everything into docker-compose.
+Done — infra is up. Try: docker compose logs -f nats
+NATS/JetStream is up fresh. Now bring up the full stack (mysql + all 6 adapters):
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+docker compose up -d --build 2>&1 | tail -25
+
+OUT
+ Volume jetcore_mysql-data Created 
+ Volume jetcore_mysql-data Created 
+ Container jetcore-mysql-1 Creating 
+ Container jetcore-webhook-listener-1 Created 
+ Container jetcore-webhook-sender-1 Created 
+ Container jetcore-http-adapter-1 Created 
+ Container jetcore-mysql-1 Created 
+ Container jetcore-db-adapter-mysql-1 Creating 
+ Container jetcore-rest-api-service-1 Created 
+ Container jetcore-file-storage-adapter-1 Created 
+ Container jetcore-db-adapter-mysql-1 Created 
+ Container jetcore-mysql-1 Starting 
+ Container jetcore-file-storage-adapter-1 Starting 
+ Container jetcore-webhook-listener-1 Starting 
+ Container jetcore-rest-api-service-1 Starting 
+ Container jetcore-http-adapter-1 Starting 
+ Container jetcore-webhook-sender-1 Starting 
+ Container jetcore-webhook-listener-1 Started 
+ Container jetcore-rest-api-service-1 Started 
+ Container jetcore-http-adapter-1 Started 
+ Container jetcore-webhook-sender-1 Started 
+ Container jetcore-file-storage-adapter-1 Started 
+ Container jetcore-mysql-1 Started 
+ Container jetcore-db-adapter-mysql-1 Starting 
+ Container jetcore-db-adapter-mysql-1 Started
+Now wait for MySQL to finish init.sql, then confirm everything's healthy:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+for i in $(seq 1 30); do
+  if docker compose exec -T mysql mysql -uroot -pdev-only-change-me jetcore -e "SELECT 1 FROM orders LIMIT 1" >/dev/null 2>&1; then
+    echo "mysql ready"
+    break
+  fi
+  sleep 2
+done
+sleep 5
+docker compose ps --format "table {{.Name}}\t{{.Status}}"
+
+OUT
+mysql ready
+NAME                             STATUS
+jetcore-db-adapter-mysql-1       Up 6 seconds
+jetcore-file-storage-adapter-1   Up 16 seconds
+jetcore-http-adapter-1           Up 16 seconds
+jetcore-mysql-1                  Up 16 seconds
+jetcore-nats-1                   Up 42 seconds
+jetcore-rest-api-service-1       Up 16 seconds
+jetcore-webhook-listener-1       Up 16 seconds
+jetcore-webhook-sender-1         Up 16 seconds
+Everything's up, fresh from nothing. Now let's run ./test.sh as a sanity check before doing the demo (matching the project's own practice), then execute the actual demo trigger:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+./test.sh -q 2>&1 | tail -20
+
+OUT
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/row_event.py:328: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    datetime.datetime.utcfromtimestamp(self.packet.read_int_be_by_size(4)),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+235 passed, 144 warnings in 55.26s
+==> Restarting adapter containers...
+ Container jetcore-nats-1 Running 
+ Container jetcore-mysql-1 Running 
+ Container jetcore-db-adapter-mysql-1 Starting 
+ Container jetcore-webhook-listener-1 Starting 
+ Container jetcore-http-adapter-1 Starting 
+ Container jetcore-webhook-sender-1 Starting 
+ Container jetcore-rest-api-service-1 Starting 
+ Container jetcore-file-storage-adapter-1 Starting 
+ Container jetcore-webhook-sender-1 Started 
+ Container jetcore-http-adapter-1 Started 
+ Container jetcore-rest-api-service-1 Started 
+ Container jetcore-webhook-listener-1 Started 
+ Container jetcore-db-adapter-mysql-1 Started 
+ Container jetcore-file-storage-adapter-1 Started
+235/235 passing from the fresh stack, and adapters restarted cleanly. Now let's execute the actual demo trigger and observe the fan-out:
+
+Bash
+IN
+sleep 3
+curl -s -X POST 'http://localhost:8081/api/orders?wait=5' \
+  -H 'Content-Type: application/json' \
+  -d '{"orderId": "order-demo-1", "item": "widget", "quantity": 3}' \
+  -w '\nHTTP_STATUS:%{http_code}\n'
+
+OUT
+{"orderId": "order-demo-1", "status": "persisted", "occurredAt": "2026-09-01T03:46:58.229060Z"}
+HTTP_STATUS:200
+Real synchronous OrderPersisted reply. Now let's check the other four effects: the MySQL row, the CDC RowChanged, the relayed file write, and the HTTP Adapter's outbound call.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+echo "--- MySQL row (Database Adapter write path) ---"
+docker compose exec -T mysql mysql -uroot -pdev-only-change-me jetcore -e "SELECT * FROM orders WHERE order_id='order-demo-1'\G"
+echo "--- File Storage Adapter's written file (via Webhook Sender -> Webhook Listener relay) ---"
+sleep 2
+find infra/files -newer Defects.md -type f 2>/dev/null
+echo "--- webhook-sender log tail ---"
+docker compose logs --tail=15 webhook-sender
+echo "--- webhook-listener log tail ---"
+docker compose logs --tail=15 webhook-listener
+echo "--- file-storage-adapter log tail ---"
+docker compose logs --tail=15 file-storage-adapter
+echo "--- db-adapter-mysql log tail (CDC RowChanged) ---"
+docker compose logs --tail=20 db-adapter-mysql
+echo "--- http-adapter log tail ---"
+docker compose logs --tail=15 http-adapter
+
+OUT
+--- MySQL row (Database Adapter write path) ---
+mysql: [Warning] Using a password on the command line interface can be insecure.
+*************************** 1. row ***************************
+  order_id: order-demo-1
+      item: widget
+  quantity: 3
+created_at: 2026-09-01 03:46:58
+updated_at: 2026-09-01 03:46:58
+--- File Storage Adapter's written file (via Webhook Sender -> Webhook Listener relay) ---
+infra/files/orders/relayed.json
+--- webhook-sender log tail ---
+webhook-sender-1  | INFO:__main__:webhook sender started (service_id=webhook-sender-01, subjects=['events.orders.OrderCreated'], target_url=http://webhook-listener:8080/webhooks/orders/relayed.json)
+webhook-sender-1  | INFO:__main__:received SIGTERM, shutting down
+webhook-sender-1  | INFO:__main__:webhook sender stopped
+webhook-sender-1  | INFO:__main__:webhook sender started (service_id=webhook-sender-01, subjects=['events.orders.OrderCreated'], target_url=http://webhook-listener:8080/webhooks/orders/relayed.json)
+webhook-sender-1  | INFO:httpx:HTTP Request: POST http://webhook-listener:8080/webhooks/orders/relayed.json "HTTP/1.1 202 Accepted"
+--- webhook-listener log tail ---
+webhook-listener-1  | INFO:     Started server process [1]
+webhook-listener-1  | INFO:     Waiting for application startup.
+webhook-listener-1  | INFO:     Application startup complete.
+webhook-listener-1  | INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
+webhook-listener-1  | INFO:     Shutting down
+webhook-listener-1  | INFO:     Waiting for application shutdown.
+webhook-listener-1  | INFO:     Application shutdown complete.
+webhook-listener-1  | INFO:     Finished server process [1]
+webhook-listener-1  | INFO:     Started server process [1]
+webhook-listener-1  | INFO:     Waiting for application startup.
+webhook-listener-1  | INFO:     Application startup complete.
+webhook-listener-1  | INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
+webhook-listener-1  | INFO:     172.18.0.4:56628 - "POST /healthz HTTP/1.1" 405 Method Not Allowed
+webhook-listener-1  | INFO:     172.18.0.3:41598 - "POST /webhooks/orders/relayed.json HTTP/1.1" 202 Accepted
+--- file-storage-adapter log tail ---
+file-storage-adapter-1  | INFO:__main__:file storage adapter stopped
+file-storage-adapter-1  | INFO:__main__:file storage adapter started (service_id=file-storage-01, watch_dir=/data)
+file-storage-adapter-1  | ERROR:jetcore.bus_client:failed to process message on events.files.FileWriteRequested, leaving unacked for redelivery
+file-storage-adapter-1  | Traceback (most recent call last):
+file-storage-adapter-1  |   File "/app/libs/jetcore/jetcore/bus_client.py", line 321, in fetch
+file-storage-adapter-1  |     received.append(await self._process(msg))
+file-storage-adapter-1  |                     ^^^^^^^^^^^^^^^^^^^^^^^^
+file-storage-adapter-1  |   File "/app/libs/jetcore/jetcore/bus_client.py", line 334, in _process
+file-storage-adapter-1  |     plaintext = decrypt(ciphertext, self._encryption_keypair.private_key)
+file-storage-adapter-1  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+file-storage-adapter-1  |   File "/app/libs/jetcore/jetcore/crypto.py", line 87, in decrypt
+file-storage-adapter-1  |     return bytes(pyrage.decrypt(ciphertext, [identity]))
+file-storage-adapter-1  |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+file-storage-adapter-1  | pyrage.DecryptError: No matching keys found
+file-storage-adapter-1  | INFO:watchfiles.main:2 changes detected
+--- db-adapter-mysql log tail (CDC RowChanged) ---
+db-adapter-mysql-1  |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+db-adapter-mysql-1  |   File "/app/.venv/lib/python3.12/site-packages/pymysql/connections.py", line 372, in __init__
+db-adapter-mysql-1  |     self.connect()
+db-adapter-mysql-1  |   File "/app/.venv/lib/python3.12/site-packages/pymysql/connections.py", line 744, in connect
+db-adapter-mysql-1  |     raise exc
+db-adapter-mysql-1  | pymysql.err.OperationalError: (2003, "Can't connect to MySQL server on 'mysql' ([Errno 111] Connection refused)")
+db-adapter-mysql-1  | INFO:__main__:database adapter started (service_id=db-adapter-mysql-01)
+db-adapter-mysql-1  | INFO:pymysqlreplication:only_tables: ['orders']
+db-adapter-mysql-1  | INFO:pymysqlreplication:only_schemas: ['jetcore']
+db-adapter-mysql-1  | INFO:pymysqlreplication:enable_logging: True
+db-adapter-mysql-1  | INFO:pymysqlreplication:allowed_events_in_packet: frozenset({<class 'pymysqlreplication.row_event.TableMapEvent'>, <class 'pymysqlreplication.row_event.UpdateRowsEvent'>, <class 'pymysqlreplication.event.FormatDescriptionEvent'>, <class 'pymysqlreplication.row_event.WriteRowsEvent'>, <class 'pymysqlreplication.event.RotateEvent'>, <class 'pymysqlreplication.row_event.DeleteRowsEvent'>})
+db-adapter-mysql-1  | INFO:pymysqlreplication:server_id: 100
+db-adapter-mysql-1  | INFO:__main__:received SIGTERM, shutting down
+db-adapter-mysql-1  | INFO:__main__:database adapter stopped
+db-adapter-mysql-1  | INFO:__main__:database adapter started (service_id=db-adapter-mysql-01)
+db-adapter-mysql-1  | INFO:pymysqlreplication:only_tables: ['orders']
+db-adapter-mysql-1  | INFO:pymysqlreplication:only_schemas: ['jetcore']
+db-adapter-mysql-1  | INFO:pymysqlreplication:enable_logging: True
+db-adapter-mysql-1  | INFO:pymysqlreplication:allowed_events_in_packet: frozenset({<class 'pymysqlreplication.row_event.TableMapEvent'>, <class 'pymysqlreplication.row_event.UpdateRowsEvent'>, <class 'pymysqlreplication.event.FormatDescriptionEvent'>, <class 'pymysqlreplication.row_event.WriteRowsEvent'>, <class 'pymysqlreplication.event.RotateEvent'>, <class 'pymysqlreplication.row_event.DeleteRowsEvent'>})
+db-adapter-mysql-1  | INFO:pymysqlreplication:server_id: 100
+--- http-adapter log tail ---
+http-adapter-1  | INFO:__main__:http adapter started (service_id=http-adapter-01, subjects=['events.orders.OrderCreated'], target_base_url=http://webhook-listener:8080/healthz)
+http-adapter-1  | INFO:__main__:received SIGTERM, shutting down
+http-adapter-1  | INFO:__main__:http adapter stopped
+http-adapter-1  | INFO:__main__:http adapter started (service_id=http-adapter-01, subjects=['events.orders.OrderCreated'], target_base_url=http://webhook-listener:8080/healthz)
+http-adapter-1  | INFO:httpx:HTTP Request: POST http://webhook-listener:8080/healthz "HTTP/1.1 405 Method Not Allowed"
+That's a real error worth investigating before I write it into the walkthrough. Let me check whether it's a fresh, reproducible bug or the known §9-item-#4 restart-timing gap already on record.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+docker compose logs --timestamps webhook-listener --since 2026-09-01T03:46:00 2>&1 | tail -10
+echo "==="
+docker compose logs --timestamps file-storage-adapter --since 2026-09-01T03:46:00 2>&1 | tail -20
+echo "==="
+docker compose logs --timestamps db-adapter-mysql --since 2026-09-01T03:46:00 2>&1 | grep -i "RowChanged\|CDC\|publish" | tail -10
+
+OUT
+===
+===
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+date -u
+echo "==="
+docker compose logs --timestamps webhook-listener 2>&1 | tail -8
+echo "==="
+docker compose logs --timestamps file-storage-adapter 2>&1 | tail -15
+
+OUT
+Tue Sep  1 03:48:12 AM UTC 2026
+===
+webhook-listener-1  | 2026-09-01T03:45:48.083812942Z INFO:     Application shutdown complete.
+webhook-listener-1  | 2026-09-01T03:45:48.083845483Z INFO:     Finished server process [1]
+webhook-listener-1  | 2026-09-01T03:46:51.526778270Z INFO:     Started server process [1]
+webhook-listener-1  | 2026-09-01T03:46:51.526816922Z INFO:     Waiting for application startup.
+webhook-listener-1  | 2026-09-01T03:46:51.572953687Z INFO:     Application startup complete.
+webhook-listener-1  | 2026-09-01T03:46:51.573163250Z INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
+webhook-listener-1  | 2026-09-01T03:46:58.252596331Z INFO:     172.18.0.4:56628 - "POST /healthz HTTP/1.1" 405 Method Not Allowed
+webhook-listener-1  | 2026-09-01T03:46:58.260868543Z INFO:     172.18.0.3:41598 - "POST /webhooks/orders/relayed.json HTTP/1.1" 202 Accepted
+===
+file-storage-adapter-1  | 2026-09-01T03:47:21.139403566Z     return bytes(pyrage.decrypt(ciphertext, [identity]))
+file-storage-adapter-1  | 2026-09-01T03:47:21.139407894Z                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+file-storage-adapter-1  | 2026-09-01T03:47:21.139412232Z pyrage.DecryptError: No matching keys found
+file-storage-adapter-1  | 2026-09-01T03:47:51.140398261Z ERROR:jetcore.bus_client:failed to process message on events.files.FileWriteRequested, leaving unacked for redelivery
+file-storage-adapter-1  | 2026-09-01T03:47:51.140427867Z Traceback (most recent call last):
+file-storage-adapter-1  | 2026-09-01T03:47:51.140445881Z   File "/app/libs/jetcore/jetcore/bus_client.py", line 321, in fetch
+file-storage-adapter-1  | 2026-09-01T03:47:51.140448205Z     received.append(await self._process(msg))
+file-storage-adapter-1  | 2026-09-01T03:47:51.140450149Z                     ^^^^^^^^^^^^^^^^^^^^^^^^
+file-storage-adapter-1  | 2026-09-01T03:47:51.140452122Z   File "/app/libs/jetcore/jetcore/bus_client.py", line 334, in _process
+file-storage-adapter-1  | 2026-09-01T03:47:51.140454126Z     plaintext = decrypt(ciphertext, self._encryption_keypair.private_key)
+file-storage-adapter-1  | 2026-09-01T03:47:51.140456060Z                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+file-storage-adapter-1  | 2026-09-01T03:47:51.140458014Z   File "/app/libs/jetcore/jetcore/crypto.py", line 87, in decrypt
+file-storage-adapter-1  | 2026-09-01T03:47:51.140460007Z     return bytes(pyrage.decrypt(ciphertext, [identity]))
+file-storage-adapter-1  | 2026-09-01T03:47:51.140461921Z                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+file-storage-adapter-1  | 2026-09-01T03:47:51.140463834Z pyrage.DecryptError: No matching keys found
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+docker compose logs --timestamps file-storage-adapter 2>&1 | grep -n "started\|DecryptError\|redelivery" 
+
+OUT
+1:file-storage-adapter-1  | 2026-09-01T03:45:28.545925699Z INFO:__main__:file storage adapter started (service_id=file-storage-01, watch_dir=/data)
+4:file-storage-adapter-1  | 2026-09-01T03:46:51.106260959Z INFO:__main__:file storage adapter started (service_id=file-storage-01, watch_dir=/data)
+5:file-storage-adapter-1  | 2026-09-01T03:46:51.137968917Z ERROR:jetcore.bus_client:failed to process message on events.files.FileWriteRequested, leaving unacked for redelivery
+16:file-storage-adapter-1  | 2026-09-01T03:46:51.138050450Z pyrage.DecryptError: No matching keys found
+18:file-storage-adapter-1  | 2026-09-01T03:47:21.139330789Z ERROR:jetcore.bus_client:failed to process message on events.files.FileWriteRequested, leaving unacked for redelivery
+29:file-storage-adapter-1  | 2026-09-01T03:47:21.139412232Z pyrage.DecryptError: No matching keys found
+30:file-storage-adapter-1  | 2026-09-01T03:47:51.140398261Z ERROR:jetcore.bus_client:failed to process message on events.files.FileWriteRequested, leaving unacked for redelivery
+41:file-storage-adapter-1  | 2026-09-01T03:47:51.140463834Z pyrage.DecryptError: No matching keys found
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+ls -la --time-style=full-iso infra/files/orders/relayed.json 2>/dev/null
+cat infra/files/orders/relayed.json 2>/dev/null
+echo "---current time---"
+date -u
+
+OUT
+-rw-r--r-- 1 bherring bherring 60 2026-08-31 20:46:58.262805605 -0700 infra/files/orders/relayed.json
+{"orderId": "order-demo-1", "item": "widget", "quantity": 3}---current time---
+Tue Sep  1 03:48:32 AM UTC 2026
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+docker compose logs db-adapter-mysql 2>&1 | grep -i "rowchanged\|cdc\|publish" | tail -10
+echo "---"
+grep -n "log\|RowChanged" adapters/db_adapter_mysql/db_adapter_mysql/cdc_watcher.py 2>/dev/null | head -20
+
+OUT
+db-adapter-mysql-1  |   File "/app/adapters/db_adapter_mysql/db_adapter_mysql/cdc_watcher.py", line 155, in run
+db-adapter-mysql-1  |   File "/app/adapters/db_adapter_mysql/db_adapter_mysql/cdc_watcher.py", line 105, in _run_stream
+db-adapter-mysql-1  |   File "/app/adapters/db_adapter_mysql/db_adapter_mysql/cdc_watcher.py", line 155, in run
+db-adapter-mysql-1  |   File "/app/adapters/db_adapter_mysql/db_adapter_mysql/cdc_watcher.py", line 105, in _run_stream
+db-adapter-mysql-1  |   File "/app/adapters/db_adapter_mysql/db_adapter_mysql/cdc_watcher.py", line 155, in run
+db-adapter-mysql-1  |   File "/app/adapters/db_adapter_mysql/db_adapter_mysql/cdc_watcher.py", line 105, in _run_stream
+db-adapter-mysql-1  |   File "/app/adapters/db_adapter_mysql/db_adapter_mysql/cdc_watcher.py", line 155, in run
+db-adapter-mysql-1  |   File "/app/adapters/db_adapter_mysql/db_adapter_mysql/cdc_watcher.py", line 105, in _run_stream
+---
+2:binlog for the `orders` table via `python-mysql-replication` and
+4:bypassing the bus entirely) to `events.db.orders.RowChanged`.
+11:     binlog event) cannot be interrupted by calling `.close()` from
+15:     real backlog), so this module polls in a loop and sleeps between
+28:No binlog read-position is persisted across restarts (an open item,
+30:keypair-persistence gap): with no explicit `log_file`/`log_pos`, a fresh
+31:`BinLogStreamReader` starts from the earliest binlog MySQL still retains,
+34:MySQL's own binlog retention); a real deployment would need to persist
+41:import logging
+51:logger = logging.getLogger(__name__)
+53:ROW_CHANGED_SUBJECT = "events.db.orders.RowChanged"
+79:        client.publish(ROW_CHANGED_SUBJECT, payload, event_type="RowChanged"), loop
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+docker compose logs db-adapter-mysql 2>&1 | tail -40
+
+OUT
+db-adapter-mysql-1  |     return future.result()
+db-adapter-mysql-1  |            ^^^^^^^^^^^^^^^
+db-adapter-mysql-1  |   File "/app/adapters/db_adapter_mysql/db_adapter_mysql/__main__.py", line 95, in main
+db-adapter-mysql-1  |     await run(client, settings=settings, shutdown=shutdown)
+db-adapter-mysql-1  |   File "/app/adapters/db_adapter_mysql/db_adapter_mysql/__main__.py", line 69, in run
+db-adapter-mysql-1  |     await asyncio.gather(
+db-adapter-mysql-1  |   File "/app/adapters/db_adapter_mysql/db_adapter_mysql/cdc_watcher.py", line 155, in run
+db-adapter-mysql-1  |     await asyncio.to_thread(_run_stream, self._client, self._settings, loop, self._shutdown)
+db-adapter-mysql-1  |   File "/usr/local/lib/python3.12/asyncio/threads.py", line 25, in to_thread
+db-adapter-mysql-1  |     return await loop.run_in_executor(None, func_call)
+db-adapter-mysql-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+db-adapter-mysql-1  |   File "/usr/local/lib/python3.12/concurrent/futures/thread.py", line 59, in run
+db-adapter-mysql-1  |     result = self.fn(*self.args, **self.kwargs)
+db-adapter-mysql-1  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+db-adapter-mysql-1  |   File "/app/adapters/db_adapter_mysql/db_adapter_mysql/cdc_watcher.py", line 105, in _run_stream
+db-adapter-mysql-1  |     for event in stream:
+db-adapter-mysql-1  |   File "/app/.venv/lib/python3.12/site-packages/pymysqlreplication/binlogstream.py", line 604, in fetchone
+db-adapter-mysql-1  |     self.__connect_to_stream()
+db-adapter-mysql-1  |   File "/app/.venv/lib/python3.12/site-packages/pymysqlreplication/binlogstream.py", line 366, in __connect_to_stream
+db-adapter-mysql-1  |     self._stream_connection = self.pymysql_wrapper(**self.__connection_settings)
+db-adapter-mysql-1  |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+db-adapter-mysql-1  |   File "/app/.venv/lib/python3.12/site-packages/pymysql/connections.py", line 372, in __init__
+db-adapter-mysql-1  |     self.connect()
+db-adapter-mysql-1  |   File "/app/.venv/lib/python3.12/site-packages/pymysql/connections.py", line 744, in connect
+db-adapter-mysql-1  |     raise exc
+db-adapter-mysql-1  | pymysql.err.OperationalError: (2003, "Can't connect to MySQL server on 'mysql' ([Errno 111] Connection refused)")
+db-adapter-mysql-1  | INFO:__main__:database adapter started (service_id=db-adapter-mysql-01)
+db-adapter-mysql-1  | INFO:pymysqlreplication:only_tables: ['orders']
+db-adapter-mysql-1  | INFO:pymysqlreplication:only_schemas: ['jetcore']
+db-adapter-mysql-1  | INFO:pymysqlreplication:enable_logging: True
+db-adapter-mysql-1  | INFO:pymysqlreplication:allowed_events_in_packet: frozenset({<class 'pymysqlreplication.row_event.TableMapEvent'>, <class 'pymysqlreplication.row_event.UpdateRowsEvent'>, <class 'pymysqlreplication.event.FormatDescriptionEvent'>, <class 'pymysqlreplication.row_event.WriteRowsEvent'>, <class 'pymysqlreplication.event.RotateEvent'>, <class 'pymysqlreplication.row_event.DeleteRowsEvent'>})
+db-adapter-mysql-1  | INFO:pymysqlreplication:server_id: 100
+db-adapter-mysql-1  | INFO:__main__:received SIGTERM, shutting down
+db-adapter-mysql-1  | INFO:__main__:database adapter stopped
+db-adapter-mysql-1  | INFO:__main__:database adapter started (service_id=db-adapter-mysql-01)
+db-adapter-mysql-1  | INFO:pymysqlreplication:only_tables: ['orders']
+db-adapter-mysql-1  | INFO:pymysqlreplication:only_schemas: ['jetcore']
+db-adapter-mysql-1  | INFO:pymysqlreplication:enable_logging: True
+db-adapter-mysql-1  | INFO:pymysqlreplication:allowed_events_in_packet: frozenset({<class 'pymysqlreplication.row_event.TableMapEvent'>, <class 'pymysqlreplication.row_event.UpdateRowsEvent'>, <class 'pymysqlreplication.event.FormatDescriptionEvent'>, <class 'pymysqlreplication.row_event.WriteRowsEvent'>, <class 'pymysqlreplication.event.RotateEvent'>, <class 'pymysqlreplication.row_event.DeleteRowsEvent'>})
+db-adapter-mysql-1  | INFO:pymysqlreplication:server_id: 100
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+  stream view EVENTS --subject "events.db.orders.RowChanged" 2>&1 | tail -30
+
+OUT
+nats: error: interactive stream paging requires a valid terminal
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+  stream info EVENTS --json 2>&1 | grep -i "messages\|first_seq\|last_seq"
+
+OUT
+    "messages": 3974,
+    "first_seq": 133,
+    "last_seq": 4106,
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+  sub "events.db.orders.RowChanged" --count=1 --timeout=15s > /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/rowchanged_sub.log 2>&1 &
+SUB_PID=$!
+sleep 2
+curl -s -X POST 'http://localhost:8081/api/orders?wait=5' \
+  -H 'Content-Type: application/json' \
+  -d '{"orderId": "order-demo-2", "item": "gadget", "quantity": 7}' \
+  -w '\nHTTP_STATUS:%{http_code}\n'
+wait $SUB_PID
+echo "--- sub output ---"
+cat /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/rowchanged_sub.log
+
+OUT
+[1]+  Exit 1                  docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds sub "events.db.orders.RowChanged" --count=1 --timeout=15s > /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/rowchanged_sub.log 2>&1
+{"orderId": "order-demo-2", "status": "persisted", "occurredAt": "2026-09-01T03:49:15.669183Z"}
+HTTP_STATUS:200
+--- sub output ---
+03:49:13 Subscribing on events.db.orders.RowChanged 
+nats: error: nats: permissions violation: Permissions Violation for Subscription to "events.db.orders.RowChanged"
+Bash
+IN
+grep -A 15 "test-observer-01" infra/nats/adapter_identities.yaml | head -20
+
+OUT
+  - serviceId: test-observer-01
+    adapterType: test-observer
+    description: >
+      Read-only observer used by integration tests to confirm an adapter's
+      published output actually appears on the bus with the expected
+      metadata (Design.md §12 Step C4 onward). Primarily subscribes to
+      result subjects — never triggers *real* adapter behavior on its own
+      initiative. Extend its subscribe list as new adapters' tests need to
+      observe new result subjects.
+
+      Also publishes the File Storage Adapter's read/list/delete request
+      subjects (Design.md §13 Step F6) — unlike FileWriteRequested
+      (webhook-listener-01, a real adapter), no real Phase 3 "front door"
+      publishes these yet (Track F is scoped to the File Storage
+      Adapter's own handling of them, not building one), so test suites
+      need a legitimate identity to trigger them with. Narrow, deliberate
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+ls "$CREDS_DIR" | grep observer
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/test-observer-01.creds \
+  sub "events.db.orders.RowChanged" --count=1 --timeout=15s > /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/rowchanged_sub2.log 2>&1 &
+SUB_PID=$!
+sleep 2
+curl -s -X POST 'http://localhost:8081/api/orders?wait=5' \
+  -H 'Content-Type: application/json' \
+  -d '{"orderId": "order-demo-3", "item": "sprocket", "quantity": 9}' \
+  -w '\nHTTP_STATUS:%{http_code}\n'
+wait $SUB_PID
+echo "--- sub output ---"
+cat /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/rowchanged_sub2.log
+
+OUT
+test-observer-01.creds
+[1]+  Done                    docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/test-observer-01.creds sub "events.db.orders.RowChanged" --count=1 --timeout=15s > /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/rowchanged_sub2.log 2>&1
+{"orderId": "order-demo-3", "status": "persisted", "occurredAt": "2026-09-01T03:49:29.296102Z"}
+HTTP_STATUS:200
+--- sub output ---
+03:49:27 Subscribing on events.db.orders.RowChanged 
+[#1] Received on "events.db.orders.RowChanged" with reply "_INBOX.EGGJ0dVf1G9aw0Ed9VjZJ0.EGGJ0dVf1G9aw0Ed9VlmWG22c5"
+{"event":{"eventDetails":{"eventId":"01a05b16-0ff4-7f3c-99f7-78436f6d5495","eventCreated":"2026-09-01T03:49:27.668160Z","eventType":"RowChanged","eventSchemaVersion":"1.0.0","sourceServiceId":"db-adapter-mysql-01","correlationId":null,"signature":"nbawiSasIvrIwS5tlQRdPCvlYx+lb2igGKrC2mpA0/QXwzIZxIsqNdg+lvSV3YY7w7pm/BXADNkkI3UMwC5xAQ==","sourcePublicKey":"UCUIP5YGUBT44ZQ7WQ2Y6GXWX5VUWJ5MCPY2XZAJZI3GQOEFRHY54V6J"},"encryption":{"algorithm":"age-v1 (X25519 + XChaCha20-Poly1305)","recipients":["age1ef39p342wjf9q204p6m2vplhywn9qaqzmk7hjxwzny5srt975uzswn3klr"]},"eventPayload":"YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBhaVZVT1ErNnhLalBzVHdkODlHdCtkUG5NaVA4bnRGSWZYZVQzNlo5cjNrCnpkUzRuYTRYeWdPOVN1VWU2TkpOSjM4T1QwQ0NYNFBNNStnN0R1Yk1zalUKLT4gQSR+aWFWLWdyZWFzZQpOWHRIS3UzYzRlOUEvVFgxdkhkV29SWGdRVTdvZmVPQ0VXUkxiS0J0UndXS1lRK0hVQUFXQmNHWXVNOEV6ckRJCkhDdGJ5bDZ0OGJxc0R5bDB6RklLQVEKLS0tIGI2R04zMzI0M09zZVdESjJSRWJkTHlYTU5RNU0rTE1KOEZwWjE4UGJzRHMKLaCoClnI294fRvciWmMCttGmJUWVJh69J3ZYOD3x4U6rXFO6LaPlc+4teupmShk9B+OMlOhyFFdWjAxZGijwJdWtJesenTZ0rM9YM9AQvY27AkJ9a46b+tnmZ4M/vQnsGldE1Sie9l81uZ+x3Z6KHMAG3qW0lH7Ge1trEMPwsb7Xh8o9xDWkQxDKQHxFGJ7ydlededxA9YseAnWhRJUmybTEOmsEA7mz13H2+cYiqFzeg7JzhQpn/CGEEXjVg5+jgWL5JILzlhydD/xM3kDwHurovKqRnDxwxAccoq8M3idEl0YHtYkCG35Z"}}
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+cat infra/files/orders/relayed.json
+echo
+echo "--- file-storage-adapter errors since restart, all of them ---"
+docker compose logs --timestamps file-storage-adapter 2>&1 | grep -c "DecryptError"
+echo "--- last 5 lines ---"
+docker compose logs --timestamps file-storage-adapter 2>&1 | tail -8
+
+OUT
+{"orderId": "order-demo-3", "item": "sprocket", "quantity": 9}
+--- file-storage-adapter errors since restart, all of them ---
+5
+--- last 5 lines ---
+file-storage-adapter-1  | 2026-09-01T03:48:51.143818154Z   File "/app/libs/jetcore/jetcore/crypto.py", line 87, in decrypt
+file-storage-adapter-1  | 2026-09-01T03:48:51.143855224Z     return bytes(pyrage.decrypt(ciphertext, [identity]))
+file-storage-adapter-1  | 2026-09-01T03:48:51.143861796Z                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+file-storage-adapter-1  | 2026-09-01T03:48:51.143868088Z pyrage.DecryptError: No matching keys found
+file-storage-adapter-1  | 2026-09-01T03:49:15.672539147Z WARNING:jetcore.bus_client:publishing to events.files.FileWriteCompleted with no registered recipients yet
+file-storage-adapter-1  | 2026-09-01T03:49:15.738357243Z INFO:watchfiles.main:1 change detected
+file-storage-adapter-1  | 2026-09-01T03:49:29.297733779Z WARNING:jetcore.bus_client:publishing to events.files.FileWriteCompleted with no registered recipients yet
+file-storage-adapter-1  | 2026-09-01T03:49:29.392726957Z INFO:watchfiles.main:1 change detected
+Now let me do one clean, complete capture with a single order ID, gathering all five effects together for the README walkthrough:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/test-observer-01.creds \
+  sub "events.db.orders.RowChanged" --count=1 --timeout=15s > /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/final_rowchanged.log 2>&1 &
+SUB_PID=$!
+sleep 2
+curl -s -X POST 'http://localhost:8081/api/orders?wait=5' \
+  -H 'Content-Type: application/json' \
+  -d '{"orderId": "order-42", "item": "widget", "quantity": 3}' \
+  -w '\nHTTP_STATUS:%{http_code}\n' | tee /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/final_curl.log
+wait $SUB_PID
+sleep 1
+echo "=== MySQL row ==="
+docker compose exec -T mysql mysql -uroot -pdev-only-change-me jetcore -e "SELECT order_id, item, quantity FROM orders WHERE order_id='order-42'\G" | tee /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/final_mysql.log
+echo "=== file written ==="
+cat infra/files/orders/relayed.json | tee /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/final_file.log
+echo
+echo "=== http-adapter's outbound call ==="
+docker compose logs --tail=3 http-adapter | tee /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/final_httpadapter.log
+
+OUT
+[1]+  Done                    docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot nats --server nats://nats:4222 --creds /creds/test-observer-01.creds sub "events.db.orders.RowChanged" --count=1 --timeout=15s > /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/final_rowchanged.log 2>&1
+{"orderId": "order-42", "status": "persisted", "occurredAt": "2026-09-01T03:50:02.979583Z"}
+HTTP_STATUS:200
+=== MySQL row ===
+mysql: [Warning] Using a password on the command line interface can be insecure.
+*************************** 1. row ***************************
+order_id: order-42
+    item: widget
+quantity: 3
+=== file written ===
+{"orderId": "order-42", "item": "widget", "quantity": 3}
+=== http-adapter's outbound call ===
+http-adapter-1  | INFO:httpx:HTTP Request: POST http://webhook-listener:8080/healthz "HTTP/1.1 405 Method Not Allowed"
+http-adapter-1  | INFO:httpx:HTTP Request: POST http://webhook-listener:8080/healthz "HTTP/1.1 405 Method Not Allowed"
+http-adapter-1  | INFO:httpx:HTTP Request: POST http://webhook-listener:8080/healthz "HTTP/1.1 405 Method Not Allowed"
+All five effects confirmed cleanly for one order ID. Let's check the captured RowChanged output:
+
+Bash
+IN
+cat /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/final_rowchanged.log
+
+OUT
+03:50:01 Subscribing on events.db.orders.RowChanged 
+[#1] Received on "events.db.orders.RowChanged" with reply "_INBOX.EGGJ0dVf1G9aw0Ed9VjZJ0.EGGJ0dVf1G9aw0Ed9VmJAc2326"
+{"event":{"eventDetails":{"eventId":"01a05b16-9325-73e3-be81-73da1d3e3c0c","eventCreated":"2026-09-01T03:50:01.253327Z","eventType":"RowChanged","eventSchemaVersion":"1.0.0","sourceServiceId":"db-adapter-mysql-01","correlationId":null,"signature":"nbawiSasIvrIwS5tlQRdPCvlYx+lb2igGKrC2mpA0/QXwzIZxIsqNdg+lvSV3YY7w7pm/BXADNkkI3UMwC5xAQ==","sourcePublicKey":"UCUIP5YGUBT44ZQ7WQ2Y6GXWX5VUWJ5MCPY2XZAJZI3GQOEFRHY54V6J"},"encryption":{"algorithm":"age-v1 (X25519 + XChaCha20-Poly1305)","recipients":["age1ef39p342wjf9q204p6m2vplhywn9qaqzmk7hjxwzny5srt975uzswn3klr"]},"eventPayload":"YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBrbnVRcTI4YWs4aml3cmZ0NUxSTnZodjRQWnQ4a1NOQ01vQUYvS1dnU3hZCjd3NlJqYW1KQ09wbEwvT0c5eERlNE5Pc1JMMXVUcE5ES3h6dXBmbzZ4YmcKLT4gcyZpcV0uXmktZ3JlYXNlIHhUICsgOVF0bydxIDNSCkcwZGJPQUMva1JhUkwvUUFaQUw2RVRsdUJuZnpqVmpMNzRhTkNrRjN2V1MvNUFFZ0xNdGl2dCszUjNKcENWQVcKK0F6ZitDcWFuUzU4cFVvVjNhYkxpajRIcTByYmE4WG1Scm5BU3A1dldYLzJrWHMKLS0tIElFa3BiOC93UXRWcktGVUp2TlN6UW95QVBRNEI2S1ByeFZPK3VYdkRhNHMKb0BQf4vbgCa9ru7iNed7OqOsyhoyMNChIyRT69+TY3wTGJx0LfDYsiZZYhlDVz5RDmxENw18MYI3XhCRqzZMedfhT3KlvTFXfuwrtjfVievu1AZyJOiZeIq/YQ05O/gIWOe5/Tq+MVi5W82U5kAc9ztbAezTnnDgjXEORwAqiCjw/AWHGE1//8AlW5de3xC75IN3/cfXeQGdFgvvmun1D46HJwmdu2+ZUKOBq5Ro/Y3YRCwfKoSMM4KGUQtyD+qwW1JIFuAtxTcVaVVPfjLsy2oGsUC8MBCOv5QM2wsMmBv6LV8gp6abTzUx"}}
+Now writing the actual README walkthrough (M2), using this real captured output:
+
+Read README.md (lines 45-54)
+Edit README.md
+Added 62 lines
+Let's add the small M4 disclaimer note too, since it's cheap:
+
+Edit README.md
+Added 2 lines
+Now let's update Design.md's Track M checklist with the real verification writeups, including the Defect 4 finding:
+
+Bash
+IN
+grep -n "### Track M\|M1\. Correct\|M2\. Write\|M3\. Execute\|M4 (optional\|Exit criteria.*M1" Design.md
+
+OUT
+800:### Track M — Demo Environment Finalization
+802:- [ ] **M1. Correct §7.6's table.** Replace the "preview, not a commitment" env-vars/ports/volumes table with the real thing, read directly off `docker-compose.yml` (all 6 adapters, not just the 2 that existed when the placeholder was written) — one row per service, no longer hedged as anticipated.
+803:- [ ] **M2. Write the demo walkthrough** — new `README.md` section: bring up the full stack (`infra/nats/up.sh` → `docker compose up -d --build`), one `curl -X POST http://localhost:8081/api/orders ...` (with and without `?wait=`), and where to look for each of the five resulting effects (file under `infra/files/`, MySQL row via a `SELECT`, the `OrderPersisted` reply body, log lines from Webhook Sender/HTTP Adapter/CDC showing they reacted). Every command and every piece of "expected output" copied from a real run, not written from memory of how it should behave.
+804:- [ ] **M3. Execute the walkthrough end to end, for real**, against a clean stack (`docker compose down -v` first, so it's provably not riding on state left over from months of manual testing — `infra/files/`'s existing `d5`/`e4`/notes/`proof` leftovers are exactly that kind of accumulated state, harmless since already git-ignored, but not what M2's documented output should be sourced from). Confirm each of the five effects actually occurs, capture the real output, fix the walkthrough if reality differs from the first draft.
+805:- [ ] **M4 (optional, not required to close this track).** A one-paragraph "what this demo is/isn't" note near the top of the walkthrough — every target URL is an in-network placeholder (Decision #14), every secret is a checked-in dev-only value, nothing here is a production deployment guide. Most of this is already said elsewhere in the repo (Decision #14 itself, individual compose comments); worth one consolidated pointer where a first-time reader actually lands, but not new information.
+807:**Exit criteria:** M1's table matches the real compose file exactly (line-by-line diffable, not eyeballed); M2's walkthrough exists; M3 has actually been run against a clean stack with real captured output backing every claimed effect in it. M4 is a nice-to-have, not a blocker.
+Edit Design.md
+Added 6 lines
+Let's do a final verification pass — confirm the whole stack is healthy and leave it in normal running state:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+docker compose ps --format "table {{.Name}}\t{{.Status}}"
+echo "---"
+./test.sh -q 2>&1 | tail -5
+
+OUT
+NAME                             STATUS
+jetcore-db-adapter-mysql-1       Up 4 minutes
+jetcore-file-storage-adapter-1   Up 4 minutes
+jetcore-http-adapter-1           Up 4 minutes
+jetcore-mysql-1                  Up 5 minutes
+jetcore-nats-1                   Up 6 minutes
+jetcore-rest-api-service-1       Up 4 minutes
+jetcore-webhook-listener-1       Up 4 minutes
+jetcore-webhook-sender-1         Up 4 minutes
+---
+ Container jetcore-file-storage-adapter-1 Started 
+ Container jetcore-rest-api-service-1 Started 
+ Container jetcore-db-adapter-mysql-1 Started 
+ Container jetcore-http-adapter-1 Started 
+ Container jetcore-webhook-sender-1 Started
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+./test.sh -q 2>&1 | grep -E "passed|failed|error"
+
+OUT
+235 passed, 948 warnings in 56.22s
+Track M (Phase 5) is complete. Here's what actually happened:
+
+M1 — §7.6's table fixed. Replaced the old "preview, not a commitment" placeholder with the real thing, read straight off docker-compose.yml: all 8 services, every env var/port/volume. Found one small honest discrepancy while doing it — JETCORE_LOG_LEVEL is a real, working config option nothing in compose actually sets (defaults to INFO everywhere).
+
+M2 — Demo walkthrough written (README.md § Running the demo): bring-up commands, then the one-request trigger — POST /api/orders?wait=5 — traced through all five things it fans out to (MySQL row, CDC RowChanged, the webhook-relayed file write, HTTP Adapter's outbound call, the sync OrderPersisted reply), every "expected output" block copy-pasted from a real run, not written from memory.
+
+M3 — Executed for real against a clean stack, and this is where it got interesting:
+
+docker compose down -v (wiping DB/JetStream data) → fresh infra/nats/up.sh → hit a real bug: bootstrap_auth.sh's idempotency check intermittently aborted or hung on a rerun, at a different identity each time. Root cause: a 3-stage shell pipe (nsc | yq | grep -q) where grep's early exit on match could SIGPIPE the upstream commands, and pipefail could then report the whole check as "failed" even when it genuinely found the identity. Only became reliably reproducible once the identity manifest grew to 14 entries. Fixed (materialize output before grepping instead of a live pipe), verified with 7 clean reruns, written up in full as Defects.md Defect 4.
+Also saw a handful of DecryptError log lines from File Storage Adapter right after a restart — checked the timestamps, confirmed it was a message queued before the restart, exactly the already-known, deliberately-deferred §9 item #4 gap (encryption keypair isn't stable across restarts), not a new bug. Self-resolved after exactly 5 delivery attempts. Noted in README as a heads-up rather than filed as a new defect.
+Three real POST /api/orders calls, ./test.sh -q → 235/235 passing.
+M4 — added the short "this is a demo, not a deployment guide" disclaimer.
+
+Stack is left healthy and running (just re-verified: all 8 containers up, 235/235 tests passing). Design.md §15 and Defects.md are both updated to match reality, not aspiration.
+
+------------------ Track M Completed --------------------
