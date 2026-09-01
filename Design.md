@@ -363,15 +363,20 @@ Architectural rationale for each choice is below; **version pins, release dates,
 
 ### 7.6 Environment properties (docker-compose)
 
-Full documentation of each service's ports/volumes/env vars happens when `docker-compose.yml` is actually authored (§10 Phase 5), but the anticipated shape, per [DevelopmentGuidelines.md](DevelopmentGuidelines.md)'s "document environment properties" requirement:
+Per [DevelopmentGuidelines.md](DevelopmentGuidelines.md)'s "document environment properties" requirement. Read directly off the real [docker-compose.yml](docker-compose.yml) (Design.md §15 Step M1) — every row below is what the file actually says, not an anticipated shape.
 
-| Service | Anticipated env vars | Ports | Volumes |
+| Service | Env vars | Ports | Volumes |
 |---|---|---|---|
-| `nats` | — (config-file driven) | `4222` (client), `8222` (monitoring) | JetStream store dir; `infra/nats/` config + resolver |
-| `mysql` | `MYSQL_ROOT_PASSWORD`, `MYSQL_DATABASE`, binlog settings via `my.cnf` mount | `3306` | data dir; `infra/mysql/init.sql` |
-| each adapter | `JETCORE_SERVICE_ID`, `JETCORE_NATS_CREDS_PATH`, `JETCORE_NATS_URL`, `JETCORE_SUBJECTS`, `JETCORE_LOG_LEVEL` (via `config.py`, §7.1) | adapter-specific (e.g. `8080` for REST API Service / Webhook Listener) | none by default; File Storage Adapter additionally mounts a data volume |
+| `nats` | — (config-file driven) | `4222` (client), `8222` (monitoring) | `nats-server.conf`, `resolver.conf` (ro); `nats-data` (JetStream store) |
+| `mysql` | `MYSQL_ROOT_PASSWORD`, `MYSQL_DATABASE` (binlog settings come from the `my.cnf` mount, not env) | `3306` (dev convenience only — no adapter needs it, they use the `mysql` network alias) | `infra/mysql/my.cnf` (ro), `infra/mysql/init.sql` (ro, first-start only); `mysql-data` |
+| `webhook-listener` | `JETCORE_SERVICE_ID`, `JETCORE_NATS_URL`, `JETCORE_NATS_CREDS_PATH`, `JETCORE_WEBHOOK_SECRET`, `JETCORE_HTTP_PORT` | `8080` | `.creds` file (ro) |
+| `file-storage-adapter` | `JETCORE_SERVICE_ID`, `JETCORE_NATS_URL`, `JETCORE_NATS_CREDS_PATH`, `JETCORE_WATCH_DIR` | — | `.creds` file (ro); `infra/files:/data` (read-write, its own watch dir) |
+| `webhook-sender` | `JETCORE_SERVICE_ID`, `JETCORE_NATS_URL`, `JETCORE_NATS_CREDS_PATH`, `JETCORE_SUBJECTS`, `JETCORE_TARGET_URL`, `JETCORE_OUTBOUND_SECRET` | — | `.creds` file (ro) |
+| `http-adapter` | `JETCORE_SERVICE_ID`, `JETCORE_NATS_URL`, `JETCORE_NATS_CREDS_PATH`, `JETCORE_SUBJECTS`, `JETCORE_TARGET_BASE_URL` | — | `.creds` file (ro) |
+| `rest-api-service` | `JETCORE_SERVICE_ID`, `JETCORE_NATS_URL`, `JETCORE_NATS_CREDS_PATH`, `JETCORE_HTTP_PORT` | `8081:8080` (8080 was already taken by `webhook-listener`) | `.creds` file (ro) |
+| `db-adapter-mysql` | `JETCORE_SERVICE_ID`, `JETCORE_NATS_URL`, `JETCORE_NATS_CREDS_PATH`, `JETCORE_MYSQL_HOST`, `JETCORE_MYSQL_WRITE_USER`/`_PASSWORD`, `JETCORE_MYSQL_CDC_USER`/`_PASSWORD` | — | `.creds` file (ro) |
 
-This table is a preview, not a commitment — it will be corrected/expanded against the real compose file once written.
+One env var from `config.py`'s own shared schema (§7.1) is **not** set by any service above: `JETCORE_LOG_LEVEL`. It's real and honored (defaults to `INFO`) — just never overridden in this compose file, confirmed by checking rather than assumed missing.
 
 ---
 
@@ -414,7 +419,7 @@ Item #4 in the original numbering here (the sender-authentication gap found in S
 3. **Phase 2** — One vertical slice end-to-end to prove the pattern: **Webhook Listener → File Storage Adapter** (inbound HTTP → encrypted+signed publish of a `FileWriteRequested` command → File Storage Adapter decrypts, verifies signature, writes the file, publishes a result event). Wire into `docker-compose`.
 4. **Phase 3** — Remaining adapters (HTTP Adapter, REST API Service, Webhook Sender, Database Adapter — including its CDC read path per Decision #10; nail down the File Storage Adapter's full command/response schema).
 5. **Phase 4** — Hardening: GitHub Actions CI (ruff, mypy, pytest, bandit, pip-audit). Schema population and an integration-test infra decision were also originally scoped here — both turned out to already be settled by the time Phase 3 finished (§14's own intro explains what changed and why); Phase 4 is narrower in practice than planned here, not larger.
-6. **Phase 5** — Finalize `docker-compose.yml` as the complete local demo environment.
+6. **Phase 5** — Finalize `docker-compose.yml` as the complete local demo environment. The compose file itself turned out already complete by the time Phase 4 finished; §15's own intro explains what changed and why — Phase 5 is documentation/verification only, not new infra.
 
 ---
 
@@ -771,7 +776,41 @@ So Phase 4 is smaller than originally scoped, and different in character from Ph
 
 **Track L is complete, modulo L2's real-CI confirmation and the optional L7 — Phase 4 is complete in every way this session could actually verify.**
 
-**Exit criteria:** a real push to the GitHub repo from L1 triggers the L2 workflow, and every job passes — the actual proof, not "the YAML looks right." L4-L6 (schema audit, pre-commit, fresh-clone) don't strictly require L1-L3 to exist first and can be done in either order; L7 depends on L1-L2 both existing and is explicitly optional.
+---
+
+## 15. Phase 5 — Detailed Breakdown
+
+§10's original Phase 5 scope was "Finalize `docker-compose.yml` as the complete local demo environment." Checking that against what's actually true today, the way §14 did for Phase 4: `docker-compose.yml` itself is **already** a complete, working local environment — all 6 adapters plus `nats`/`mysql`, built across Steps E1 (Phase 2) and K2 (Phase 3), and just proven from a genuinely fresh clone in Step L6 (230/230 passing, zero reliance on this dev environment's own accumulated state). There is no missing service, no missing wiring, no unfinished container. Phase 5 is **not** "keep building the compose file" — that work is done.
+
+What's actually missing is narrower and different in kind: the compose file was built piecewise, one adapter pair at a time (Phase 2's Webhook Listener → File Storage Adapter slice, then Phase 3's four more adapters bolted on one Track at a time). Nobody has ever written down — or even deliberately walked — what the *whole wired mesh* does when exercised as one system. Two concrete gaps found while scoping this section, not assumed:
+
+- **§7.6 made a promise it never kept.** That section's env-vars/ports/volumes table is explicitly marked "a preview, not a commitment — it will be corrected/expanded against the real compose file once written" (§7.6, written at Phase 1). The real file has existed since Phase 2 and been stable since Phase 3; the table was never revisited.
+- **README has no demo walkthrough at all.** "Running the checks" (§ testing) is documented; actually bringing up the full stack and watching it do something is not — despite the compose file's own wiring already being a genuinely good demo. Tracing it out: a single `POST /api/orders` on REST API Service publishes `OrderCreated`, which fans out to **every other adapter at once** — Webhook Sender relays it to Webhook Listener, which converts it to `FileWriteRequested` for the File Storage Adapter to write; Database Adapter's write path upserts the row and replies with `OrderPersisted` (optionally synchronously, via REST API Service's own `?wait=` param); that same row change is picked up independently by Database Adapter's CDC path as `RowChanged`; HTTP Adapter also reacts to `OrderCreated` with its own outbound call. One HTTP request, six adapters, five distinct events — and nothing in the repo currently tells a reader that, or how to see it happen.
+
+So Phase 5 is one track, small and entirely documentation/verification — no new code, no new infra, matching Phase 4's own "smaller and different in character" pattern.
+
+**Parameters this breakdown settles:**
+
+| Parameter | Decision | Rationale |
+|---|---|---|
+| Where the walkthrough lives | A new `## Running the demo` section in `README.md`, not a separate `DEMO.md` | README is already this project's one entry point for "how do I run this thing" (setup, checks); a second file for "how do I run *this other* thing" fragments that without a real reason to split it. |
+| What the walkthrough demonstrates | The `POST /api/orders` fan-out traced above — one trigger touching all 6 adapters — rather than one flow per adapter pair | Phases 2/3 already exercised each adapter individually in tests; the thing genuinely missing is the *whole-mesh* view, which is also what makes this worth calling a "demo" instead of just "instructions." |
+| How each step is confirmed | Real commands against a real running stack (`curl`, `docker compose logs`, inspecting `infra/files/`, a `nats kv get` on `service-directory` if useful) with actual observed output pasted into the walkthrough as expected output, not prose describing what "should" happen | Matches this project's own standing rule: nothing gets written down as fact until it's been run for real. |
+
+### Track M — Demo Environment Finalization
+
+- [x] **M1. Correct §7.6's table.** [§7.6](#76-environment-properties-docker-compose) now lists every real env var/port/volume for all 8 services (`nats`, `mysql`, 6 adapters), read directly off `docker-compose.yml` — no longer hedged as "anticipated." Also caught and noted a real, small discrepancy while doing this: `JETCORE_LOG_LEVEL` is a genuine, honored `config.py` setting that no service actually sets in compose (defaults to `INFO` everywhere) — confirmed by checking, not assumed.
+- [x] **M2. Wrote the demo walkthrough** — new [README.md § Running the demo](README.md#running-the-demo): bring-up commands, the single `POST /api/orders?wait=5` trigger, and all five resulting effects (MySQL row, CDC `RowChanged`, the relayed file write, HTTP Adapter's outbound call, the sync `OrderPersisted` reply) with real captured output for each, plus a short note on why `RowChanged`'s payload is unreadable ciphertext (by design) and a pointer to §9 item #4 for the one restart-timing caveat found while verifying M3.
+- [x] **M3. Executed end to end, for real**, against a genuinely clean stack: `docker compose down -v` (wiping `mysql-data`/`nats-data`), `infra/nats/up.sh`, `docker compose up -d --build`, `./test.sh -q` (235/235 passing from nothing), then the walkthrough itself — three separate `POST /api/orders` calls, each verified against real MySQL rows, a real captured `RowChanged` message (via `test-observer-01`, the identity built for exactly this), the real written file, and real adapter logs. All of README's own "expected output" blocks are copy-pasted from these runs, not written from memory.
+
+  **Found a real, separate bug in the process, not part of the walkthrough itself**: the `docker compose down -v` rebuild's own `infra/nats/up.sh` step intermittently failed or hung on a rerun of `bootstrap_auth.sh` — a live race in its idempotency check (`nsc_has()`'s 3-stage pipe could `SIGPIPE` itself once the identity count grew large enough), unrelated to anything M1-M2 touch. Diagnosed, fixed, and verified with 7 consecutive clean reruns — full narrative in [Defects.md#defect-4-bootstrap_authsh-idempotency-check-races-against-its-own-pipeline](Defects.md#defect-4-bootstrap_authsh-idempotency-check-races-against-its-own-pipeline). Fixed before continuing M3, not deferred — a flaky `infra/nats/up.sh` would otherwise be a standing risk to L2's own CI `test` job.
+
+  **Also observed, and correctly diagnosed as *not* a new bug**: a handful of `pyrage.DecryptError` log lines from `file-storage-adapter` right after its own restart, for a message queued *before* the restart (confirmed via timestamps — the failure predates the walkthrough's own first trigger) — exactly the already-documented, deliberately-deferred [§9 item #4](#9-open-questions-summary) restart/encryption-keypair gap, not a new defect. Self-resolved after exactly 5 attempts (`MAX_DELIVER_ATTEMPTS`, Defect 2's own backstop) — confirmed by counting the log lines. Documented as a heads-up in README rather than filed as a new defect, since it's already a known, accepted limitation.
+- [x] **M4.** Added — a short paragraph at the top of README's new section: placeholder target URLs (Decision #14), dev-only checked-in secrets, not a deployment guide.
+
+**Exit criteria met.** M1's table is exact; M2's walkthrough exists with real captured output for all five effects; M3 was actually run against a clean stack, twice over in effect (once to find and fix Defect 4, once more to produce the walkthrough's own final captured output) — 235/235 tests passing throughout, main dev stack left healthy and running afterward. M4 done as a bonus.
+
+**Track M is complete. Phase 5 is complete.**
 
 ---
 

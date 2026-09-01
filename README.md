@@ -45,6 +45,70 @@ Note: `pre-commit run --all-files` only considers files git already tracks (stag
 
 To run these automatically on every commit: `uv run pre-commit install`. Not done by default — that's a per-developer choice.
 
+## Running the demo
+
+Design.md §15 (Phase 5). Everything below was actually run against a real, freshly-rebuilt stack (`docker compose down -v` first) to capture this output — not written from memory of what should happen.
+
+This is a local demo environment, not a deployment guide: every outbound target URL below is an in-network placeholder standing in for a real integration that doesn't exist yet (Decision #14), and every credential in [docker-compose.yml](docker-compose.yml) is a checked-in, dev-only value flagged as such inline. Nothing here should be reused as-is for a real deployment.
+
+### Bring the stack up
+
+```bash
+bash infra/nats/up.sh          # auth bootstrap + JetStream objects (Step A3/A5)
+docker compose up -d --build   # nats + mysql + all 6 adapters
+```
+
+Give MySQL a few seconds to finish `init.sql` (creates the `orders` table) before triggering anything — `docker compose logs mysql` shows `ready for connections` twice; the second one is the one that matters (the first is MySQL's own internal bootstrap restart).
+
+### The one request that touches every adapter
+
+REST API Service's `POST /api/orders` publishes `events.orders.OrderCreated` — and every other adapter in the stack is already wired to react to it (see [docker-compose.yml](docker-compose.yml)'s own per-service comments, and [Design.md §8](Design.md#8-initial-adapters)):
+
+```bash
+curl -X POST 'http://localhost:8081/api/orders?wait=5' \
+  -H 'Content-Type: application/json' \
+  -d '{"orderId": "order-42", "item": "widget", "quantity": 3}'
+```
+
+`?wait=5` makes the call block up to 5s for a correlated `OrderPersisted` reply — real captured output:
+
+```json
+{"orderId": "order-42", "status": "persisted", "occurredAt": "2026-09-01T03:50:02.979583Z"}
+```
+
+That one request fans out to all five of these, independently and concurrently — no coordination between them beyond "same subject":
+
+1. **Database Adapter's write path** upserts the row and is what produced the `OrderPersisted` reply above.
+   ```
+   $ docker compose exec mysql mysql -uroot -pdev-only-change-me jetcore \
+       -e "SELECT order_id, item, quantity FROM orders WHERE order_id='order-42'"
+   order_id   item     quantity
+   order-42   widget   3
+   ```
+2. **Database Adapter's CDC path**, independently, tails the binlog for that same write and publishes `events.db.orders.RowChanged` — a *different* event, with no `correlationId`, since it isn't replying to anything (Design.md Decision #26). Real captured message (`eventPayload` is the encrypted ciphertext — see the note below):
+   ```json
+   {"event":{"eventDetails":{"eventId":"01a05b16-...","eventType":"RowChanged","sourceServiceId":"db-adapter-mysql-01","correlationId":null,...},"encryption":{"algorithm":"age-v1 (X25519 + XChaCha20-Poly1305)","recipients":["age1ef39p..."]},"eventPayload":"YWdlLWVuY3J5cHRpb24ub3JnL3Yx..."}}
+   ```
+3. **Webhook Sender** relays the same `OrderCreated` as an outbound webhook to Webhook Listener, which converts it into a `FileWriteRequested` command for **File Storage Adapter** to write:
+   ```
+   $ cat infra/files/orders/relayed.json
+   {"orderId": "order-42", "item": "widget", "quantity": 3}
+   ```
+   (Every order relays to this same path — a second request overwrites it. Fine for a demo; not the pattern a real integration would use.)
+4. **HTTP Adapter** also reacts to `OrderCreated` with its own outbound call — pointed at `/healthz` (a real, always-answering endpoint that only accepts `GET`), so every trigger produces a real, observable `405`, not a silent no-op:
+   ```
+   $ docker compose logs --tail=1 http-adapter
+   INFO:httpx:HTTP Request: POST http://webhook-listener:8080/healthz "HTTP/1.1 405 Method Not Allowed"
+   ```
+
+### On the encrypted payload
+
+Every event on the bus is encrypted for its intended recipients and signed by its sender (Design.md §4) — `RowChanged`'s `eventPayload` above genuinely is unreadable without the Database Adapter's own private key, by design, not an artifact of this demo. Inspect the *decrypted* effects instead — the MySQL row, the written file, the adapters' own logs — the way steps 1-4 above do.
+
+### If you see a `DecryptError` in an adapter's logs
+
+Restarting an adapter with a message still in flight for it is a known, deliberately-deferred gap, not a new bug: the *signing* identity is stable across restarts (derived from the adapter's `.creds` file), but the *encryption* keypair is regenerated fresh every process start — Design.md [§9 item #4](Design.md#9-open-questions-summary). A message encrypted for the pre-restart key becomes permanently undecryptable, and redelivers up to `MAX_DELIVER_ATTEMPTS` (5) times before giving up — bounded, self-resolving log noise, confirmed by watching it happen and stop on its own during this walkthrough's own verification.
+
 ## Repository layout
 
 See [Design.md §7.1](Design.md#71-repository-layout) for the full intended layout. In short: `libs/jetcore/` is the shared library every adapter depends on; `adapters/` (populated starting Phase 2, Design.md §12) holds one package per adapter instance; `infra/` holds infrastructure config and bootstrap scripts (see [infra/nats/README.md](infra/nats/README.md) for the NATS setup, which is further along than the Python side as of this writing).

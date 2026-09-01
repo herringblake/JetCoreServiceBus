@@ -128,7 +128,21 @@ yqjson() {
 # (confirmed behavior of `nsc list users` on a freshly created account).
 nsc_has() {
   local name="$1"; shift
-  nsc "$@" --json 2>&1 | yqjson '(. // []) | .[].name' | grep -qx "$name"
+  # Materialize the full name list into a variable before matching, rather
+  # than a live 3-stage pipe (nsc | yq | grep -qx) straight through — that
+  # form is racy: `grep -qx` exits the instant it finds a match, closing
+  # its stdin early, which can SIGPIPE nsc/yq mid-write ("write /dev/stdout:
+  # broken pipe") once the identity list is big enough to not fit a single
+  # pipe buffer. Under `pipefail`'s "rightmost nonzero" rule that SIGPIPE
+  # can make the *pipeline* report failure even though the name was
+  # genuinely present — Defects.md Defect 4, found via real, reproducible
+  # failures once the manifest grew past ~15 identities (fine at the
+  # smaller counts this was originally written and tested against). A
+  # command substitution here runs nsc+yq to completion before grep ever
+  # starts, so there's no live downstream consumer left to close early.
+  local names
+  names="$(nsc "$@" --json 2>&1 | yqjson '(. // []) | .[].name')"
+  grep -qx "$name" <<<"$names"
 }
 
 echo "== Operator: $OPERATOR_NAME =="
