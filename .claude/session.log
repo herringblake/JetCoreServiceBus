@@ -31435,3 +31435,1459 @@ M4 — added the short "this is a demo, not a deployment guide" disclaimer.
 Stack is left healthy and running (just re-verified: all 8 containers up, 235/235 tests passing). Design.md §15 and Defects.md are both updated to match reality, not aspiration.
 
 ------------------ Track M Completed --------------------
+
+I'd like to add some documentation related to the adapters. In each adapter directory, I'd like a README for each adapater, targeting a developer, explain what each one does, how to configure and utilize it. I'd also like the adapter directory to contain a tutorial, markdown format, on how to build new adapters and add them to the project.
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+ls adapters/
+echo "---"
+for d in adapters/*/; do echo "== $d =="; find "$d" -maxdepth 2 -type f -not -path "*/tests/*" -not -path "*/__pycache__/*" | sort; done
+
+OUT
+db_adapter_mysql
+file_storage_adapter
+http_adapter
+rest_api_service
+webhook_listener
+webhook_sender
+---
+== adapters/db_adapter_mysql/ ==
+adapters/db_adapter_mysql/db_adapter_mysql/cdc_watcher.py
+adapters/db_adapter_mysql/db_adapter_mysql/db.py
+adapters/db_adapter_mysql/db_adapter_mysql/__init__.py
+adapters/db_adapter_mysql/db_adapter_mysql/__main__.py
+adapters/db_adapter_mysql/db_adapter_mysql/payloads.py
+adapters/db_adapter_mysql/db_adapter_mysql/settings.py
+adapters/db_adapter_mysql/db_adapter_mysql/write_handler.py
+adapters/db_adapter_mysql/Dockerfile
+adapters/db_adapter_mysql/pyproject.toml
+== adapters/file_storage_adapter/ ==
+adapters/file_storage_adapter/Dockerfile
+adapters/file_storage_adapter/file_storage_adapter/create_watch.py
+adapters/file_storage_adapter/file_storage_adapter/delete_handler.py
+adapters/file_storage_adapter/file_storage_adapter/__init__.py
+adapters/file_storage_adapter/file_storage_adapter/list_handler.py
+adapters/file_storage_adapter/file_storage_adapter/__main__.py
+adapters/file_storage_adapter/file_storage_adapter/paths.py
+adapters/file_storage_adapter/file_storage_adapter/payloads.py
+adapters/file_storage_adapter/file_storage_adapter/read_handler.py
+adapters/file_storage_adapter/file_storage_adapter/recent_writes.py
+adapters/file_storage_adapter/file_storage_adapter/settings.py
+adapters/file_storage_adapter/file_storage_adapter/write_handler.py
+adapters/file_storage_adapter/pyproject.toml
+== adapters/http_adapter/ ==
+adapters/http_adapter/Dockerfile
+adapters/http_adapter/http_adapter/__init__.py
+adapters/http_adapter/http_adapter/__main__.py
+adapters/http_adapter/http_adapter/payloads.py
+adapters/http_adapter/http_adapter/settings.py
+adapters/http_adapter/http_adapter/trigger_handler.py
+adapters/http_adapter/pyproject.toml
+== adapters/rest_api_service/ ==
+adapters/rest_api_service/Dockerfile
+adapters/rest_api_service/pyproject.toml
+adapters/rest_api_service/rest_api_service/app.py
+adapters/rest_api_service/rest_api_service/__init__.py
+adapters/rest_api_service/rest_api_service/__main__.py
+adapters/rest_api_service/rest_api_service/pending_replies.py
+adapters/rest_api_service/rest_api_service/settings.py
+== adapters/webhook_listener/ ==
+adapters/webhook_listener/Dockerfile
+adapters/webhook_listener/pyproject.toml
+adapters/webhook_listener/webhook_listener/app.py
+adapters/webhook_listener/webhook_listener/__init__.py
+adapters/webhook_listener/webhook_listener/__main__.py
+adapters/webhook_listener/webhook_listener/settings.py
+== adapters/webhook_sender/ ==
+adapters/webhook_sender/Dockerfile
+adapters/webhook_sender/pyproject.toml
+adapters/webhook_sender/webhook_sender/__init__.py
+adapters/webhook_sender/webhook_sender/__main__.py
+adapters/webhook_sender/webhook_sender/relay_handler.py
+adapters/webhook_sender/webhook_sender/settings.py
+Read settings.py
+Read __main__.py
+Read trigger_handler.py
+Good, that's a clean template. Now the rest quickly:
+
+Read settings.py
+Read relay_handler.py
+Now webhook_listener:
+
+Read settings.py
+Read app.py
+Now file_storage_adapter — the most complex one (multiple handlers):
+
+Read settings.py
+Read __main__.py
+Read payloads.py
+Bash
+IN
+ls /home/bherring/dev/clodhopper/JetCoreServiceBus/schemas/ | grep -i file
+
+OUT
+events.files.FileCreateCompleted.v1.json
+events.files.FileDeleteCompleted.v1.json
+events.files.FileDeleteRequested.v1.json
+events.files.FileListCompleted.v1.json
+events.files.FileListRequested.v1.json
+events.files.FileOperationFailed.v1.json
+events.files.FileReadCompleted.v1.json
+events.files.FileReadRequested.v1.json
+events.files.FileWriteCompleted.v1.json
+events.files.FileWriteRequested.v1.json
+Read write_handler.py
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/file_storage_adapter/file_storage_adapter
+grep -n "SUBJECT = " *.py
+
+OUT
+write_handler.py:39:WRITE_REQUESTED_SUBJECT = "events.files.FileWriteRequested"
+write_handler.py:40:CREATE_COMPLETED_SUBJECT = "events.files.FileCreateCompleted"
+write_handler.py:41:WRITE_COMPLETED_SUBJECT = "events.files.FileWriteCompleted"
+delete_handler.py:23:DELETE_REQUESTED_SUBJECT = "events.files.FileDeleteRequested"
+delete_handler.py:24:DELETE_COMPLETED_SUBJECT = "events.files.FileDeleteCompleted"
+delete_handler.py:25:OPERATION_FAILED_SUBJECT = "events.files.FileOperationFailed"
+list_handler.py:25:LIST_REQUESTED_SUBJECT = "events.files.FileListRequested"
+list_handler.py:26:LIST_COMPLETED_SUBJECT = "events.files.FileListCompleted"
+list_handler.py:27:OPERATION_FAILED_SUBJECT = "events.files.FileOperationFailed"
+create_watch.py:29:CREATE_COMPLETED_SUBJECT = "events.files.FileCreateCompleted"
+read_handler.py:25:READ_REQUESTED_SUBJECT = "events.files.FileReadRequested"
+read_handler.py:26:READ_COMPLETED_SUBJECT = "events.files.FileReadCompleted"
+read_handler.py:27:OPERATION_FAILED_SUBJECT = "events.files.FileOperationFailed"
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/file_storage_adapter/file_storage_adapter
+sed -n '1,20p' create_watch.py
+echo "---read_handler reason---"
+grep -n "reason=" read_handler.py delete_handler.py list_handler.py
+
+OUT
+"""External-creation watch (Design.md §12 Step C5, Decision #19) — watches
+watch_dir for files that appear with NO preceding FileWriteRequested
+command (e.g. a shared/remote directory another process writes into
+directly) and publishes FileCreateCompleted for them, with no
+correlationId since there's no request to correlate against. Creation-
+detection only — externally-triggered *updates* to already-existing files
+remain out of scope (Design.md §9), unchanged by this step.
+
+Runs concurrently with write_handler.py's consume loop (Step C6 wires
+both via asyncio.gather, the shape Step B7 already proved), not instead
+of it. See recent_writes.py for why a command-triggered creation doesn't
+also get reported here.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from pathlib import Path
+
+---read_handler reason---
+list_handler.py:72:                encode_operation_failed(path=request.path, operation="list", reason="not_found"),
+list_handler.py:83:                    path=request.path, operation="list", reason="not_a_directory"
+read_handler.py:74:                encode_operation_failed(path=request.path, operation="read", reason="not_found"),
+delete_handler.py:71:                encode_operation_failed(path=request.path, operation="delete", reason="not_found"),
+Good, that's enough for File Storage Adapter. Now rest_api_service:
+
+Read app.py
+Read settings.py
+Now db_adapter_mysql:
+
+Read settings.py
+Read write_handler.py
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/db_adapter_mysql/db_adapter_mysql
+sed -n '40,90p' cdc_watcher.py
+
+OUT
+import asyncio
+import logging
+import threading
+
+from jetcore.bus_client import BusClient
+from pymysqlreplication import BinLogStreamReader
+from pymysqlreplication.row_event import DeleteRowsEvent, UpdateRowsEvent, WriteRowsEvent
+
+from db_adapter_mysql.payloads import encode_row_changed
+from db_adapter_mysql.settings import DbAdapterSettings
+
+logger = logging.getLogger(__name__)
+
+ROW_CHANGED_SUBJECT = "events.db.orders.RowChanged"
+
+# Must differ from the real server's own server-id (1, infra/mysql/my.cnf)
+# — the replication protocol's requirement, same as any MySQL replica.
+# Fixed rather than derived from settings.service_id: v1 scope is a
+# single CDC reader instance (Decision #18's per-instance-identity
+# pattern would need this to become configurable too, if a second
+# instance were ever added — out of scope here).
+_CDC_SERVER_ID = 100
+
+_POLL_INTERVAL_SECONDS = 0.5
+
+
+def _publish_row_changed(
+    client: BusClient,
+    loop: asyncio.AbstractEventLoop,
+    *,
+    operation: str,
+    table: str,
+    row: dict[str, object],
+    previous_row: dict[str, object] | None,
+) -> None:
+    payload = encode_row_changed(
+        operation=operation, table=table, row=row, previous_row=previous_row
+    )
+    future = asyncio.run_coroutine_threadsafe(
+        client.publish(ROW_CHANGED_SUBJECT, payload, event_type="RowChanged"), loop
+    )
+    future.result()  # propagate a publish failure back into this thread, not swallowed
+
+
+def _run_stream(
+    client: BusClient,
+    settings: DbAdapterSettings,
+    loop: asyncio.AbstractEventLoop,
+    shutdown: threading.Event,
+) -> None:
+    stream = BinLogStreamReader(
+Read config.py
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "class BusClient\|async def \|class ReceivedEvent\|MAX_DELIVER" libs/jetcore/jetcore/bus_client.py | head -40
+
+OUT
+66:class ReceivedEvent:
+80:    async def ack(self) -> None:
+83:    async def nak(self) -> None:
+101:MAX_DELIVER_ATTEMPTS = 5
+109:        max_deliver=MAX_DELIVER_ATTEMPTS,
+113:class BusClient:
+139:    async def connect(
+173:    async def connect_as_adapter(cls, settings: AdapterSettings, *, adapter_type: str) -> BusClient:
+204:    async def close(self) -> None:
+214:    async def _cache_for(self, subject: str) -> RecipientCache:
+221:    async def publish(
+261:    async def subscribe(self, subject: str, *, durable_name: str | None = None) -> str:
+280:    async def fetch(
+329:    async def _process(self, msg: Msg) -> ReceivedEvent:
+Read bus_client.py (lines 61-320)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '1,50p' infra/nats/adapter_identities.yaml
+
+OUT
+# Adapter Identity Manifest — Phase 1, Step A2
+#
+# Declarative source of truth for "who's allowed to say what" on the bus.
+# The bootstrap script (Step A3) reads this file and, for each entry, issues
+# one nsc User (nkey + JWT) under the `account` below, embedding that entry's
+# publish/subscribe subjects as the User's NATS permissions (Design.md §4.2,
+# §4.4, Decision #6).
+#
+# GRANULARITY: one entry per adapter *instance*, not per adapter *type*.
+# The service-directory KV registry (Design.md §4.5) already keys entries as
+# <subject>.<serviceId> with instance-level ids like "file-storage-01", which
+# implies a deployment can run multiple independent instances of the same
+# adapter type (e.g. two HTTP Adapter instances, each integrated with a
+# different external API, each with its own identity/permissions). Recorded
+# as Decision #18 in Design.md §2.
+#
+# DERIVED PERMISSIONS (computed by the bootstrap script, not hand-authored
+# per entry below):
+#   - KV write  -> $KV.service-directory.<subject>.<serviceId>  for every
+#     subject in that entry's `subscribe` list (lets the adapter register
+#     itself as a decrypt-capable recipient, and re-PUT the same key on its
+#     heartbeat interval — Design.md §11 parameter table: TTL 60s / hb 20s).
+#   - KV read   -> $KV.service-directory.>  for every entry that has a
+#     non-empty `publish` list (a publisher must look up recipients before
+#     encrypting — Design.md §4.3).
+#   - Low-level NATS/JetStream API subjects (e.g. $JS.API.>, _INBOX.>)
+#     needed for the client library to function are NOT enumerated here —
+#     those are finalized when nats-server.conf and the bootstrap script are
+#     actually written (Steps A3/A4), not part of this application-level
+#     manifest.
+#
+# PLACEHOLDER SUBJECTS: per Design.md Decision #14, real bounded-context
+# names aren't chosen yet. Subjects below follow the events.<context>.<Type>
+# convention with `orders` as a stand-in, except the File Storage Adapter's
+# command subjects (events.files.*), which are named in Design.md §8. The
+# exact reply/result-subject scoping convention for command/response pairs
+# (e.g. whether a result subject is scoped per-requester) is still TBD —
+# tracked as an open item in Design.md §9 — so result subjects below are
+# shared, not yet per-requester-scoped. Revisit before Phase 3 builds these
+# adapters for real.
+
+version: 1
+account: JETCORE
+
+adapters:
+
+  # --- Phase 2 vertical slice (Design.md §10) — these two are used first ---
+
+  - serviceId: webhook-listener-01
+    adapterType: webhook-listener
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '50,85p' infra/nats/adapter_identities.yaml
+echo "=== http-adapter Dockerfile ==="
+cat adapters/http_adapter/Dockerfile
+echo "=== http-adapter pyproject.toml ==="
+cat adapters/http_adapter/pyproject.toml
+
+OUT
+    adapterType: webhook-listener
+    description: >
+      Inbound HTTP webhook receiver. Converts an accepted webhook into a
+      FileWriteRequested command and publishes it. Fire-and-forget from the
+      HTTP caller's perspective (§8) — no reply subject needed yet.
+    permissions:
+      publish:
+        - events.files.FileWriteRequested
+      subscribe: []
+
+  - serviceId: file-storage-01
+    adapterType: file-storage-adapter
+    description: >
+      Command-driven file operations service (§8) — list/read/write/delete
+      against local files, triggered by bus commands. There is only one
+      write-side command (FileWriteRequested) — the implementation
+      auto-creates the file if it doesn't exist, and reports which happened
+      via the completion event: FileCreateCompleted if the file was new,
+      FileWriteCompleted if an existing file was updated. FileCreateCompleted
+      is ALSO published outside the command flow entirely, when the adapter
+      notices a file created by an outside process (e.g. in a shared/watched
+      directory) — that publish has no preceding command and no
+      correlationId. This is a narrow, deliberate pull-forward of the
+      folder-watch capability otherwise deferred (Design.md §8/§19) — scoped
+      to *creation* detection only; externally-triggered *updates* to
+      existing files are NOT currently detected/published (open question,
+      Design.md §9).
+    permissions:
+      publish:
+        - events.files.FileCreateCompleted
+        - events.files.FileWriteCompleted
+        - events.files.FileReadCompleted
+        - events.files.FileListCompleted
+        - events.files.FileDeleteCompleted
+        - events.files.FileOperationFailed   # Design.md §13 Step F1,
+                                              # Decision #23 — shared
+=== http-adapter Dockerfile ===
+# HTTP Adapter — Design.md §13 Step K1. Mirrors
+# adapters/webhook_sender/Dockerfile's structure and reasoning exactly —
+# see that file's header comment for the minimal-copy-set finding.
+
+FROM python:3.12-slim AS base
+
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /bin/
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock .python-version ./
+
+COPY libs/jetcore/pyproject.toml libs/jetcore/pyproject.toml
+COPY adapters/http_adapter/pyproject.toml adapters/http_adapter/pyproject.toml
+
+COPY libs/jetcore/jetcore libs/jetcore/jetcore
+COPY adapters/http_adapter/http_adapter adapters/http_adapter/http_adapter
+
+RUN uv sync --frozen --no-dev --package jetcore-http-adapter
+
+RUN useradd --uid 1000 --create-home appuser
+USER appuser
+
+ENV PATH="/app/.venv/bin:${PATH}"
+
+CMD ["python", "-m", "http_adapter"]
+=== http-adapter pyproject.toml ===
+# http_adapter — calls a configured external REST API when triggered by a
+# bus event, publishes the response back as a correlated event (Design.md
+# §8, §13 Track H).
+#
+# Dependencies added incrementally as each module (Design.md §13 Track H)
+# is actually built, same discipline every prior adapter followed.
+# `jetcore` is the one dependency every adapter needs from the start.
+#
+# [project] name is "jetcore-http-adapter", not "http-adapter" — the
+# latter is a real, unrelated package already published on PyPI
+# (confirmed during Design.md §13 Step G5, which found the same problem
+# for webhook-listener/webhook-sender). Decision #28: every adapter's
+# distribution name gets this prefix from now on; the Python import name
+# (`http_adapter`) is unaffected.
+
+[project]
+name = "jetcore-http-adapter"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "jetcore",
+]
+
+[tool.uv.sources]
+jetcore = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["http_adapter"]
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+cat schemas/events.http.RequestCompleted.v1.json
+echo "=== root pyproject.toml workspace members ==="
+grep -n -A 15 "\[tool.uv.workspace\]\|workspace" pyproject.toml | head -30
+
+OUT
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jetcoreservicebus.internal/schemas/events.http.RequestCompleted.v1.json",
+  "title": "RequestCompleted",
+  "description": "Result: the HTTP Adapter called its configured external REST API in response to a trigger event, and got a real response back (Design.md §8, §13 Step H3). eventDetails.correlationId is set to the triggering event's eventId. Published only when a response was actually received — a genuine connection failure (the API unreachable, not just returning an error status) leaves the triggering command unacked for redelivery instead (Design.md §13), so there's nothing to report yet.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "statusCode", "body", "occurredAt"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["success", "error"],
+      "description": "success: the external API returned a 2xx status. error: any other status (4xx/5xx) — this adapter reports the outcome, it doesn't judge it (Design.md §13)."
+    },
+    "statusCode": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 599,
+      "description": "The external API's real HTTP status code."
+    },
+    "body": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "The external API's raw response body, base64-encoded — not assumed to be JSON or even text, since the target is an arbitrary external API."
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp (RFC 3339 / ISO 8601) the response was received."
+    }
+  }
+}
+=== root pyproject.toml workspace members ===
+1:# Jet Core Service Bus — uv workspace root (Decision #16, Design.md §7.5)
+2-#
+3-# This root is "virtual" (tool.uv.package = false) — it's not itself an
+4:# installable package, just the workspace container plus shared dev tooling
+5-# config and the shared dev dependency group. Real packages live under
+6-# libs/ (jetcore) and adapters/ (populated starting Phase 2, Design.md §12).
+7-
+8-[project]
+9-name = "jet-core-service-bus"
+10-version = "0.1.0"
+11-requires-python = ">=3.12"
+12-dependencies = []
+13-
+14-[tool.uv]
+15-package = false
+16-
+17:[tool.uv.workspace]
+18-members = ["libs/*", "adapters/*"]
+19-
+20-[dependency-groups]
+21:# Shared across the whole workspace (Design.md §7.4). bandit/pip-audit/
+22-# pre-commit are here as CLI tools invoked via `uv run`, not as runtime deps
+23-# of any package.
+24-dev = [
+25-    "pytest>=8",
+26-    "pytest-asyncio>=0.24",
+27-    "pytest-cov>=6",
+28-    "ruff>=0.8",
+29-    "mypy>=1.13",
+30-    "bandit>=1.8",
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+cat adapters/http_adapter/tests/conftest.py 2>/dev/null | head -80
+
+OUT
+"""Shared fixtures for http_adapter's live-NATS integration tests
+(Design.md §13 Step H3 onward). Mirrors the same _clean_state pattern
+used throughout this project's other test suites — re-implemented
+locally rather than imported, for the self-containment reasons
+_http_adapter_helpers.py explains."""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import AsyncGenerator
+
+import nats
+import pytest
+from _http_adapter_helpers import CREDS_DIR, NATS_URL, ORDER_CREATED_SUBJECT
+from nats.js.errors import NoKeysError
+
+
+def _is_test_identity(service_id: str) -> bool:
+    """Defects.md Defect 2: this fixture's own KV cleanup below used to
+    blanket-delete every registered recipient for events.orders.OrderCreated
+    — including the REAL, live http-adapter-01/webhook-sender-01/
+    db-adapter-mysql-01 containers' own registrations, not just this test
+    suite's own ephemeral ones. Confirmed by direct reproduction (polling
+    a real container's KV entry once a second during a normal pytest run)
+    that this left real containers unregistered for up to 59 consecutive
+    seconds, each occurrence producing a real, permanently-undecryptable
+    message on their end. Only ever clean up entries this project's own
+    test identities own — the `-test` suffix (Defect 1's dedicated twins)
+    or the `test-` prefix (test-observer-01) — never a bare real adapter
+    serviceId."""
+    return service_id.endswith("-test") or service_id.startswith("test-")
+
+
+@pytest.fixture(autouse=True)
+async def _clean_state() -> AsyncGenerator[None]:
+    nc = await nats.connect(NATS_URL, user_credentials=f"{CREDS_DIR}/jetcore-admin.creds")
+    js = nc.jetstream()
+    await js.purge_stream("EVENTS")
+    kv = await js.key_value("service-directory")
+    try:
+        for key in await kv.keys(filters=[f"{ORDER_CREATED_SUBJECT}."]):
+            if _is_test_identity(key.removeprefix(f"{ORDER_CREATED_SUBJECT}.")):
+                await kv.delete(key)
+    except NoKeysError:
+        pass
+    await nc.close()
+    yield
+
+
+@pytest.fixture
+def durable_name() -> str:
+    return f"test-{uuid.uuid4().hex[:8]}"
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "ADAPTER_SERVICES" test.sh
+grep -n "bandit -r" README.md .github/workflows/ci.yml
+
+OUT
+28:ADAPTER_SERVICES=(
+38:docker compose stop "${ADAPTER_SERVICES[@]}"
+42:  docker compose up -d "${ADAPTER_SERVICES[@]}"
+.github/workflows/ci.yml:52:          uv run bandit -r
+README.md:32:uv run bandit -r libs/jetcore/jetcore adapters/file_storage_adapter/file_storage_adapter adapters/webhook_listener/webhook_listener adapters/webhook_sender/webhook_sender adapters/http_adapter/http_adapter adapters/rest_api_service/rest_api_service adapters/db_adapter_mysql/db_adapter_mysql # security static analysis (source only — add each new adapter's package dir here as it's scaffolded)
+Write README.md
+78 lines
+# File Storage Adapter
+
+A command-driven file operations service (Design.md [§8](../../Design.md#8-initial-adapters), [§12](../../Design.md#12-phase-2--detailed-breakdown) Track C, [§13](../../Design.md#13-phase-3--detailed-breakdown) Track F). Not a passive archival sink — other services ask it to `write`/`read`/`list`/`delete` files under one root directory by publishing a command event; it does the I/O and publishes a result event back.
+
+It also does one thing nobody has to ask for: if a file shows up in its watched directory with no preceding command (something else wrote directly into a shared/mounted directory), it notices and reports that too.
+
+## Configuration
+
+All `JETCORE_`-prefixed env vars, loaded via `pydantic-settings` (fails fast at startup on anything missing/invalid — see [jetcore/config.py](../../libs/jetcore/jetcore/config.py) for the full shared baseline every adapter has).
+
+| Var | Required | Default | Meaning |
+|---|---|---|---|
+| `JETCORE_SERVICE_ID` | yes | — | Must match this instance's `serviceId` in [infra/nats/adapter_identities.yaml](../../infra/nats/adapter_identities.yaml) (`file-storage-01` in the real deployment). |
+| `JETCORE_NATS_URL` | no | `nats://nats:4222` | |
+| `JETCORE_NATS_CREDS_PATH` | yes | — | The `.creds` file `bootstrap_auth.sh` generated for this `service_id`. Must exist at startup — `pydantic`'s `FilePath` validation, not a runtime surprise. |
+| `JETCORE_WATCH_DIR` | yes | — | The root directory this adapter reads/writes/watches. Must exist and be a directory at startup (`pydantic`'s `DirectoryPath`). Every command's `path` is resolved *relative to this root* and validated to stay inside it — see "Path safety" below. |
+| `JETCORE_LOG_LEVEL` | no | `INFO` | |
+
+`JETCORE_SUBJECTS` (the shared baseline's own field) is **not used** by this adapter — its subscribe subjects are fixed in code (the four command subjects below), not configurable per instance.
+
+## What it subscribes to / publishes
+
+Four independent command handlers run concurrently, each with its own durable consumer — a message on one subject never blocks the others.
+
+| Command (subscribe) | Success (publish) | Failure (publish) |
+|---|---|---|
+| `events.files.FileWriteRequested` | `events.files.FileCreateCompleted` (file was new) **or** `events.files.FileWriteCompleted` (file already existed) | — (see "Error handling" below; a bad request is acked and dropped, not reported) |
+| `events.files.FileReadRequested` | `events.files.FileReadCompleted` | `events.files.FileOperationFailed` (`reason: "not_found"`) |
+| `events.files.FileListRequested` | `events.files.FileListCompleted` | `events.files.FileOperationFailed` (`reason: "not_found"` or `"not_a_directory"`) |
+| `events.files.FileDeleteRequested` | `events.files.FileDeleteCompleted` | `events.files.FileOperationFailed` (`reason: "not_found"`) |
+
+Every success/failure reply carries `correlationId` set to the triggering command's `eventId`.
+
+**One more publish, independent of any command**: `events.files.FileCreateCompleted` also fires when a file appears in `JETCORE_WATCH_DIR` with **no** preceding `FileWriteRequested` — e.g. another process writing directly into a shared/mounted directory. That publish has no `correlationId`, since there was no request to correlate against. This is creation-detection only; an externally-triggered *update* to an already-existing file is **not** detected (open question, Design.md [§9](../../Design.md#9-open-questions-summary) item #3).
+
+## Payload shapes
+
+Matches [schemas/events.files.*.v1.json](../../schemas/) exactly — see [payloads.py](file_storage_adapter/payloads.py) for the one place these are built/parsed.
+
+- `FileWriteRequested`: `{"path": "<string>", "content": "<base64>"}`
+- `FileReadRequested` / `FileDeleteRequested`: `{"path": "<string>"}` (must be non-empty)
+- `FileListRequested`: `{"path": "<string>"}` (empty string means "list `JETCORE_WATCH_DIR` itself")
+- `*Completed` replies carry `path`, plus operation-specific fields (`sizeBytes`, `content`, `entries: [{name, isDirectory, sizeBytes}]`), plus `occurredAt`.
+
+## Path safety
+
+Every `path` is resolved against `JETCORE_WATCH_DIR` and rejected (silently, from the caller's perspective — see below) if it would resolve outside that root — no `../` escapes, no absolute-path overrides. See [paths.py](file_storage_adapter/paths.py)'s `resolve_within`.
+
+**Known v1 gap, not fixed**: this check happens at request time, not atomically with the write itself — a TOCTOU window exists if a path component is replaced with a symlink in between (would need `O_NOFOLLOW`/`openat2 RESOLVE_BENEATH`-style primitives to close). Acceptable for a local, single-writer dev/demo deployment; not hardened for a multi-tenant filesystem sandbox.
+
+## Error handling
+
+Two different failure modes get two different responses, on purpose:
+
+- **Deterministically bad** (malformed payload, path escapes the watch dir, target not found) — logged, **acked** (stop redelivery; retrying wouldn't help), and for read/list/delete a `FileOperationFailed` is published so the caller learns why. A malformed `FileWriteRequested` is the one exception: acked and silently dropped, no failure event — there's no well-formed request to report against.
+- **Plausibly transient** (a real I/O error — disk full, permission hiccup) — logged, left **unacked** for JetStream redelivery, capped at 5 attempts (`MAX_DELIVER_ATTEMPTS`, [Defects.md Defect 2](../../Defects.md#defect-2-ambient-test-traffic-undecryptable-by-real-containers)).
+
+## Running it standalone
+
+```bash
+JETCORE_SERVICE_ID=file-storage-01 \
+JETCORE_NATS_CREDS_PATH=infra/nats/operator/creds/file-storage-01.creds \
+JETCORE_WATCH_DIR=infra/files \
+uv run python -m file_storage_adapter
+```
+
+Requires NATS already up (`infra/nats/up.sh`) and a `.creds` file for this identity already generated (`bootstrap_auth.sh`, run as part of `up.sh`). In the normal dev stack this runs as the `file-storage-adapter` service in [docker-compose.yml](../../docker-compose.yml) instead.
+
+## Testing
+
+`uv run --all-packages pytest adapters/file_storage_adapter` (or `./test.sh -k file_storage_adapter` if the adapter fleet is up — see the [repo root README](../../README.md#running-the-checks)). Each handler has its own test module (`test_write_handler.py`, `test_read_handler.py`, `test_list_handler.py`, `test_delete_handler.py`, `test_create_watch.py`) plus `test_entrypoint.py` driving the real wiring end to end — all against a real NATS instance, never mocked.
+
+## See also
+
+- [Design.md §8](../../Design.md#8-initial-adapters) — this adapter's role among all six.
+- [Design.md §12 Track C](../../Design.md#12-phase-2--detailed-breakdown) / [§13 Track F](../../Design.md#13-phase-3--detailed-breakdown) — the step-by-step build history.
+- [../BUILDING_AN_ADAPTER.md](../BUILDING_AN_ADAPTER.md) — how this adapter (and any new one) is put together.
+Write README.md
+70 lines
+# Webhook Listener
+
+An inbound HTTP webhook receiver (Design.md [§8](../../Design.md#8-initial-adapters), [§12](../../Design.md#12-phase-2--detailed-breakdown) Track D). External → Bus: exposes one HTTP endpoint, converts whatever it receives into a `FileWriteRequested` command, and publishes it. Fire-and-forget from the caller's perspective — no reply subject, `202 Accepted` means "published," not "processed."
+
+In the demo stack it's also the receiving end of Webhook Sender's own outbound relay (see [../webhook_sender/README.md](../webhook_sender/README.md)) — the only two adapters here that talk to each other directly over HTTP rather than only through the bus.
+
+## Configuration
+
+| Var | Required | Default | Meaning |
+|---|---|---|---|
+| `JETCORE_SERVICE_ID` | yes | — | `webhook-listener-01` in the real deployment. |
+| `JETCORE_NATS_URL` | no | `nats://nats:4222` | |
+| `JETCORE_NATS_CREDS_PATH` | yes | — | |
+| `JETCORE_WEBHOOK_SECRET` | yes | — | Shared secret an inbound request's `X-Webhook-Secret` header must match (constant-time comparison). A generic placeholder mechanism — no real webhook source is integrated yet, so there's no source-specific scheme (HMAC signature header, etc.) to build against. |
+| `JETCORE_HTTP_PORT` | no | `8080` | Port the ASGI app binds. |
+| `JETCORE_LOG_LEVEL` | no | `INFO` | |
+
+## HTTP surface
+
+### `POST /webhooks/{path}`
+
+Body: whatever bytes the caller sends (not assumed to be JSON). Header: `X-Webhook-Secret` must match `JETCORE_WEBHOOK_SECRET`.
+
+```bash
+curl -X POST http://localhost:8080/webhooks/some/nested/path.json \
+  -H 'X-Webhook-Secret: dev-only-change-me' \
+  -d '{"hello": "world"}'
+# 202 Accepted, empty body
+```
+
+Publishes `events.files.FileWriteRequested` with `{"path": "some/nested/path.json", "content": "<base64 of the raw body>"}` — the URL path segment becomes the target file path (resolved relative to the File Storage Adapter's own `JETCORE_WATCH_DIR`; path-traversal validation happens over there, not here — see [../file_storage_adapter/README.md](../file_storage_adapter/README.md)).
+
+- Missing/wrong secret → `401`.
+- Empty path (`POST /webhooks/`) → `400`.
+- Otherwise → `202`, published fire-and-forget. This adapter never learns whether the write actually succeeded.
+
+### `GET /healthz`
+
+`{"status": "ok"}`, `200`. Exists because not every image in this stack ships a shell/HTTP client a Compose-native healthcheck could use — a Python-native ASGI app can trivially serve its own instead.
+
+## What it publishes
+
+| Subject | When |
+|---|---|
+| `events.files.FileWriteRequested` | Every accepted `POST /webhooks/{path}` |
+
+Subscribes to nothing.
+
+## Running it standalone
+
+```bash
+JETCORE_SERVICE_ID=webhook-listener-01 \
+JETCORE_NATS_CREDS_PATH=infra/nats/operator/creds/webhook-listener-01.creds \
+JETCORE_WEBHOOK_SECRET=dev-only-change-me \
+uv run python -m webhook_listener
+```
+
+Requires NATS already up (`infra/nats/up.sh`). In the normal dev stack this runs as the `webhook-listener` service in [docker-compose.yml](../../docker-compose.yml), on host port `8080`.
+
+## Testing
+
+`uv run --all-packages pytest adapters/webhook_listener` (or via `./test.sh` — see [repo root README](../../README.md#running-the-checks)). `test_webhook_listener_entrypoint.py` drives the real FastAPI app + a real `BusClient` end to end against live NATS.
+
+## See also
+
+- [Design.md §8](../../Design.md#8-initial-adapters) — this adapter's role among all six.
+- [Design.md §12 Track D](../../Design.md#12-phase-2--detailed-breakdown) — the step-by-step build history (the first vertical slice, alongside File Storage Adapter).
+- [Design.md § Running the demo](../../README.md#running-the-demo) — this adapter as the relay target in the full-mesh walkthrough.
+- [../BUILDING_AN_ADAPTER.md](../BUILDING_AN_ADAPTER.md) — how this adapter (and any new one) is put together.
+Edit README.md
+Modified
+Now webhook_sender:
+
+Write README.md
+48 lines
+# Webhook Sender
+
+Bus → external (Design.md [§8](../../Design.md#8-initial-adapters), [§13](../../Design.md#13-phase-3--detailed-breakdown) Track G). Subscribes to whatever subjects it's configured for, and POSTs each event's decrypted payload to one fixed external webhook URL — **single attempt, best-effort, no retry**. If the target is down, the delivery is silently dropped (logged, not redelivered) — an accepted risk from the moment this shape was decided (Decision #12), not an oversight.
+
+Publishes nothing back to the bus. In the demo stack it relays to [Webhook Listener](../webhook_listener/README.md)'s own HTTP surface — a real, self-contained round trip, not a target that only ever errors.
+
+## Configuration
+
+| Var | Required | Default | Meaning |
+|---|---|---|---|
+| `JETCORE_SERVICE_ID` | yes | — | `webhook-sender-01` in the real deployment. |
+| `JETCORE_NATS_URL` | no | `nats://nats:4222` | |
+| `JETCORE_NATS_CREDS_PATH` | yes | — | |
+| `JETCORE_SUBJECTS` | yes (for this adapter to do anything) | `[]` | Comma-separated (`events.orders.OrderCreated,events.other.Thing`) or a JSON array string. One relay handler + durable consumer is started per subject. This is the first adapter where `JETCORE_SUBJECTS` is actually used at runtime — every earlier adapter hardcoded its subscribe subject(s) in code. |
+| `JETCORE_TARGET_URL` | yes | — | The one external webhook URL every relayed event is POSTed to — one fixed target per instance (Decision #27). Run a second instance, with its own identity, for a second target. |
+| `JETCORE_OUTBOUND_SECRET` | no | — | Sent as `X-Webhook-Secret` on the outbound POST if set — the mirror image of Webhook Listener's own inbound check. Not required: the receiving side may not be one of our own adapters. |
+| `JETCORE_LOG_LEVEL` | no | `INFO` | |
+
+## What it does
+
+For each subject in `JETCORE_SUBJECTS`: fetches, decrypts/verifies (`BusClient` handles that), and POSTs the raw decrypted payload as the request body to `JETCORE_TARGET_URL`, with headers `X-Event-Type`, `X-Event-Id`, and (if configured) `X-Webhook-Secret`.
+
+- **Success or HTTP error status** (2xx through 5xx, a real response received) — logged if non-2xx, **acked** either way. Reporting the outcome isn't this adapter's job; it isn't Decision #12's concern either.
+- **No response at all** (connection refused, timeout) — logged, **acked anyway** (not left for redelivery) — genuinely different from every other adapter here, and deliberate: "single attempt, best-effort" means retrying via redelivery would itself be a retry, contradicting the whole point of the design (Decision #12).
+
+## Running it standalone
+
+```bash
+JETCORE_SERVICE_ID=webhook-sender-01 \
+JETCORE_NATS_CREDS_PATH=infra/nats/operator/creds/webhook-sender-01.creds \
+JETCORE_SUBJECTS=events.orders.OrderCreated \
+JETCORE_TARGET_URL=http://localhost:8080/webhooks/orders/relayed.json \
+uv run python -m webhook_sender
+```
+
+Requires NATS already up. In the normal dev stack this runs as the `webhook-sender` service in [docker-compose.yml](../../docker-compose.yml), relaying to `webhook-listener`.
+
+## Testing
+
+`uv run --all-packages pytest adapters/webhook_sender` (or via `./test.sh`). `test_webhook_sender_entrypoint.py` drives the real entrypoint end to end against live NATS.
+
+## See also
+
+- [Design.md §8](../../Design.md#8-initial-adapters) — this adapter's role among all six.
+- [Design.md §13 Track G](../../Design.md#13-phase-3--detailed-breakdown) — the step-by-step build history.
+- [README.md § Running the demo](../../README.md#running-the-demo) — this adapter as the first hop in the full-mesh walkthrough.
+- [../BUILDING_AN_ADAPTER.md](../BUILDING_AN_ADAPTER.md) — how this adapter (and any new one) is put together.
+Now http_adapter:
+
+Write README.md
+55 lines
+# HTTP Adapter
+
+Bus → external → Bus (Design.md [§8](../../Design.md#8-initial-adapters), [§13](../../Design.md#13-phase-3--detailed-breakdown) Track H). Subscribes to whatever subjects it's configured for; for each triggering event, calls one fixed external REST API and publishes what came back as a correlated `events.http.RequestCompleted` — success or error status alike. Reports the outcome, doesn't judge it.
+
+The closest sibling to [Webhook Sender](../webhook_sender/README.md) (same per-subject relay shape, same `JETCORE_SUBJECTS`/`JETCORE_TARGET_*` pattern), but with the opposite retry posture and a reply published back to the bus — see "What it does" below for exactly how the two diverge.
+
+## Configuration
+
+| Var | Required | Default | Meaning |
+|---|---|---|---|
+| `JETCORE_SERVICE_ID` | yes | — | `http-adapter-01` in the real deployment. |
+| `JETCORE_NATS_URL` | no | `nats://nats:4222` | |
+| `JETCORE_NATS_CREDS_PATH` | yes | — | |
+| `JETCORE_SUBJECTS` | yes (for this adapter to do anything) | `[]` | Comma-separated or JSON array. One trigger handler + durable consumer per subject. |
+| `JETCORE_TARGET_BASE_URL` | yes | — | The external REST API every triggered call is made against — one fixed target per instance (Decision #27). |
+| `JETCORE_AUTH_TOKEN` | no | — | Sent as `Authorization: Bearer <token>` if set. Not required — the target API may need no auth, or a scheme this adapter doesn't need to know about (e.g. an API key baked into the URL). |
+| `JETCORE_LOG_LEVEL` | no | `INFO` | |
+
+## What it publishes / subscribes
+
+| Subject | Direction |
+|---|---|
+| *(configured via `JETCORE_SUBJECTS`)* | subscribe — trigger |
+| `events.http.RequestCompleted` | publish — result, `correlationId` = the triggering event's `eventId` |
+
+`RequestCompleted` payload: `{"status": "success"|"error", "statusCode": <int>, "body": "<base64>", "occurredAt": "<ISO 8601>"}` — `status` is `"success"` for any 2xx, `"error"` for anything else. `body` is the raw response, base64-encoded, not assumed to be JSON or even text.
+
+## Behavior, and where it differs from Webhook Sender
+
+- **A response was received, any status** → always publish `RequestCompleted` and **ack**. Whether the target returned 200 or 500, that's a real answer worth reporting.
+- **No response at all** (connection failure, timeout) → log and **nak** (leave unacked for redelivery, capped at 5 attempts). Unlike Webhook Sender's deliberate best-effort/no-retry choice, this adapter's whole job is reporting what the external API actually said — a transient network blip shouldn't silently produce nothing to report, so it's worth a retry.
+
+## Running it standalone
+
+```bash
+JETCORE_SERVICE_ID=http-adapter-01 \
+JETCORE_NATS_CREDS_PATH=infra/nats/operator/creds/http-adapter-01.creds \
+JETCORE_SUBJECTS=events.orders.OrderCreated \
+JETCORE_TARGET_BASE_URL=http://localhost:8080/healthz \
+uv run python -m http_adapter
+```
+
+Requires NATS already up. In the normal dev stack this runs as the `http-adapter` service in [docker-compose.yml](../../docker-compose.yml), pointed at `webhook-listener`'s `/healthz` (a real, always-answering, GET-only endpoint — every trigger produces a real, observable `405`, not a silent no-op against a target that would otherwise need real internet access this dev stack shouldn't depend on).
+
+## Testing
+
+`uv run --all-packages pytest adapters/http_adapter` (or via `./test.sh`). `test_http_adapter_entrypoint.py` drives the real entrypoint end to end against live NATS.
+
+## See also
+
+- [Design.md §8](../../Design.md#8-initial-adapters) — this adapter's role among all six.
+- [Design.md §13 Track H](../../Design.md#13-phase-3--detailed-breakdown) — the step-by-step build history.
+- [README.md § Running the demo](../../README.md#running-the-demo) — this adapter's own reaction as one of the demo's five effects.
+- [../BUILDING_AN_ADAPTER.md](../BUILDING_AN_ADAPTER.md) — how this adapter (and any new one) is put together.
+Now rest_api_service:
+
+Write README.md
+71 lines
+# REST API Service
+
+External → Bus, with an optional synchronous reply (Design.md [§8](../../Design.md#8-initial-adapters), [§13](../../Design.md#13-phase-3--detailed-breakdown) Track I). The "front door" for external HTTP clients — exposes a REST API, translates each call into a bus event, and can optionally block the HTTP response until a correlated reply event arrives.
+
+## Configuration
+
+| Var | Required | Default | Meaning |
+|---|---|---|---|
+| `JETCORE_SERVICE_ID` | yes | — | `rest-api-service-01` in the real deployment. |
+| `JETCORE_NATS_URL` | no | `nats://nats:4222` | |
+| `JETCORE_NATS_CREDS_PATH` | yes | — | |
+| `JETCORE_HTTP_PORT` | no | `8080` | Port the ASGI app binds. |
+| `JETCORE_DEFAULT_REPLY_TIMEOUT_SECONDS` | no | `30.0` | Hard cap on a `?wait=<seconds>` request — a caller-supplied `wait` above this is silently capped, not rejected. |
+| `JETCORE_LOG_LEVEL` | no | `INFO` | |
+
+## HTTP surface
+
+### `POST /api/orders?wait=<seconds>`
+
+Body: passed through verbatim as the published payload (Decision #14's placeholder bounded context — no real order schema exists yet, so this is a thin HTTP-to-command translator, the same posture Webhook Listener already established). Publishes `events.orders.OrderCreated`.
+
+- **No `?wait=` (or `?wait=0`)** — fire-and-forget, matching Webhook Listener's own default:
+  ```bash
+  curl -X POST http://localhost:8081/api/orders -d '{"orderId": "order-1", "item": "widget", "quantity": 3}'
+  # 202 Accepted
+  # {"eventId": "01a0..."}
+  ```
+- **`?wait=<seconds>`, capped at `JETCORE_DEFAULT_REPLY_TIMEOUT_SECONDS`** — registers a pending reply keyed on the just-published event's own `eventId`, and blocks for a correlated `events.orders.OrderPersisted` (published by [Database Adapter](../db_adapter_mysql/README.md)'s write path):
+  ```bash
+  curl -X POST 'http://localhost:8081/api/orders?wait=5' -d '{"orderId": "order-1", "item": "widget", "quantity": 3}'
+  # 200 OK
+  # {"orderId": "order-1", "status": "persisted", "occurredAt": "2026-09-01T03:46:58.229060Z"}
+  ```
+  A timeout (nothing correlated arrived in time) returns `504` with `{"eventId": "...", "error": "timeout waiting for reply"}` — the pending registration is unregistered either way, so a late reply after timeout doesn't leak a resolved-but-unread future.
+
+Real captured output for both forms — see [README.md § Running the demo](../../README.md#running-the-demo).
+
+### `GET /healthz`
+
+`{"status": "ok"}`, `200`.
+
+## What it publishes / subscribes
+
+| Subject | Direction |
+|---|---|
+| `events.orders.OrderCreated` | publish — every `POST /api/orders` |
+| `events.orders.OrderPersisted` | subscribe — background watcher, resolves any pending `?wait=` future whose `correlationId` matches |
+
+The `OrderPersisted` subscription runs as its own background task for the whole life of the process (started in the app's `lifespan`, not per-request) — a reply can arrive and get matched to its pending future even between requests.
+
+## Running it standalone
+
+```bash
+JETCORE_SERVICE_ID=rest-api-service-01 \
+JETCORE_NATS_CREDS_PATH=infra/nats/operator/creds/rest-api-service-01.creds \
+uv run python -m rest_api_service
+```
+
+Requires NATS already up, and — for `?wait=` to ever actually resolve — something publishing a correlated `OrderPersisted` (in the real stack, [Database Adapter](../db_adapter_mysql/README.md)'s write path). In the normal dev stack this runs as the `rest-api-service` service in [docker-compose.yml](../../docker-compose.yml), on host port `8081` (`8080` was already taken by Webhook Listener).
+
+## Testing
+
+`uv run --all-packages pytest adapters/rest_api_service` (or via `./test.sh`). `test_rest_api_service_app.py` covers both the fire-and-forget and sync-reply paths against live NATS, including the timeout case.
+
+## See also
+
+- [Design.md §8](../../Design.md#8-initial-adapters) — this adapter's role among all six.
+- [Design.md §13 Track I](../../Design.md#13-phase-3--detailed-breakdown) — the step-by-step build history, including Decision #24 (why `eventId` doubles as the correlation key).
+- [README.md § Running the demo](../../README.md#running-the-demo) — this adapter as the trigger for the full-mesh walkthrough.
+- [../BUILDING_AN_ADAPTER.md](../BUILDING_AN_ADAPTER.md) — how this adapter (and any new one) is put together.
+Now db_adapter_mysql — the most involved one:
+
+Write README.md
+78 lines
+# Database Adapter (MySQL)
+
+Bidirectional (Design.md [§8](../../Design.md#8-initial-adapters), [§13](../../Design.md#13-phase-3--detailed-breakdown) Track J). The only adapter here with two genuinely independent halves, running concurrently:
+
+- **Write path** — subscribes to a bus event, persists it into MySQL, replies with a correlated result event.
+- **CDC (change data capture) path** — tails the MySQL binlog directly and publishes *any* row change (bus-originated or not) as its own event, independent of the write path.
+
+Both halves target one demo table, `orders` (Decision #25 — real bounded-context schemas replace this whenever real ones exist, per Decision #14).
+
+## Configuration
+
+| Var | Required | Default | Meaning |
+|---|---|---|---|
+| `JETCORE_SERVICE_ID` | yes | — | `db-adapter-mysql-01` in the real deployment. |
+| `JETCORE_NATS_URL` | no | `nats://nats:4222` | |
+| `JETCORE_NATS_CREDS_PATH` | yes | — | |
+| `JETCORE_MYSQL_HOST` | no | `mysql` | Shared by both MySQL connections below — same server, different users. |
+| `JETCORE_MYSQL_PORT` | no | `3306` | |
+| `JETCORE_MYSQL_DATABASE` | no | `jetcore` | |
+| `JETCORE_MYSQL_WRITE_USER` / `JETCORE_MYSQL_WRITE_PASSWORD` | yes | — | The write path's DML identity (`jetcore_write` in [infra/mysql/init.sql](../../infra/mysql/init.sql)) — `INSERT`/`UPDATE` on `orders` only, deliberately no `SELECT` (see "Why the upsert SQL looks unusual" below). |
+| `JETCORE_MYSQL_CDC_USER` / `JETCORE_MYSQL_CDC_PASSWORD` | yes | — | The CDC path's replication-only identity (`jetcore_cdc`) — `REPLICATION SLAVE`/`REPLICATION CLIENT` only, no DML access at all. |
+| `JETCORE_LOG_LEVEL` | no | `INFO` | |
+
+**Two distinct MySQL users, not one set of credentials reused for both roles** — least privilege per role, not just per adapter (Decision #25).
+
+## Write path
+
+| Subject | Direction |
+|---|---|
+| `events.orders.OrderCreated` | subscribe — trigger |
+| `events.orders.OrderPersisted` | publish — result, `correlationId` = the triggering event's `eventId` |
+
+Upserts into `orders` keyed on the caller-supplied `order_id` (no round trip needed to learn a DB-assigned id first, since it's caller-supplied — Decision #25). Payload: `{"orderId": "...", "item": "...", "quantity": <int>}` in, `{"orderId": "...", "status": "persisted", "occurredAt": "..."}` out.
+
+Retry posture: a malformed payload is deterministically bad — logged, **acked**, not retried. A real MySQL error (connection dropped, deadlock) is plausibly transient — logged, left **unacked** for redelivery (capped at 5 attempts). `tenacity` is deliberately **not** used here for an in-process retry loop — JetStream redelivery already is the retry mechanism; stacking a second one on top would just delay how quickly a real outage becomes visible.
+
+### Why the upsert SQL looks unusual
+
+```sql
+INSERT INTO orders (order_id, item, quantity) VALUES (:order_id, :item, :quantity) AS new
+ON DUPLICATE KEY UPDATE item = new.item, quantity = new.quantity
+```
+
+The row-alias form (`AS new` / `new.item`), not MySQL's older `VALUES(item)` function — confirmed by testing, not just style: MySQL 8.0.20+ deprecated `VALUES()` in this context, and it turns out to actually matter here, not just draw a warning — MySQL treats `VALUES()` as reading a virtual table, requiring `SELECT` privilege on every referenced column, which `jetcore_write` deliberately doesn't have. The row-alias form needs no such grant.
+
+## CDC path
+
+| Subject | Direction |
+|---|---|
+| `events.db.orders.RowChanged` | publish — every insert/update/delete on `orders`, from *any* source (bus-originated or a direct SQL write) |
+
+Tails the MySQL binlog via `python-mysql-replication`'s `BinLogStreamReader`, filtered to the `orders` table. Payload: `{"operation": "insert"|"update"|"delete", "table": "orders", "row": {...}, "previousRow": {...} | null}` — `previousRow` is only present for `update`. No `correlationId` — this isn't replying to a request, it's reporting that the table changed, full stop (distinct from `OrderPersisted` above, which is a direct reply to one specific write-path request).
+
+**Known v1 gap, not fixed**: no binlog read-position (`log_file`/`log_pos`) is persisted across restarts. A fresh `BinLogStreamReader` starts from the earliest binlog MySQL still retains, not "now" — confirmed by testing. Every restart replays the adapter's entire available binlog history as a fresh burst of `RowChanged` publishes (bounded by MySQL's own binlog retention, not unbounded). Acceptable for this project's single-demo-instance scope; a real deployment would need to persist and resume from the last-seen position — Design.md [§9](../../Design.md#9-open-questions-summary) item #6.
+
+## Running it standalone
+
+```bash
+JETCORE_SERVICE_ID=db-adapter-mysql-01 \
+JETCORE_NATS_CREDS_PATH=infra/nats/operator/creds/db-adapter-mysql-01.creds \
+JETCORE_MYSQL_WRITE_USER=jetcore_write JETCORE_MYSQL_WRITE_PASSWORD=jetcore-write-dev-only \
+JETCORE_MYSQL_CDC_USER=jetcore_cdc JETCORE_MYSQL_CDC_PASSWORD=jetcore-cdc-dev-only \
+uv run python -m db_adapter_mysql
+```
+
+Requires NATS *and* MySQL already up, with binlog enabled (`log_bin`, `binlog_format=ROW` — see [infra/mysql/my.cnf](../../infra/mysql/my.cnf); a plain `docker run mysql` without that mount won't have CDC working). In the normal dev stack this runs as the `db-adapter-mysql` service in [docker-compose.yml](../../docker-compose.yml).
+
+## Testing
+
+`uv run --all-packages pytest adapters/db_adapter_mysql` (or via `./test.sh`). `test_db_adapter_mysql_write_handler.py`, `test_cdc_watcher.py`, and `test_db_adapter_mysql_entrypoint.py` all run against a real MySQL instance, not a mock — `test_cdc_watcher.py` in particular writes real rows via direct SQL and asserts on the real `RowChanged` events that come out the other side.
+
+## See also
+
+- [Design.md §8](../../Design.md#8-initial-adapters) — this adapter's role among all six.
+- [Design.md §13 Track J](../../Design.md#13-phase-3--detailed-breakdown) — the step-by-step build history, including Decisions #25/#26.
+- [README.md § Running the demo](../../README.md#running-the-demo) — both this adapter's paths as two of the demo's five effects.
+- [../BUILDING_AN_ADAPTER.md](../BUILDING_AN_ADAPTER.md) — how this adapter (and any new one) is put together.
+Read pending_replies.py
+Write BUILDING_AN_ADAPTER.md
+260 lines
+# Building a New Adapter
+
+A step-by-step recipe for adding a new adapter to Jet Core Service Bus, distilled from how the six adapters already in this directory were actually built (Design.md [§12](../Design.md#12-phase-2--detailed-breakdown)/[§13](../Design.md#13-phase-3--detailed-breakdown)). Every claim below is backed by real code in this repo — cross-references point at it rather than restating it, so it can't drift out of sync.
+
+**Read first, if you haven't**: [Design.md §4](../Design.md#4-security--identity-model) (envelope/crypto/identity model) and [§7](../Design.md#7-python-project) (project layout, `uv` workspace). This tutorial assumes you already know *why* the bus works the way it does; it's only about *how to build against it*.
+
+## What "an adapter" is
+
+A small, standalone Python package under `adapters/`, one per deployed instance (not one per adapter *type* — Design.md Decision #18 allows two independently-configured instances of the same code, each with its own identity), that:
+
+1. Connects to NATS via `jetcore`'s `BusClient` under its own stable identity.
+2. Does some combination of: subscribing to bus events and reacting to them, and/or publishing new events (from an HTTP call, a database change, a timer — whatever its integration point is).
+3. Ships as its own Docker image and runs as its own `docker-compose` service.
+
+Every existing adapter is one of two shapes — pick whichever fits:
+
+- **Bus reactor** — no HTTP surface, subscribes to subject(s), does something, optionally publishes a reply. [http_adapter](http_adapter/) and [webhook_sender](webhook_sender/) are the cleanest examples; [file_storage_adapter](file_storage_adapter/) is the same shape with four handlers running concurrently instead of one; [db_adapter_mysql](db_adapter_mysql/) adds a second, independent reactor (its CDC path) alongside the first.
+- **HTTP front door** — a FastAPI app that publishes on each inbound request, optionally waiting on a correlated reply. [webhook_listener](webhook_listener/) is the fire-and-forget version; [rest_api_service](rest_api_service/) adds the synchronous-reply pattern on top.
+
+## The recipe
+
+Each numbered step names the real file(s) that step produces, using `http_adapter` as the running example — the simplest complete bus-reactor adapter with a published reply, so every piece below has a real, short file to point at.
+
+### 1. Scaffold the package
+
+```
+adapters/<name>/
+  pyproject.toml
+  Dockerfile
+  <name>/
+    __init__.py
+    settings.py
+    __main__.py
+    ... your handler module(s), payloads.py
+  tests/
+    conftest.py
+    ...
+```
+
+`pyproject.toml` — copy [http_adapter/pyproject.toml](http_adapter/pyproject.toml) as a starting point. Two things matter:
+
+- `[project] name = "jetcore-<name>"`, **not** bare `<name>` — Decision #28: `http-adapter`, `webhook-listener`, and `webhook-sender` are all real, unrelated packages already published on PyPI, found the hard way (Design.md §13 Step G5). Every adapter's distribution name gets the `jetcore-` prefix now, even ones whose bare name happens to be free — consistency beats checking each one. The Python import name (`<name>`, e.g. `http_adapter`) is unaffected.
+- `[tool.uv.sources] <name> = { workspace = true }` for `jetcore` itself, and any other in-repo dependency.
+
+**Nothing to edit at the workspace root** — [pyproject.toml](../pyproject.toml)'s `[tool.uv.workspace] members = ["libs/*", "adapters/*"]` is a glob; a new `adapters/<name>/pyproject.toml` is picked up automatically by `uv sync --all-packages`.
+
+### 2. `settings.py` — configuration
+
+Subclass `jetcore.config.AdapterSettings` and add only what's new. Every field is `JETCORE_`-prefixed automatically (`pydantic-settings`, `env_prefix="JETCORE_"`) — see [libs/jetcore/jetcore/config.py](../libs/jetcore/jetcore/config.py) for the full inherited baseline (`service_id`, `nats_url`, `nats_creds_path`, `subjects`, `log_level`) before adding a field that might already exist there.
+
+```python
+# adapters/http_adapter/http_adapter/settings.py — real, unedited
+from jetcore.config import AdapterSettings
+from pydantic import SecretStr
+
+class HttpAdapterSettings(AdapterSettings):
+    target_base_url: str
+    auth_token: SecretStr | None = None
+```
+
+- A field with no default is **required** — missing it fails fast at startup with a clear `pydantic` error, not a confusing failure three calls later.
+- Use `pydantic`'s own validating types where they fit for free: `FilePath`/`DirectoryPath` (must exist on disk), `SecretStr` (never accidentally logged/repr'd).
+- Only use the inherited `subjects` field if your adapter's subscribe list is genuinely meant to be runtime-configurable (like `http_adapter`/`webhook_sender`, which relay whatever `JETCORE_SUBJECTS` names). If your subject is fixed by what the adapter *does* (like File Storage Adapter's four command subjects), hardcode it as a module constant instead — don't make configurable what isn't meant to change without also changing code.
+
+### 3. `payloads.py` — the wire format
+
+One module, encode/decode functions only — no bus logic, no I/O. This is the single place your event payloads' shapes live, so schemas, handlers, and tests can't independently drift from each other. See [http_adapter/payloads.py](http_adapter/payloads.py) for the minimal version (one `encode_request_completed`) or [file_storage_adapter/payloads.py](file_storage_adapter/payloads.py) for a fuller one (multiple request/response shapes, a shared `MalformedPayloadError`).
+
+`BusClient` handles the envelope (encryption, signing, `eventId`/`correlationId`) — this module only knows about the plain JSON bytes *inside* that envelope.
+
+### 4. The handler class
+
+One class per thing-you-react-to, each with the same three-method shape every existing handler uses — copy [http_adapter/trigger_handler.py](http_adapter/trigger_handler.py):
+
+```python
+class SomeHandler:
+    def __init__(self, client: BusClient, *, subject: str, ...) -> None: ...
+
+    async def start(self, *, durable_name: str | None = None) -> str:
+        return await self._client.subscribe(self._subject, durable_name=durable_name)
+
+    async def run_once(self, durable_name: str, *, batch: int = 10, timeout: float = 5.0) -> int:
+        events = await self._client.fetch(durable_name, batch=batch, timeout=timeout)
+        for event in events:
+            await self._handle(event)
+        return len(events)
+
+    async def _handle(self, event: ReceivedEvent) -> None:
+        ...  # your logic; ack() or nak() at the end, always exactly one
+```
+
+`start`/`run_once` split out from an infinite loop on purpose — it lets both a test and the real entrypoint drive one fetch cycle directly, without needing OS signals or a subprocess to prove the logic works.
+
+**Ack/nak — pick deliberately, not by default.** Two failure classes, two different responses, matching every existing handler:
+
+- **Deterministically bad** (malformed payload, validation failure, target not found) — log it, **ack** (stop redelivery; retrying would never fix it). Optionally publish a `*Failed`/error reply if your adapter has a result subject a caller can act on.
+- **Plausibly transient** (a real I/O error, a database hiccup, target genuinely unreachable) — log it, **nak** (leave unacked for redelivery). JetStream already caps redelivery at 5 attempts (`MAX_DELIVER_ATTEMPTS` in [bus_client.py](../libs/jetcore/jetcore/bus_client.py)) — you don't need your own retry loop on top; see [db_adapter_mysql/write_handler.py](db_adapter_mysql/write_handler.py)'s docstring for why stacking `tenacity` here was deliberately rejected.
+
+If your adapter should retry on failure vs. drop-and-report is itself a design decision — [webhook_sender](webhook_sender/README.md) acks even on total failure (best-effort, single-attempt, Decision #12); [http_adapter](http_adapter/README.md) naks on the equivalent failure (its whole job is reporting what really happened). Decide and document it, the way both of those did.
+
+### 5. `__main__.py` — the entrypoint
+
+Copy [http_adapter/__main__.py](http_adapter/__main__.py). Every entrypoint in this project has the same shape:
+
+```python
+async def run(client: BusClient, *, ..., shutdown: asyncio.Event) -> None:
+    """The actual running logic, split out from main() so a test can
+    drive this real wiring directly."""
+    tasks = [asyncio.create_task(_wait_for_shutdown(shutdown))]
+    for subject in subjects:
+        handler = SomeHandler(client, subject=subject, ...)
+        durable_name = f"{service_id}-<handler-kind>-{subject.replace('.', '_')}"
+        await handler.start(durable_name=durable_name)
+        tasks.append(asyncio.create_task(_run_loop(handler, durable_name, shutdown)))
+    await asyncio.gather(*tasks)
+
+async def main() -> None:
+    logging.basicConfig(level=logging.INFO)
+    settings = YourSettings()
+    client = await BusClient.connect_as_adapter(settings, adapter_type=ADAPTER_TYPE)
+    shutdown = asyncio.Event()
+    # SIGTERM/SIGINT -> shutdown.set(), same in every adapter
+    try:
+        await run(client, ..., shutdown=shutdown)
+    finally:
+        await client.close()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+`run()` split from `main()` matters: it's what lets `test_*_entrypoint.py` drive the *real* wiring (real `BusClient`, real handlers) against live NATS, injecting only a test-controlled `shutdown` event — proving the actual production code path works, not a stand-in. `ADAPTER_TYPE` is a free-text label (used for observability/registration only, distinct from `service_id`) — match your `adapterType` in the manifest (step 7).
+
+Durable consumer names are deterministic (`f"{service_id}-..."`), not random — a real deployment restarts the same consumer across process restarts and expects to resume its own cursor; only tests want a fresh one every run.
+
+**HTTP front door instead?** Skip the `run()`/`asyncio.gather` shape — see [webhook_listener/app.py](webhook_listener/app.py) (`create_app()`, connect inside FastAPI's `lifespan`) and, for the sync-reply pattern on top of it, [rest_api_service/app.py](rest_api_service/app.py) + [rest_api_service/pending_replies.py](rest_api_service/pending_replies.py). `create_app(settings, *, bus_client=None)` accepting an optional pre-connected client is the pattern that lets tests inject a real test-identity client without going through the production `connect_as_adapter()` path — keep it if you build one of these.
+
+### 6. Add the event schema(s)
+
+For every **new** event type your adapter publishes (not ones that already exist), add `schemas/events.<context>.<EventType>.v1.json` — JSON Schema, Draft 2020-12, `additionalProperties: false`. Copy the shape of an existing one, e.g. [schemas/events.http.RequestCompleted.v1.json](../schemas/events.http.RequestCompleted.v1.json). Add a matching test in your `tests/` directory asserting `Draft202012Validator.check_schema(...)` passes and a real example payload validates — see [adapters/db_adapter_mysql/tests/test_db_adapter_mysql_schemas.py](db_adapter_mysql/tests/test_db_adapter_mysql_schemas.py) for the pattern, including a rejects-bad-input case.
+
+### 7. Register the identity
+
+Add an entry to [infra/nats/adapter_identities.yaml](../infra/nats/adapter_identities.yaml) — this is the actual source of truth for what your adapter is allowed to publish/subscribe on the bus:
+
+```yaml
+  - serviceId: <name>-01
+    adapterType: <name>
+    description: >
+      One or two sentences: what this adapter does, in the same voice
+      every other entry already uses.
+    permissions:
+      publish:
+        - events.<context>.<YourResultEvent>
+      subscribe:
+        - events.<context>.<TriggerEvent>
+```
+
+Don't hand-derive the KV/JetStream-API permissions this implies — `bootstrap_auth.sh` computes those from `publish`/`subscribe` automatically (see the manifest's own header comment for exactly what's derived).
+
+**If you'll have entrypoint/live tests** (you should) **, also add a `<name>-01-test` twin** — identical permissions, different `serviceId` — under the manifest's existing "Test/CI tooling identities" section. This isn't optional polish: a test driving your real entrypoint under the *real* `serviceId` while a real deployed instance of the same identity might also be running collides — [Defects.md Defect 1](../Defects.md#defect-1-testproduction-identity-collision) is the full story of what goes wrong and why every other adapter's tests connect as `<name>-01-test`, never bare `<name>-01`.
+
+Apply the manifest with `bash infra/nats/up.sh` (or just `infra/nats/bootstrap_auth.sh` if NATS is already up) — no server restart needed; this generates the new `.creds` file(s) under `infra/nats/operator/creds/`.
+
+### 8. Dockerfile
+
+Copy [http_adapter/Dockerfile](http_adapter/Dockerfile) and change the package name/path throughout — it's a minimal, deliberately narrow copy set (only `pyproject.toml`+`uv.lock`+`.python-version` at repo root, `libs/jetcore/`, and this one adapter's own directory — not the whole repo) so an image rebuild only invalidates Docker's layer cache when something it actually depends on changed.
+
+### 9. Wire it into `docker-compose.yml`
+
+One service block in [docker-compose.yml](../docker-compose.yml), following an existing adapter's shape:
+
+```yaml
+  <name>:
+    build:
+      context: .
+      dockerfile: adapters/<name>/Dockerfile
+    depends_on:
+      - nats          # + mysql, if you need it
+    environment:
+      JETCORE_SERVICE_ID: <name>-01
+      JETCORE_NATS_URL: nats://nats:4222
+      JETCORE_NATS_CREDS_PATH: /creds/<name>-01.creds
+      # ... your adapter-specific env vars
+    volumes:
+      - ./infra/nats/operator/creds/<name>-01.creds:/creds/<name>-01.creds:ro
+    restart: unless-stopped
+```
+
+Add `ports:` only if it's an HTTP front door — pick a host port not already claimed (check the existing services first: `8080` and `8081` are taken).
+
+If your target is an external integration that doesn't exist yet, point it at something *inside* this stack that gives a real, observable response (the way `http_adapter` points at `webhook-listener`'s `/healthz`) — Decision #14's reasoning: a target this stack can't actually reach either needs real internet access it shouldn't depend on, or fails forever with nothing to observe.
+
+### 10. Tests
+
+`adapters/<name>/tests/conftest.py` — copy an existing one (e.g. [http_adapter/tests/conftest.py](http_adapter/tests/conftest.py)) for the `_is_test_identity()`-scoped `_clean_state` fixture. **Don't write a fixture that blanket-deletes every `service-directory` entry for a shared subject** — [Defects.md Defect 2](../Defects.md#defect-2-ambient-test-traffic-undecryptable-by-real-containers) is what happens when real, permanently-deployed adapters share that subject too.
+
+Test against real NATS, never mocked — every existing test suite in this project does, and it's what actually caught Defects 1-4. Cover your handler(s) directly (construct one, call `start()`/`run_once()`, assert on real published output) and your entrypoint end to end (drive the real `run()` from step 5 against a real, test-identity `BusClient`).
+
+Run just your new suite while developing: `uv run --all-packages pytest adapters/<name>`. Before considering it done, run the *whole* suite via [test.sh](../test.sh) (`./test.sh`, not a bare `pytest` — see the [repo root README](../README.md#running-the-checks) for why) with the full adapter fleet up, to catch anything that only shows up at full-stack scale.
+
+### 11. Wire it into project-wide tooling
+
+Three places list every adapter's source directory explicitly — a new one won't be covered until you add it:
+
+- [README.md](../README.md#running-the-checks)'s `bandit` command
+- [.github/workflows/ci.yml](../.github/workflows/ci.yml)'s `security` job's `bandit` step
+- [test.sh](../test.sh)'s `ADAPTER_SERVICES` array — **only if** your adapter runs as a normal always-up `docker-compose` service (it should, for anything built following this tutorial); this is what lets `test.sh` stop it before running tests and restart it after, the same as every other adapter (Defects.md Defect 3).
+
+**Nothing to do** for `.pre-commit-config.yaml`'s `mypy` hook — its `entry: uv run --all-packages mypy libs adapters tests` already covers every directory under `adapters/`, present and future, with no per-adapter edit needed.
+
+### 12. Write this adapter's own README
+
+One `adapters/<name>/README.md`, developer-facing: what it does, its full configuration table, what it publishes/subscribes (with payload shapes), any notable behavior/error-handling posture, how to run it standalone, how to test it. The six existing ones (linked at the top of each) are the template — match their structure and level of detail rather than inventing a new shape.
+
+### 13. Verify, for real
+
+```bash
+uv sync --all-packages                                    # picks up the new package automatically
+uv run ruff check . && uv run ruff format --check .
+uv run --all-packages mypy libs adapters tests
+uv run bandit -r <every adapter dir, including your new one>
+uv run --all-packages pytest adapters/<name>
+docker compose up -d --build <name>                        # + its dependencies
+# trigger it for real, confirm the real output — curl, a bus publish via
+# nats CLI, whatever fits — the same standard every step above was built to
+./test.sh                                                  # full suite, full fleet
+```
+
+Nothing in this project gets marked done on the strength of "the code looks right" — every adapter here was built by actually running it against real NATS (and MySQL, where relevant) and confirming real output, not by inspection alone. Hold your new one to the same bar.
+
+## Reference: `BusClient`'s API surface
+
+Everything a handler needs, from [libs/jetcore/jetcore/bus_client.py](../libs/jetcore/jetcore/bus_client.py) — full details in each method's own docstring there.
+
+| Method | Use |
+|---|---|
+| `BusClient.connect_as_adapter(settings, *, adapter_type)` | The entrypoint's own connection — stable signing identity derived from the `.creds` file, fresh encryption keypair per process start (Design.md [§9](../Design.md#9-open-questions-summary) item #4 — a known, deliberately-deferred gap: don't design around persistence this doesn't have). |
+| `client.subscribe(subject, *, durable_name=None) -> str` | Registers as a recipient for `subject` (starts its heartbeat) and creates a durable, filtered pull consumer. Idempotent. Returns the durable name actually used. |
+| `client.fetch(durable_name, *, batch=1, timeout=5.0) -> list[ReceivedEvent]` | Pulls up to `batch` already-decrypted, signature-verified messages; empty list on timeout, never raises for "nothing available." |
+| `client.publish(subject, payload, *, event_type, correlation_id=None) -> str` | Encrypts for every currently-registered recipient of `subject`, signs, publishes, returns the generated `eventId`. |
+| `event.ack()` / `event.nak()` | Exactly one, always, per `ReceivedEvent` — see step 4's ack/nak guidance. |
+| `client.close()` | Cancels background heartbeat tasks, stops recipient-cache watches, closes the NATS connection. Always in a `finally`. |
+
+## Checklist
+
+- [ ] `adapters/<name>/pyproject.toml` (`jetcore-<name>` distribution name)
+- [ ] `settings.py` subclassing `AdapterSettings`
+- [ ] `payloads.py`
+- [ ] handler class(es) — `start`/`run_once`/`_handle`, deliberate ack/nak
+- [ ] `__main__.py` — `run()` split from `main()`
+- [ ] `schemas/events.<context>.<Type>.v1.json` for every new event type, plus a schema test
+- [ ] `infra/nats/adapter_identities.yaml` entry (+ a `-test` twin) — applied via `infra/nats/up.sh`
+- [ ] `Dockerfile`
+- [ ] `docker-compose.yml` service block
+- [ ] `adapters/<name>/tests/` — `conftest.py` with `_is_test_identity()`-scoped cleanup, handler tests, entrypoint test
+- [ ] `README.md`'s `bandit` command, `.github/workflows/ci.yml`'s `bandit` step, `test.sh`'s `ADAPTER_SERVICES`
+- [ ] `adapters/<name>/README.md`
+- [ ] `ruff`/`mypy`/`bandit`/`pytest` all clean; a real end-to-end trigger observed, not assumed
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^## 4\.\|^## 7\." Design.md
+
+OUT
+111:## 4. Security Model
+260:## 7. Python Project
+Edit BUILDING_AN_ADAPTER.md
+Modified
+Let me verify all the other Design.md anchors used across these new files are accurate:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^## " Design.md
+
+OUT
+11:## 1. Goals & Non-Goals
+28:## 2. Key Decisions (resolved during design discussion)
+64:## 3. High-Level Architecture
+111:## 4. Security Model
+217:## 5. Event Envelope
+251:## 6. NATS JetStream Layout
+260:## 7. Python Project
+383:## 8. Initial Adapters
+398:## 9. Open Questions Summary
+415:## 10. Proposed Implementation Plan (high-level, no code yet)
+426:## 11. Phase 1 — Detailed Breakdown
+492:## 12. Phase 2 — Detailed Breakdown
+597:## 13. Phase 3 — Detailed Breakdown
+743:## 14. Phase 4 — Detailed Breakdown
+781:## 15. Phase 5 — Detailed Breakdown
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -o "Design.md#[0-9a-z-]*" Defects.md README.md | sort -u
+
+OUT
+Defects.md:Design.md#10-proposed-implementation-plan-high-level-no-code-yet
+Defects.md:Design.md#12-phase-2--detailed-breakdown
+Defects.md:Design.md#13-phase-3--detailed-breakdown
+Defects.md:Design.md#14-phase-4--detailed-breakdown
+Defects.md:Design.md#15-phase-5--detailed-breakdown
+Defects.md:Design.md#9-open-questions-summary
+README.md:Design.md#71-repository-layout
+README.md:Design.md#8-initial-adapters
+README.md:Design.md#9-open-questions-summary
+Good — matches exactly what I used. Now let's verify all the internal links within the new adapter READMEs and tutorial resolve to real files/anchors, and run the project's own checks against these new markdown-adjacent changes:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+for f in adapters/*/README.md adapters/BUILDING_AN_ADAPTER.md; do
+  echo "=== $f ==="
+  grep -oE '\[[^]]+\]\(([^)]+)\)' "$f" | sed -E 's/.*\(([^)]+)\)/\1/' | while read -r link; do
+    # strip anchor
+    path="${link%%#*}"
+    [ -z "$path" ] && continue
+    resolved="$(dirname "$f")/$path"
+    resolved="$(realpath -m "$resolved" 2>/dev/null)"
+    if [ ! -e "$resolved" ]; then
+      echo "  BROKEN: $link -> $resolved"
+    fi
+  done
+done
+
+OUT
+=== adapters/db_adapter_mysql/README.md ===
+=== adapters/file_storage_adapter/README.md ===
+=== adapters/http_adapter/README.md ===
+=== adapters/rest_api_service/README.md ===
+=== adapters/webhook_listener/README.md ===
+=== adapters/webhook_sender/README.md ===
+=== adapters/BUILDING_AN_ADAPTER.md ===
+  BROKEN: http_adapter/payloads.py -> /home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/http_adapter/payloads.py
+  BROKEN: file_storage_adapter/payloads.py -> /home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/file_storage_adapter/payloads.py
+  BROKEN: http_adapter/trigger_handler.py -> /home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/http_adapter/trigger_handler.py
+  BROKEN: db_adapter_mysql/write_handler.py -> /home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/db_adapter_mysql/write_handler.py
+  BROKEN: http_adapter/__main__.py -> /home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/http_adapter/__main__.py
+  BROKEN: webhook_listener/app.py -> /home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/webhook_listener/app.py
+  BROKEN: rest_api_service/app.py -> /home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/rest_api_service/app.py
+  BROKEN: rest_api_service/pending_replies.py -> /home/bherring/dev/clodhopper/JetCoreServiceBus/adapters/rest_api_service/pending_replies.py
+Found real broken links — missing the nested package directory level. Fixing:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+python3 - <<'EOF'
+import re
+path = "adapters/BUILDING_AN_ADAPTER.md"
+with open(path) as f:
+    content = f.read()
+
+fixes = [
+    ("http_adapter/payloads.py)", "http_adapter/http_adapter/payloads.py)"),
+    ("file_storage_adapter/payloads.py)", "file_storage_adapter/file_storage_adapter/payloads.py)"),
+    ("http_adapter/trigger_handler.py)", "http_adapter/http_adapter/trigger_handler.py)"),
+    ("db_adapter_mysql/write_handler.py)", "db_adapter_mysql/db_adapter_mysql/write_handler.py)"),
+    ("http_adapter/__main__.py)", "http_adapter/http_adapter/__main__.py)"),
+    ("webhook_listener/app.py)", "webhook_listener/webhook_listener/app.py)"),
+    ("rest_api_service/app.py)", "rest_api_service/rest_api_service/app.py)"),
+    ("rest_api_service/pending_replies.py)", "rest_api_service/rest_api_service/pending_replies.py)"),
+]
+for old, new in fixes:
+    if old not in content:
+        print("MISSING:", old)
+    content = content.replace(old, new)
+
+with open(path, "w") as f:
+    f.write(content)
+print("done")
+EOF
+
+OUT
+done
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+for f in adapters/*/README.md adapters/BUILDING_AN_ADAPTER.md; do
+  grep -oE '\[[^]]+\]\(([^)]+)\)' "$f" | sed -E 's/.*\(([^)]+)\)/\1/' | while read -r link; do
+    path="${link%%#*}"
+    [ -z "$path" ] && continue
+    resolved="$(realpath -m "$(dirname "$f")/$path" 2>/dev/null)"
+    if [ ! -e "$resolved" ]; then
+      echo "BROKEN in $f: $link -> $resolved"
+    fi
+  done
+done
+echo "check complete"
+
+OUT
+check complete
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^## " README.md
+echo "---Defects.md anchors used---"
+grep -oE "Defects\.md#[a-z0-9-]*" adapters/*/README.md adapters/BUILDING_AN_ADAPTER.md | sort -u
+echo "---actual Defects.md headers---"
+grep -n "^## Defect" Defects.md
+
+OUT
+5:## Prerequisites
+15:## Setting up the Python workspace
+25:## Running the checks
+48:## Running the demo
+112:## Repository layout
+---Defects.md anchors used---
+adapters/BUILDING_AN_ADAPTER.md:Defects.md#defect-1-testproduction-identity-collision
+adapters/BUILDING_AN_ADAPTER.md:Defects.md#defect-2-ambient-test-traffic-undecryptable-by-real-containers
+adapters/file_storage_adapter/README.md:Defects.md#defect-2-ambient-test-traffic-undecryptable-by-real-containers
+---actual Defects.md headers---
+16:## Defect 1: Test/Production Identity Collision
+94:## Defect 2: Ambient Test Traffic Undecryptable by Real Containers
+143:## Defect 3: Real Adapters React to Shared-Subject Test Traffic
+179:## Defect 4: `bootstrap_auth.sh` Idempotency Check Races Against Its Own Pipeline
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+ls adapters/*.md
+echo ---
+for d in adapters/*/; do ls "$d"README.md 2>/dev/null || echo "MISSING: $d"; done
+echo ---
+wc -l adapters/*/README.md adapters/BUILDING_AN_ADAPTER.md
+
+OUT
+adapters/BUILDING_AN_ADAPTER.md
+---
+adapters/db_adapter_mysql/README.md
+adapters/file_storage_adapter/README.md
+adapters/http_adapter/README.md
+adapters/rest_api_service/README.md
+adapters/webhook_listener/README.md
+adapters/webhook_sender/README.md
+---
+   77 adapters/db_adapter_mysql/README.md
+   77 adapters/file_storage_adapter/README.md
+   54 adapters/http_adapter/README.md
+   70 adapters/rest_api_service/README.md
+   69 adapters/webhook_listener/README.md
+   47 adapters/webhook_sender/README.md
+  259 adapters/BUILDING_AN_ADAPTER.md
+  653 total
+Let me add a pointer to this new documentation from the root README's "Repository layout" section, matching the project's practice of keeping cross-references current:
+
+Read README.md (lines 109-112)
+Read README.md (lines 112-115)
+Edit README.md
+Modified
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -oE '\[[^]]+\]\(([^)]+)\)' README.md | sed -E 's/.*\(([^)]+)\)/\1/' | while read -r link; do
+  path="${link%%#*}"
+  [ -z "$path" ] && continue
+  resolved="$(realpath -m "$path" 2>/dev/null)"
+  [ ! -e "$resolved" ] && echo "BROKEN: $link"
+done
+echo done
+
+OUT
+BROKEN: https://docs.astral.sh/uv/
+done
+That's an external URL, expected. Everything else resolves cleanly. Documentation is complete:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run --all-packages pre-commit run --all-files 2>&1 | tail -20
+
+OUT
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+mypy.....................................................................Passed
+bandit...................................................................Passed
+Clean (markdown-only additions, but confirming nothing else regressed). Summary of what's new:
+
+Six adapter READMEs, each covering configuration (full env var table), what it publishes/subscribes with real payload shapes, its specific error-handling/retry posture, how to run it standalone, how to test it, and links back to the relevant Design.md sections:
+
+webhook_listener/README.md
+file_storage_adapter/README.md
+webhook_sender/README.md
+http_adapter/README.md
+rest_api_service/README.md
+db_adapter_mysql/README.md
+adapters/BUILDING_AN_ADAPTER.md — the tutorial, structured as a 13-step recipe (scaffold → settings → payloads → handler → entrypoint → schema → identity/permissions → Dockerfile → compose → tests → project-wide tooling → its own README → real verification), using http_adapter as the running worked example since it's the simplest complete pattern, with the other five cited for the variations (multi-handler, HTTP front door, sync-reply, dual-path). Ends with a BusClient API reference table and a flat checklist. Everything in it points at real files in this repo rather than restating them — I read every settings/handler/entrypoint/payloads module across all six adapters plus jetcore's own config.py/bus_client.py to write it, so the recipe matches what's actually built, not a generic template.
+
+Also added a pointer from the root README's "Repository layout" section so a first-time reader finds both. Verified every internal link resolves (caught and fixed 8 broken ones — missing the nested package-directory level) and re-ran pre-commit clean.
+
+--------------- Adapter Documentation ----------------
+
