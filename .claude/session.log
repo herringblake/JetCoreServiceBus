@@ -33205,3 +33205,106 @@ Added as items #9-12 in Design.md §9, each grounded in the live server config I
 Each states what's confirmed vs. what still needs deciding (a backoff schedule, an idempotency-key source, a TTL value, a history depth) so none of them read as silently settled. Let me know if you want to pick one to scope into an actual Decision/Track next, or leave them parked here for now.
 
 ------------------- NATS Feature Audit -------------------
+
+scope open questions 9 - 12
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+.venv/bin/python3 -c "
+import inspect
+from nats.js.client import JetStreamContext
+print(inspect.signature(JetStreamContext.publish))
+"
+
+OUT
+(self, subject: 'str', payload: 'bytes' = b'', timeout: 'Optional[float]' = None, stream: 'Optional[str]' = None, headers: 'Optional[Dict[str, Any]]' = None, msg_ttl: 'Optional[float]' = None) -> 'api.PubAck'
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+.venv/bin/python3 -c "
+import inspect
+from nats.js.kv import KeyValue
+print('put:', inspect.signature(KeyValue.put))
+print('create:', inspect.signature(KeyValue.create) if hasattr(KeyValue,'create') else 'n/a')
+"
+echo "--- nats kv add --help (ttl/history flags) ---"
+docker run --rm natsio/nats-box:0.19.7-nonroot nats kv add --help 2>&1 | grep -i "ttl\|history"
+
+OUT
+put: (self, key: 'str', value: 'bytes', validate_keys: 'bool' = True) -> 'int'
+create: (self, key: 'str', value: 'bytes', validate_keys: 'bool' = True, msg_ttl: 'Optional[float]' = None) -> 'int'
+--- nats kv add --help (ttl/history flags) ---
+  --history=1                    How many historic values to keep per key
+  --ttl=DURATION                 How long to keep values for
+  --marker-ttl=DURATION          Enables Per-Key TTLs and Limit Markers
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '415,419p' Design.md
+
+OUT
+Item #4 in the original numbering here (the sender-authentication gap found in Step B6) is **resolved** — see Decision #20 and §4.6. It's noted there as a v1-scoped mechanism (trusts whoever registers first for a serviceId, no revocation beyond overwrite), not a fully solved problem for all time, but it's no longer an open design question — it's a documented, implemented, tested decision. (Renumbered above to avoid two different "item #4"s in this document — the encryption-keypair item is the new one.)
+
+---
+
+## 10. Proposed Implementation Plan (high-level, no code yet)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "6\. \*\*Phase 5\*\*" Design.md
+
+OUT
+426:6. **Phase 5** — Finalize `docker-compose.yml` as the complete local demo environment. The compose file itself turned out already complete by the time Phase 4 finished; §15's own intro explains what changed and why — Phase 5 is documentation/verification only, not new infra.
+Edit Design.md
+Added 1 line
+Now let's write §16 with the full breakdown:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+tail -5 Design.md
+
+OUT
+**Track M is complete. Phase 5 is complete.**
+
+---
+
+*This document is a living draft — update it as open questions are resolved and the design evolves, rather than letting decisions drift into code undocumented.*
+Edit Design.md
+Added 29 lines
+Now let's add forward cross-links from §9 items #9-12 to the new track:
+
+Edit Design.md
+Modified
+Edit Design.md
+Modified
+Edit Design.md
+Modified
+Edit Design.md
+Modified
+Let's verify the anchor resolves and do a final sanity pass over the whole new section:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^## 16\." Design.md
+grep -c "§16 Track N" Design.md
+
+OUT
+822:## 16. Phase 6 — Detailed Breakdown
+4
+Phase 6 is scoped: Design.md §16, Track N, four independent steps mapping straight to the four open questions:
+
+N1 — redelivery backoff [2, 5, 15, 30, 60]s in _consumer_config(), one shared function, universal effect.
+N2 — BusClient.publish() gets a new optional msg_id param → Nats-Msg-Id header; both HTTP front doors accept an optional Idempotency-Key request header and pass it through.
+N3 — per-key TTL on service-identity, 90 days proposed.
+N4 — KV history 1 → 5 on both buckets.
+Two real implementation wrinkles surfaced while scoping (checked by introspecting the actual installed nats-py, not assumed) and are called out up front rather than left to be rediscovered mid-build:
+
+N2 is easy — JetStreamContext.publish() already takes a headers dict, so it's one new optional parameter.
+N3 is not as easy as it looks — KeyValue.put() (what register_identity() currently calls) has no msg_ttl param; only KeyValue.create() does, and that's a put-if-not-exists call, semantically wrong for "register or overwrite." N3's step explicitly says to re-confirm nats-py's actual capability at build time rather than trust this scoping session's snapshot of it.
+Each step also names its own real verification (force a nak and check real redelivery timing; two identical requests and check a PubAck.duplicate flag; check a live entry's TTL metadata; check kv history shows multiple versions) rather than "the code looks right" — matching how every other track here has been closed out. §9 items #9-12 now point forward to their respective step.
+
+All four are independent — happy to take "proceed with Track N" as a whole, or you can point at just one (e.g. N1 and N4 are the cheapest/lowest-risk if you'd rather stage this).
+
+-------------- scope recommended fixes from NATS Audit -------------------
