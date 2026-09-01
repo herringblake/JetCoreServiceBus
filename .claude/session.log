@@ -29842,3 +29842,14 @@ Everything's committed to Design.md now with the same "Executed and verified" de
 Only real open item: push to GitHub and let a real CI run happen — if it fails, tell me and I'll fix it against the real logs rather than guessing blind.
 
 ------------------ Track L Completed --------------------
+
+Is there a way to configure dependabot to open PRs against `develop` branch instead of main?
+Yes — each updates entry supports a target-branch key. Without it, Dependabot opens PRs against the repo's default branch (which is presumably main here); setting it explicitly points PRs at develop instead, matching this project's own branching model (in-progress work → develop, main reserved for production).
+
+Edit dependabot.yml
+Added 5 lines
+Added target-branch: "develop" to both ecosystem entries. Note this only matters once main and develop actually diverge (right now the repo's default branch may still effectively be one or the other) — but it's correct to set explicitly now rather than rely on whatever GitHub happens to consider the default.
+
+One thing worth flagging: CI (L2) triggers on push/PR to both develop and main, so Dependabot PRs landing on develop will still run the full test suite before merge — consistent with how the rest of this project treats develop.
+
+----------------- Dependabot target develop branch ----------------
