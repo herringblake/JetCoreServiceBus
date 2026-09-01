@@ -29853,3 +29853,507 @@ Added target-branch: "develop" to both ecosystem entries. Note this only matters
 One thing worth flagging: CI (L2) triggers on push/PR to both develop and main, so Dependabot PRs landing on develop will still run the full test suite before merge — consistent with how the rest of this project treats develop.
 
 ----------------- Dependabot target develop branch ----------------
+
+Lets go on to Phase 5 planning.
+Bash
+IN
+grep -n "Phase 5" Design.md
+
+OUT
+366:Full documentation of each service's ports/volumes/env vars happens when `docker-compose.yml` is actually authored (§10 Phase 5), but the anticipated shape, per [DevelopmentGuidelines.md](DevelopmentGuidelines.md)'s "document environment properties" requirement:
+417:6. **Phase 5** — Finalize `docker-compose.yml` as the complete local demo environment.
+Bash
+IN
+sed -n '390,430p' Design.md
+
+OUT
+---
+
+## 9. Open Questions Summary
+
+Architectural questions have been resolved and folded into §2–§8 above (Decisions #1–#27). What's left is deliberately deferred, not blocking:
+
+1. **File Storage Adapter command/response schema** — exact subject names and payload shape for the `list`/`read`/`write`/`delete` commands are TBD. **Fully resolved as of Phase 3 scoping**: the write path was already settled in §12 (Decision #22); `list`/`read`/`delete` plus the "not found" failure case are now settled too (§13, Decision #23). No longer an open item — struck out below the list, kept only as a numbering anchor for item #2 onward.
+2. **Subject naming** — real bounded-context names are deferred by choice; `events.<context>.<EventType>` stays a placeholder pattern (`orders` as stand-in) until real domains are known. Nothing else in the design depends on the specific names chosen — Phase 3 builds four more real adapters against the same placeholder rather than force-resolving this early. Reconfirmed still deferred, not blocking.
+3. **Externally-triggered file *updates*** — Decision #19 has the File Storage Adapter detect externally-created files (→ `FileCreateCompleted`), but not externally-triggered updates to existing files. **Reconfirmed still deferred past Phase 3 too** — Phase 3's File Storage Adapter scope (§13 Track F) is specifically the `list`/`read`/`delete` commands (item #1 above), not folder-watch expansion; the real usage pattern this needs to be clearer still isn't.
+4. **Encryption keypair persistence across restarts** — found while building Step C6. The *signing* identity is now stable across restarts (`BusClient.connect_as_adapter()`, derived from the adapter's own `.creds` file). The *encryption* keypair still isn't — generated fresh every process start, since Design.md has no answer yet for where a second, independent secret would live. Consequence: a message encrypted for this adapter and still unconsumed across a restart becomes permanently undecryptable. Low-stakes for Phase 2's command/response flow (a lost `FileWriteRequested` is retriable by its sender); deliberately not solved by deriving it from the signing seed (considered and rejected — undermines §4.1's "two independent keypairs" rationale). **Still relevant for Phase 3**: every new adapter that both publishes and subscribes (Database Adapter, REST API Service) inherits the same gap. Worth resolving before any real production deployment; deferred, not blocking Phase 3 either.
+5. **Test-suite flakiness — root cause was a test/production identity collision, now fixed.** First symptom at Step E4 (`pyrage.DecryptError`/`SignatureVerificationError` in an unrelated test), initially misdiagnosed as generic NATS server strain through Steps H5/I7, root cause actually isolated at Step J7 (reproduces standalone, disproving the "cross-test churn" theory), confirmed at full 6-adapter scale at Step K2 (5 simultaneous entrypoint-test failures across 4 adapters in one run, vs. 230/230 clean with the adapter containers stopped), and **fixed**: tests now connect under a dedicated `<adapter>-01-test` identity distinct from the real, live `docker-compose` container's own `serviceId`, verified 5-for-5 clean full-suite runs with the entire fleet running throughout. **Full mechanism, evidence, and applied fix: [Defects.md#defect-1-testproduction-identity-collision](Defects.md#defect-1-testproduction-identity-collision).**
+6. **Database Adapter CDC read position isn't persisted across restarts** — found while building Step J5. `python-mysql-replication`'s `BinLogStreamReader`, given no explicit `log_file`/`log_pos`, starts from the earliest binlog MySQL still retains, not "now" — confirmed by testing, not assumed. Consequence: every restart replays the adapter's entire available binlog history as a fresh burst of `RowChanged` publishes (bounded by MySQL's own binlog retention, not unbounded). Acceptable for this phase's single-demo-instance scope (a full resync is a defensible restart behavior for a CDC reader, arguably even correct for some consumers); a real deployment would need to persist and resume from the last-seen `log_file`/`log_pos`, the same "not yet solved for real production use" caveat already recorded for item #4's encryption-keypair gap. Deferred, not blocking.
+7. **Ambient test traffic occasionally undecryptable by the real adapter containers — a distinct issue from item #5, now fixed.** With item #5 fixed (identity collision, no longer in play), the real containers' own logs still showed `pyrage.DecryptError`/`SignatureVerificationError` from ordinary test-generated traffic on subjects they legitimately subscribe to. Root cause, reproduced directly (polling a real container's `service-directory` KV entry once per second during a normal pytest run, bypassing any client-side cache): eight different `conftest.py` files' `_clean_state` fixtures blanket-deleted *every* KV entry under a shared subject prefix before every test — including the real containers' own registrations, not just test identities — and a deleted entry doesn't come back until that container's next 20s heartbeat. Confirmed absences of 8-59 consecutive seconds, correlated directly against real `DecryptError`/`SignatureVerificationError` log entries in that same window. **Fixed**: those fixtures now only delete keys belonging to test-only identities, plus a `max_deliver` cap added to `_consumer_config()` as a backstop. Verified: a real container's KV entry survived a full 26-test suite run with its `registeredAt` timestamp unchanged. **Full mechanism and applied fix: [Defects.md#defect-2-ambient-test-traffic-undecryptable-by-real-containers](Defects.md#defect-2-ambient-test-traffic-undecryptable-by-real-containers).**
+8. **Real adapters react to shared-subject test traffic — surfaced by fixing item #7, now fixed.** Once items #5/#7's fixes made the real adapter fleet reliably live and registered (rather than intermittently disabled by either bug), a structural issue that both bugs had been partially masking became fully visible: `-test` identities were deliberately given identical permissions to their real counterparts (item #5's own design), so a real adapter and its `-test` twin are both legitimate, simultaneous subscribers to the same "placeholder" subject — meaning a test's own published trigger also reliably triggered the real container's real behavior, racing the test's own assertions or invalidating a test's stated precondition (e.g. "no recipients registered yet," no longer true once a real container is always registered). Caused 8 real pytest failures in the very next full-suite run after items #5/#7 were fixed. **Fixed**: [test.sh](test.sh) stops the six adapter containers (leaving `nats`/`mysql` up) before running pytest, restarting them afterward regardless of outcome — removes the whole class of problem rather than patching the 8 tests that happened to surface it first. Verified: 3 consecutive `./test.sh` runs, 230/230 passing each time. **Full mechanism and applied fix: [Defects.md#defect-3-real-adapters-react-to-shared-subject-test-traffic](Defects.md#defect-3-real-adapters-react-to-shared-subject-test-traffic).**
+
+Item #4 in the original numbering here (the sender-authentication gap found in Step B6) is **resolved** — see Decision #20 and §4.6. It's noted there as a v1-scoped mechanism (trusts whoever registers first for a serviceId, no revocation beyond overwrite), not a fully solved problem for all time, but it's no longer an open design question — it's a documented, implemented, tested decision. (Renumbered above to avoid two different "item #4"s in this document — the encryption-keypair item is the new one.)
+
+---
+
+## 10. Proposed Implementation Plan (high-level, no code yet)
+
+1. **Phase 0** — Resolve remaining §9 items as they come up; finalize this document.
+2. **Phase 1** — Core infra: `nsc`-issued Operator/Account/User JWTs, NATS JetStream config (JWT resolver, `EVENTS` stream, `service-directory` KV bucket); `jetcore` library (envelope, signing, crypto, bus client, registry client) with unit tests, no adapters yet.
+3. **Phase 2** — One vertical slice end-to-end to prove the pattern: **Webhook Listener → File Storage Adapter** (inbound HTTP → encrypted+signed publish of a `FileWriteRequested` command → File Storage Adapter decrypts, verifies signature, writes the file, publishes a result event). Wire into `docker-compose`.
+4. **Phase 3** — Remaining adapters (HTTP Adapter, REST API Service, Webhook Sender, Database Adapter — including its CDC read path per Decision #10; nail down the File Storage Adapter's full command/response schema).
+5. **Phase 4** — Hardening: GitHub Actions CI (ruff, mypy, pytest, bandit, pip-audit). Schema population and an integration-test infra decision were also originally scoped here — both turned out to already be settled by the time Phase 3 finished (§14's own intro explains what changed and why); Phase 4 is narrower in practice than planned here, not larger.
+6. **Phase 5** — Finalize `docker-compose.yml` as the complete local demo environment.
+
+---
+
+## 11. Phase 1 — Detailed Breakdown
+
+Phase 1 (§10) splits into two tracks that can largely proceed in parallel, converging at the end for an integration proof. Nothing here is built yet — this is the step-by-step scope for when implementation starts.
+
+**A few parameters this breakdown assumes — flag now if any should change, otherwise treated as settled for Phase 1:**
+
+| Parameter | Proposed default | Rationale |
+|---|---|---|
+| `service-directory` KV entry TTL | 60s | Short enough that a dead adapter drops out quickly; long enough to tolerate a missed heartbeat or two. |
+| Heartbeat interval (re-`PUT` own entry) | 20s | 3x safety margin under the TTL. |
+Bash
+IN
+cat docker-compose.yml
+
+OUT
+# Jet Core Service Bus — docker-compose
+# Phase 1, Step A6 (Design.md §11 Track A); adapters added in Phase 2,
+# Design.md §12 Step E1 — the Webhook Listener -> File Storage Adapter
+# vertical slice.
+#
+# IMPORTANT — run order, not automated by this file:
+#   1. infra/nats/bootstrap_auth.sh   (Step A3 — generates resolver.conf and
+#      the .creds files this service's config depends on; must exist BEFORE
+#      `nats` can start, since nats-server.conf `include`s it)
+#   2. docker compose up -d nats
+#   3. infra/nats/bootstrap_jetstream.sh   (Step A5 — needs a running,
+#      authenticated server to create the EVENTS stream + service-directory
+#      KV bucket against)
+#   4. docker compose up -d webhook-listener file-storage-adapter
+# infra/nats/up.sh runs 1-3 in order. See infra/nats/README.md for why
+# this isn't wired into Compose's own dependency graph (`depends_on` +
+# service_completed_successfully/service_healthy): both bootstrap scripts
+# already shell out to `docker run` themselves (Design.md §11's "no native
+# install" decision — nsc/nats CLI/yq all run containerized); running them
+# as Compose services too would mean Docker-outside-of-Docker (mounting the
+# host's docker.sock into a container just to spawn sibling containers),
+# which is real added fragility for scripts that already work well as
+# host-level tooling. Revisit if that tradeoff stops being worth it.
+#
+# Both adapters' `depends_on: nats` controls start ORDER only, not
+# readiness (the same A6 finding: nats:2.14.5 has no shell, so no
+# Compose-native healthcheck exists to depend on with `condition:
+# service_healthy`) — `restart: unless-stopped` is what actually covers
+# "NATS wasn't ready yet when this adapter's own nats.connect() ran",
+# the same policy nats itself uses. Neither adapter has its own
+# connection-retry logic (Design.md §12, a deliberate v1 scoping choice,
+# not an oversight) — Compose restarting a crashed container until it
+# succeeds is the chosen mechanism instead.
+
+name: jetcore   # fixes the Compose project/network name (jetcore_default) regardless
+            # of the checkout directory's name — infra/nats/up.sh depends on it
+
+services:
+  nats:
+    image: nats:2.14.5
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    ports:
+      - "4222:4222"   # client connections
+      - "8222:8222"   # monitoring (/varz, /healthz, ...)
+    volumes:
+      - ./infra/nats/nats-server.conf:/etc/nats/nats-server.conf:ro
+      - ./infra/nats/resolver.conf:/etc/nats/resolver.conf:ro
+      - nats-data:/data/jetstream
+    restart: unless-stopped
+
+  webhook-listener:
+    build:
+      context: .
+      dockerfile: adapters/webhook_listener/Dockerfile
+    depends_on:
+      - nats
+    ports:
+      - "8080:8080"
+    environment:
+      JETCORE_SERVICE_ID: webhook-listener-01
+      JETCORE_NATS_URL: nats://nats:4222
+      JETCORE_NATS_CREDS_PATH: /creds/webhook-listener-01.creds
+      # Dev-only placeholder (Decision #21 — a generic shared-secret
+      # mechanism, no real webhook source integrated yet). Real
+      # deployments must override this; it is deliberately not "secret"
+      # as checked into this file.
+      JETCORE_WEBHOOK_SECRET: dev-only-change-me
+      JETCORE_HTTP_PORT: "8080"
+    volumes:
+      - ./infra/nats/operator/creds/webhook-listener-01.creds:/creds/webhook-listener-01.creds:ro
+    restart: unless-stopped
+
+  file-storage-adapter:
+    build:
+      context: .
+      dockerfile: adapters/file_storage_adapter/Dockerfile
+    depends_on:
+      - nats
+    environment:
+      JETCORE_SERVICE_ID: file-storage-01
+      JETCORE_NATS_URL: nats://nats:4222
+      JETCORE_NATS_CREDS_PATH: /creds/file-storage-01.creds
+      JETCORE_WATCH_DIR: /data
+    volumes:
+      - ./infra/nats/operator/creds/file-storage-01.creds:/creds/file-storage-01.creds:ro
+      - ./infra/files:/data
+    restart: unless-stopped
+
+  # Design.md §13 Step J1 — binlog enabled via the my.cnf mount
+  # (log_bin/binlog_format=ROW/server-id, required for the Database
+  # Adapter's CDC read path, Decision #15); init.sql creates the demo
+  # `orders` table plus the two distinct least-privilege users (Decision
+  # #25/Track J parameter table) on first start against a fresh
+  # `mysql-data` volume.
+  mysql:
+    image: mysql:8.4.11
+    environment:
+      MYSQL_ROOT_PASSWORD: dev-only-change-me
+      MYSQL_DATABASE: jetcore
+    ports:
+      - "3306:3306"   # dev convenience (e.g. K3's direct-SQL-write smoke
+                       # test) — not needed by any adapter, which all
+                       # connect via the `mysql` Compose network alias.
+    volumes:
+      - ./infra/mysql/my.cnf:/etc/mysql/conf.d/jetcore.cnf:ro
+      - ./infra/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - mysql-data:/var/lib/mysql
+    restart: unless-stopped
+
+  # Design.md §13 Step K2 — the four remaining adapters, each's real
+  # `.creds` file mounted the same way as webhook-listener/file-storage
+  # already are. Target URLs are deliberately in-network, always-available
+  # placeholders (Decision #14 — no real external bounded context/API is
+  # integrated yet): pointing outbound-calling adapters at a real external
+  # host would either need internet access this dev stack shouldn't
+  # depend on, or would just fail forever with nothing to observe. Each
+  # choice here still exercises the adapter's real HTTP behavior end to
+  # end, not a no-op.
+
+  webhook-sender:
+    build:
+      context: .
+      dockerfile: adapters/webhook_sender/Dockerfile
+    depends_on:
+      - nats
+    environment:
+      JETCORE_SERVICE_ID: webhook-sender-01
+      JETCORE_NATS_URL: nats://nats:4222
+      JETCORE_NATS_CREDS_PATH: /creds/webhook-sender-01.creds
+      JETCORE_SUBJECTS: events.orders.OrderCreated
+      # Relays each OrderCreated to the Webhook Listener's own real HTTP
+      # surface — a genuine, self-contained round trip through a second
+      # real adapter (OrderCreated -> relayed as a webhook -> converted
+      # into FileWriteRequested -> written to disk by the File Storage
+      # Adapter), not a target that only ever errors.
+      JETCORE_TARGET_URL: http://webhook-listener:8080/webhooks/orders/relayed.json
+      JETCORE_OUTBOUND_SECRET: dev-only-change-me   # must match webhook-listener's JETCORE_WEBHOOK_SECRET below
+    volumes:
+      - ./infra/nats/operator/creds/webhook-sender-01.creds:/creds/webhook-sender-01.creds:ro
+    restart: unless-stopped
+
+  http-adapter:
+    build:
+      context: .
+      dockerfile: adapters/http_adapter/Dockerfile
+    depends_on:
+      - nats
+    environment:
+      JETCORE_SERVICE_ID: http-adapter-01
+      JETCORE_NATS_URL: nats://nats:4222
+      JETCORE_NATS_CREDS_PATH: /creds/http-adapter-01.creds
+      JETCORE_SUBJECTS: events.orders.OrderCreated
+      # /healthz only accepts GET, so this POST always gets a real (405)
+      # response — still a real HTTP round trip proving the adapter's
+      # actual behavior ("report the outcome, don't judge it"), without
+      # depending on anything outside this stack or ever needing a nak/
+      # redelivery retry loop against an unreachable host.
+      JETCORE_TARGET_BASE_URL: http://webhook-listener:8080/healthz
+    volumes:
+      - ./infra/nats/operator/creds/http-adapter-01.creds:/creds/http-adapter-01.creds:ro
+    restart: unless-stopped
+
+  rest-api-service:
+    build:
+      context: .
+      dockerfile: adapters/rest_api_service/Dockerfile
+    depends_on:
+      - nats
+    ports:
+      - "8081:8080"   # 8081 on the host — webhook-listener already owns 8080
+    environment:
+      JETCORE_SERVICE_ID: rest-api-service-01
+      JETCORE_NATS_URL: nats://nats:4222
+      JETCORE_NATS_CREDS_PATH: /creds/rest-api-service-01.creds
+      JETCORE_HTTP_PORT: "8080"
+    volumes:
+      - ./infra/nats/operator/creds/rest-api-service-01.creds:/creds/rest-api-service-01.creds:ro
+    restart: unless-stopped
+
+  db-adapter-mysql:
+    build:
+      context: .
+      dockerfile: adapters/db_adapter_mysql/Dockerfile
+    depends_on:
+      - nats
+      - mysql
+    environment:
+      JETCORE_SERVICE_ID: db-adapter-mysql-01
+      JETCORE_NATS_URL: nats://nats:4222
+      JETCORE_NATS_CREDS_PATH: /creds/db-adapter-mysql-01.creds
+      JETCORE_MYSQL_HOST: mysql
+      JETCORE_MYSQL_WRITE_USER: jetcore_write
+      JETCORE_MYSQL_WRITE_PASSWORD: jetcore-write-dev-only
+      JETCORE_MYSQL_CDC_USER: jetcore_cdc
+      JETCORE_MYSQL_CDC_PASSWORD: jetcore-cdc-dev-only
+    volumes:
+      - ./infra/nats/operator/creds/db-adapter-mysql-01.creds:/creds/db-adapter-mysql-01.creds:ro
+    restart: unless-stopped
+
+volumes:
+  nats-data:
+  mysql-data:
+Bash
+IN
+grep -n "^#\|^##" README.md | head -80
+
+OUT
+1:# Jet Core Service Bus
+5:## Prerequisites
+15:## Setting up the Python workspace
+25:## Running the checks
+48:## Repository layout
+Read README.md
+Bash
+IN
+ls infra/files 2>/dev/null; find . -iname "*demo*" -not -path "./.git/*"; grep -n "demo" Design.md | head -40
+
+OUT
+d5
+e4
+notes
+proof
+56:| 25 | Database Adapter's demo schema, given `orders` is still a placeholder bounded context (Decision #14)? | **One demo table**, `orders` (`order_id` **varchar, caller-supplied** primary key — not a DB-assigned autoincrement, so the write path can upsert idempotently without round-tripping an ID back through the bus first; plus a few placeholder business columns and `created_at`/`updated_at`). The write path upserts keyed on `order_id`; the CDC read path tails this same table. Real schemas replace this whenever real bounded contexts do (Decision #14, still deferred). |
+57:| 26 | How does the Database Adapter's write path signal completion back to a waiting REST API Service caller (Decision #24), separately from its own CDC output? | **New `events.orders.OrderPersisted`** event, published by the *write path* immediately after a successful upsert, `correlationId` set to the triggering `OrderCreated`'s `eventId` — distinct from `events.db.orders.RowChanged` (the CDC path's output, which fires for *any* change to the table, bus-originated or not, and carries no `correlationId` since it isn't replying to a specific request). Closes the loop for Decision #24's sync-reply demo without conflating "this specific request finished" with "the table changed." |
+402:6. **Database Adapter CDC read position isn't persisted across restarts** — found while building Step J5. `python-mysql-replication`'s `BinLogStreamReader`, given no explicit `log_file`/`log_pos`, starts from the earliest binlog MySQL still retains, not "now" — confirmed by testing, not assumed. Consequence: every restart replays the adapter's entire available binlog history as a fresh burst of `RowChanged` publishes (bounded by MySQL's own binlog retention, not unbounded). Acceptable for this phase's single-demo-instance scope (a full resync is a defensible restart behavior for a CDC reader, arguably even correct for some consumers); a real deployment would need to persist and resume from the last-seen `log_file`/`log_pos`, the same "not yet solved for real production use" caveat already recorded for item #4's encryption-keypair gap. Deferred, not blocking.
+417:6. **Phase 5** — Finalize `docker-compose.yml` as the complete local demo environment.
+602:| Database Adapter demo schema | Decision #25 — one `orders` table, caller-supplied `order_id` primary key | See §2. |
+690:- [x] **J1. MySQL infra** — [docker-compose.yml](docker-compose.yml)'s `mysql` service: `mysql:8.4.11` (exact-pin, matching this project's `nats`/`nats-box` convention), binlog enabled (`log_bin`, `binlog_format=ROW`, unique `server-id`, plus `binlog_row_image=FULL`/`binlog_row_metadata=FULL` for genuine before/after row images and column-name mapping) via [infra/mysql/my.cnf](infra/mysql/my.cnf); [infra/mysql/init.sql](infra/mysql/init.sql) creates the demo `orders` table (Decision #25: `order_id` caller-supplied `VARCHAR(64)` primary key, plus `item`/`quantity` placeholder business columns) and the two MySQL users. **Executed and verified against a real container**: binlog confirmed `ON`/`ROW`, table schema confirmed via `DESCRIBE`, both users' exact grants confirmed via `SHOW GRANTS`.
+Bash
+IN
+cat .gitignore 2>/dev/null; echo ---; git status --ignored -s infra/files 2>/dev/null; echo ---; git log --oneline -- infra/files | head; echo ---; ls -la infra/files
+
+OUT
+# --- NATS auth material (Design.md §11 Track A parameters: never committed) ---
+# nsc's Operator/Account/User store (nkeys + JWTs) and everything derived
+# from it (generated .creds files, the memory-resolver config, the operator
+# JWT) are regenerated locally by infra/nats/bootstrap_auth.sh, not committed.
+infra/nats/operator/
+infra/nats/resolver.conf
+infra/nats/operator.jwt
+
+# --- Python (uv workspace — Design.md §7.5, Track B) ---
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Adapter runtime data (Design.md §12 Step E1) ---
+# File Storage Adapter's watch_dir bind mount — real file content written
+# by/through the running stack, not part of the repo.
+infra/files/
+
+# --- General ---
+.env
+.DS_Store
+---
+!! infra/files/
+---
+---
+total 24
+drwxrwxr-x 6 bherring bherring 4096 Aug 30 19:09 .
+drwxrwxr-x 5 bherring bherring 4096 Aug 30 13:12 ..
+drwxr-xr-x 2 bherring bherring 4096 Aug 30 19:09 d5
+drwxr-xr-x 2 bherring bherring 4096 Aug 30 17:33 e4
+drwxr-xr-x 2 bherring bherring 4096 Aug 30 19:13 notes
+drwxr-xr-x 2 bherring bherring 4096 Aug 30 19:09 proof
+Good — infra/files/ is already gitignored, so those are just local runtime leftovers, not a real gap. Now let's scope this properly.
+
+Bash
+IN
+sed -n '360,370p' Design.md
+
+OUT
+- **Python version:** pinned via a root `.python-version` file (3.12, Decision #8); `uv` provisions/uses that interpreter automatically.
+- **Per-package env:** `uv` manages a single shared virtual environment for the workspace by default (`.venv/` at the repo root) — no per-adapter venv juggling.
+- **Local paths / system paths:** nothing outside the repo tree is required beyond `uv` itself and Docker; `nsc`'s store is repo-local and git-ignored (§11, Track A parameters).
+
+### 7.6 Environment properties (docker-compose)
+
+Full documentation of each service's ports/volumes/env vars happens when `docker-compose.yml` is actually authored (§10 Phase 5), but the anticipated shape, per [DevelopmentGuidelines.md](DevelopmentGuidelines.md)'s "document environment properties" requirement:
+
+| Service | Anticipated env vars | Ports | Volumes |
+|---|---|---|---|
+| `nats` | — (config-file driven) | `4222` (client), `8222` (monitoring) | JetStream store dir; `infra/nats/` config + resolver |
+Bash
+IN
+sed -n '368,390p' Design.md
+
+OUT
+| Service | Anticipated env vars | Ports | Volumes |
+|---|---|---|---|
+| `nats` | — (config-file driven) | `4222` (client), `8222` (monitoring) | JetStream store dir; `infra/nats/` config + resolver |
+| `mysql` | `MYSQL_ROOT_PASSWORD`, `MYSQL_DATABASE`, binlog settings via `my.cnf` mount | `3306` | data dir; `infra/mysql/init.sql` |
+| each adapter | `JETCORE_SERVICE_ID`, `JETCORE_NATS_CREDS_PATH`, `JETCORE_NATS_URL`, `JETCORE_SUBJECTS`, `JETCORE_LOG_LEVEL` (via `config.py`, §7.1) | adapter-specific (e.g. `8080` for REST API Service / Webhook Listener) | none by default; File Storage Adapter additionally mounts a data volume |
+
+This table is a preview, not a commitment — it will be corrected/expanded against the real compose file once written.
+
+---
+
+## 8. Initial Adapters
+
+| Adapter | Direction | Role | Assumption to confirm |
+|---|---|---|---|
+| **HTTP Adapter** | Bus → external, external → Bus | On event, calls a configured external REST API; may publish the response back as a correlated event. | "Emit and receive" read as: outbound call triggered by a bus event, response optionally re-published. |
+| **REST API Service** | External → Bus (+ optional sync reply) | Exposes a REST API for external clients; translates calls into bus events. Can do request/reply by publishing then waiting on a correlated response subject. | This is the "front door" for external HTTP clients — confirm that's the intent vs. something else. |
+| **Webhook Sender** | Bus → external | Subscribes to configured subjects; POSTs decrypted payload (or a projection) to a registered external webhook URL — **single attempt, best-effort, no retry/backoff**. | A downstream outage can silently drop a delivery at this boundary; acceptable per current requirements. If this changes later, add `tenacity`-based retry + `eventId` dedupe guidance for the receiver. |
+| **Webhook Listener** | External → Bus | Exposes an HTTP endpoint for inbound third-party webhooks; verifies source, converts to the event envelope, encrypts, publishes. | Source verification mechanism (shared secret, HMAC header) is source-specific — TBD per integration. |
+| **Database Adapter (MySQL)** | Bidirectional | **Write path:** subscribes to subjects and persists decrypted event data into MySQL. **Read path (CDC):** tails the MySQL binlog via `python-mysql-replication` and publishes row-level changes as bus events. Both in scope for v1. | Bidirectional scope makes this adapter meaningfully bigger than originally sketched, but the CDC mechanism itself is settled (Decision #15). **Write-path input and CDC-path output must use different subjects** (e.g. `events.orders.OrderCreated` in vs. `events.db.orders.RowChanged` out) — otherwise the adapter could subscribe to its own CDC output as a write-path trigger. Reflected in [infra/nats/adapter_identities.yaml](infra/nats/adapter_identities.yaml). |
+| **File Storage Adapter (local)** | Command-driven (bus → adapter → bus), plus narrow watch → bus | Not a passive archival sink — a **file operations service** invoked via bus commands: `list`, `read`, `write`, `delete` against local files. `FileWriteRequested` auto-creates a missing file; the adapter reports `FileCreateCompleted` (new file) or `FileWriteCompleted` (existing file updated) accordingly (Decision #19). `FileCreateCompleted` is **also** emitted when the adapter notices a file created by an outside process (no preceding command). Full folder-watch (arbitrary external changes, including updates) remains **deferred**. | Exact reply/result-subject scoping (e.g. per-requester) still TBD when this adapter is built (Phase 3); externally-triggered *update* detection is an open question (§9). |
+
+All adapters are built on `jetcore`, so "build a new adapter" mostly means writing the integration-specific glue (HTTP call, file write, SQL write) around a shared `BusClient`.
+Bash
+IN
+grep -n "^## " Design.md | tail -10; echo ---; wc -l Design.md; echo ---; tail -30 Design.md
+
+OUT
+217:## 5. Event Envelope
+251:## 6. NATS JetStream Layout
+260:## 7. Python Project
+378:## 8. Initial Adapters
+393:## 9. Open Questions Summary
+410:## 10. Proposed Implementation Plan (high-level, no code yet)
+421:## 11. Phase 1 — Detailed Breakdown
+487:## 12. Phase 2 — Detailed Breakdown
+592:## 13. Phase 3 — Detailed Breakdown
+738:## 14. Phase 4 — Detailed Breakdown
+---
+778 Design.md
+---
+
+| Parameter | Decision | Rationale |
+|---|---|---|
+| CI's own test infra | Decision #29 — reuse `docker-compose`'s `nats`/`mysql` services, not `testcontainers-python` | See §2. |
+| CI job structure | Multiple parallel jobs (lint/format/typecheck, security, test), not one monolithic job | Faster feedback, clearer failure isolation — a lint failure shouldn't wait on the slower infra-backed test job to report, and vice versa. Mirrors the tool groupings §7.4's own table already uses. |
+| CI trigger | Every push and every PR (Decision #13, already settled), scoped to `develop`/`main` | See §2 for the push/PR half. Branch scope is new: this project uses a two-branch model — `develop` for in-progress work, `main` for production — both already created, with `origin` already configured (`git remote -v` confirms it; L1 below is resolved, not hypothetical). CI runs on push to either branch and on any PR targeting either, so `main` only ever receives something CI has already validated, whether that validation happened on `develop` first or on the PR itself. |
+| Dependabot ecosystem | `uv` (GitHub's native `uv`-aware `package-ecosystem` value) if available at implementation time, `pip` (uv.lock-aware fallback) otherwise | Verify against GitHub's own current docs when Step L3 is actually built — not confirmed here, deliberately not asserted as settled the way this project confirms everything else it states as fact. |
+
+### Track L — Hardening & CI
+
+- [x] **L1. GitHub repository.** Resolved — `origin` (`github.com/herringblake/JetCoreServiceBus`) is configured, and both `develop` (in-progress work) and `main` (production) exist locally and on the remote, confirmed directly (`git remote -v`, `git branch -a`), not assumed. This was flagged as a hard prerequisite when this track was first scoped (no `gh` CLI in this sandbox, and it's the user's own call per the standing "I manage all git commits" instruction) — it's now done, by the user, outside this session. L2-L7 can proceed.
+- [x] **L2. GitHub Actions workflow** — [.github/workflows/ci.yml](.github/workflows/ci.yml), triggered on `push`/`pull_request` to `develop` and `main` (Decision #13 + the branch-scope parameter above). Three jobs, per Decision #29's parameter-table row: `lint-and-typecheck` (ruff/ruff-format/mypy), `security` (bandit/pip-audit), and `test` (`infra/nats/up.sh` + `docker compose up -d mysql` + an explicit MySQL-readiness wait querying `orders`, then `uv run --all-packages pytest` — never the six adapter containers, Defects.md Defect 3). All three use `astral-sh/setup-uv@v7` with `enable-cache: true` and `uv sync --all-packages --locked` (`--locked`: fail on a stale `uv.lock` rather than silently re-resolving) — confirmed current via a live check (`astral-sh/setup-uv`'s own docs, not guessed), not assumed the way this project avoids asserting unconfirmed facts elsewhere.
+
+  **Real limit on how far this step's own verification can go, stated plainly rather than glossed over**: every command inside the workflow was run for real in this session (`uv sync --all-packages --locked`, `ruff check .`, `ruff format --check .`, `mypy`, `bandit`, `pip-audit`, the MySQL-readiness loop against a real container) and all passed — but a GitHub Actions *runner* itself was never available to this sandboxed session, so the workflow file's own YAML structure, triggers, and job wiring are locally sanity-checked (parsed, every embedded command proven to work) rather than "Executed and verified" the way every other track's own code has been throughout this project. That gap closes the first time this gets pushed and a real run either passes or doesn't — genuinely outside this session's own reach, not a shortcut taken.
+
+- [x] **L3. Dependabot** — [.github/dependabot.yml](.github/dependabot.yml): `uv` ecosystem for the Python dependency graph, `github-actions` ecosystem for the workflow's own pinned action versions, both weekly. `package-ecosystem: "uv"` confirmed real and natively supported (added March 2025, still current) via a live check — resolves the parameter table's own "verify against GitHub's current docs" flag from when this track was scoped; the `pip` fallback wasn't needed.
+- [x] **L4. Schema coverage audit** — closed the one real gap: `events.db.orders.RowChanged` now has its own `Draft202012Validator.check_schema()` + insert/update/delete example-payload tests (plus one confirming an invalid `operation` value is correctly rejected), added to [test_db_adapter_mysql_schemas.py](adapters/db_adapter_mysql/tests/test_db_adapter_mysql_schemas.py) alongside its `OrderCreated`/`OrderPersisted` siblings. **Confirmed fresh, not assumed**: every subject in the manifest, every file in `schemas/`, and every subject loaded by any `test_*schema*.py` file cross-checked directly (`grep`, not eyeballed) — all three sets are the same 14, exactly.
+- [x] **L5. Pre-commit hook verification** — found a real, live gap while actually re-running it (`uv run --all-packages pre-commit run --all-files`), not a hypothetical: `.pre-commit-config.yaml`'s bandit hook `exclude: ^.*/tests/` requires a path segment *before* "tests/", so it correctly excluded `adapters/*/tests/`/`libs/jetcore/tests/` but never matched a *bare* leading `tests/` — this project's own root-level cross-adapter test directory (Step E4), which didn't exist yet when this hook was first written (Step B1). Its assert-heavy test files were slipping through into every bandit run undetected. Fixed: `exclude: (^|.*/)tests/`, confirmed against all three path shapes (a plain regex check, then a real pre-commit run — both clean).
+- [x] **L6. Fresh-clone verification** — the same spirit as Phase 1's own completion checkpoint (§11: a full teardown/rebuild from nothing), applied to the whole project this time: a genuine `git clone` of the `develop` branch into an isolated directory, then `uv sync --all-packages` → `infra/nats/up.sh` → `docker compose up -d --build` (all 6 adapter images built fresh from the clone's own Dockerfiles) → a real MySQL-readiness wait → `./test.sh -q` → the rest of README's checks, with nothing carried over from the main checkout. Required briefly stopping the main checkout's own stack first (`docker-compose.yml` hardcodes the Compose project name, so a second concurrent stack under the same name would collide) — done with the user's explicit go-ahead, restored to a freshly-rebuilt, fully healthy state afterward. **230/230 passing from genuinely nothing** (fresh `.venv`, fresh images, fresh NATS/MySQL, zero reliance on this long-lived dev environment's own accumulated state) — the clone reflected everything through the last commit at the time, so it also correctly (and expectedly) reproduced L5's then-still-uncommitted bandit-exclude gap, one more confirmation that finding was real. Main checkout restored and re-verified afterward: `./test.sh -q` → 235 passed (230 + L4's 5 new schema tests), `pre-commit run --all-files` clean.
+- [ ] **L7 (optional, not required to close this track).** Branch protection on `main` requiring the CI jobs above to pass before merge (and plausibly requiring a PR rather than a direct push, now that `main`/`develop` gives this project an actual place to enforce that) — a GitHub repository *setting*, not a file in this repo. `develop` may not want the same restrictions (day-to-day work happens there); a call for the repo owner, not something to assume here — left open deliberately, not forgotten.
+
+**Exit criteria met, with one honest caveat**: L1-L6 are done; L2's own workflow is authored, every command it runs has been proven correct in isolation, but this track's own stated exit bar ("a real push... triggers the workflow, and every job passes") needs an actual push to `github.com/herringblake/JetCoreServiceBus` to close — the one verification step outside this session's own reach. L7 is explicitly optional and left to the repo owner.
+
+**Track L is complete, modulo L2's real-CI confirmation and the optional L7 — Phase 4 is complete in every way this session could actually verify.**
+
+**Exit criteria:** a real push to the GitHub repo from L1 triggers the L2 workflow, and every job passes — the actual proof, not "the YAML looks right." L4-L6 (schema audit, pre-commit, fresh-clone) don't strictly require L1-L3 to exist first and can be done in either order; L7 depends on L1-L2 both existing and is explicitly optional.
+
+---
+
+*This document is a living draft — update it as open questions are resolved and the design evolves, rather than letting decisions drift into code undocumented.*
+Bash
+IN
+grep -n "Exit criteria\|Track L is complete\|^---\|^\*This document" Design.md
+
+OUT
+9:---
+26:---
+62:---
+109:---
+215:---
+249:---
+258:---
+376:---
+391:---
+408:---
+419:---
+485:---
+584:**Exit criteria:** Track C passes standing alone, then Track D passes standing alone, then E3+E4 both pass against the fully wired `docker-compose` stack — mirroring Phase 1's "both tracks converge, then prove it end-to-end from a clean rebuild" pattern (§11's B7 checkpoint).
+590:---
+728:**Exit criteria:** each track passes standing alone first (mirroring Phase 2's own exit criteria), then K3+K4 both pass against the fully wired `docker-compose` stack, MySQL included. **Met** — K3's manual run and K4's automated test each passed for real against the complete stack; the intermittent failures found in *other* tracks' own entrypoint tests once all 6 containers are live are §9 item #5's now-confirmed, already-tracked issue, not a Track K regression.
+736:---
+770:**Exit criteria met, with one honest caveat**: L1-L6 are done; L2's own workflow is authored, every command it runs has been proven correct in isolation, but this track's own stated exit bar ("a real push... triggers the workflow, and every job passes") needs an actual push to `github.com/herringblake/JetCoreServiceBus` to close — the one verification step outside this session's own reach. L7 is explicitly optional and left to the repo owner.
+772:**Track L is complete, modulo L2's real-CI confirmation and the optional L7 — Phase 4 is complete in every way this session could actually verify.**
+774:**Exit criteria:** a real push to the GitHub repo from L1 triggers the L2 workflow, and every job passes — the actual proof, not "the YAML looks right." L4-L6 (schema audit, pre-commit, fresh-clone) don't strictly require L1-L3 to exist first and can be done in either order; L7 depends on L1-L2 both existing and is explicitly optional.
+776:---
+778:*This document is a living draft — update it as open questions are resolved and the design evolves, rather than letting decisions drift into code undocumented.*
+Yeah, I left a duplicate/stale exit-criteria line at 774 from before my edit. Let me clean that up before moving on to Phase 5.
+
+Edit Design.md
+Removed 2 lines
+Bash
+IN
+sed -n '1,200p' adapters/rest_api_service/rest_api_service/*.py 2>/dev/null | grep -n "OrderCreated\|@app\|route\|def \|subject" | head -60
+
+OUT
+7:Step D3): publishes `events.orders.OrderCreated`, capturing the returned
+48:ORDER_CREATED_SUBJECT = "events.orders.OrderCreated"
+52:def create_app(settings: RestApiServiceSettings, *, bus_client: BusClient | None = None) -> FastAPI:
+66:    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+95:    @app.get("/healthz")
+96:    async def healthz() -> dict[str, str]:
+99:    @app.post("/api/orders")
+100:    async def create_order(request: Request, wait: float = Query(default=0.0, ge=0.0)) -> Response:
+103:        event_id = await client.publish(ORDER_CREATED_SUBJECT, body, event_type="OrderCreated")
+157:def main() -> None:
+175:own `eventId` (Step I1's now-returned value), not a NATS inbox subject —
+199:    """Keyed by correlationId (== the triggering OrderCreated's eventId).
+Read Design.md (lines 739-774)
+Now inserting §15 for Phase 5 planning:
+
+Edit Design.md
+Added 30 lines
+Now update §10's Phase 5 summary line to cross-reference the new breakdown, matching Phase 4's pattern:
+
+Bash
+IN
+grep -n "Phase 4.*Hardening: GitHub\|Phase 5.*Finalize" Design.md
+
+OUT
+416:5. **Phase 4** — Hardening: GitHub Actions CI (ruff, mypy, pytest, bandit, pip-audit). Schema population and an integration-test infra decision were also originally scoped here — both turned out to already be settled by the time Phase 3 finished (§14's own intro explains what changed and why); Phase 4 is narrower in practice than planned here, not larger.
+417:6. **Phase 5** — Finalize `docker-compose.yml` as the complete local demo environment.
+778:§10's original Phase 5 scope was "Finalize `docker-compose.yml` as the complete local demo environment." Checking that against what's actually true today, the way §14 did for Phase 4: `docker-compose.yml` itself is **already** a complete, working local environment — all 6 adapters plus `nats`/`mysql`, built across Steps E1 (Phase 2) and K2 (Phase 3), and just proven from a genuinely fresh clone in Step L6 (230/230 passing, zero reliance on this dev environment's own accumulated state). There is no missing service, no missing wiring, no unfinished container. Phase 5 is **not** "keep building the compose file" — that work is done.
+Edit Design.md
+Modified
+Phase 5 is scoped and written into Design.md §15. Summary:
+
+§10's original Phase 5 scope — "Finalize docker-compose.yml as the complete local demo environment" — turned out, on inspection, to already be done as infra: all 6 adapters + nats/mysql are wired, working, and were just proven from a genuine fresh clone in Track L6 (230/230 passing). So like Phase 4 before it, Phase 5 is narrower than originally planned — no new code or infra, purely documentation and a real end-to-end verification pass.
+
+What's actually missing, found by checking the file against what was promised elsewhere in the doc, not guessed:
+
+§7.6's env-vars/ports/volumes table is still explicitly marked "a preview... will be corrected against the real compose file once written" — never delivered.
+README documents how to run checks but has no walkthrough of the running demo itself — despite the compose wiring already being a genuinely good one: a single POST /api/orders on REST API Service fans out to all six adapters at once (Webhook Sender → Webhook Listener → File Storage Adapter's file write; Database Adapter's write path + OrderPersisted reply; its independent CDC path emitting RowChanged; HTTP Adapter's own reaction). Nobody's ever traced that out for a reader.
+One track, four steps:
+
+M1 — fix §7.6's table for real, against all 6 adapters.
+M2 — write a ## Running the demo README section around that one-request/six-adapter trigger.
+M3 — actually execute it against a clean stack (docker compose down -v first, not riding on months of manual-testing leftovers in infra/files/), capture real output, correct the walkthrough to match reality rather than writing it from memory.
+M4 (optional) — a short "what this demo is/isn't" disclaimer note.
+Exit criteria: M1's table is exact, M2 exists, M3's claims are all backed by real captured output. Ready for "Proceed with Track M" whenever you want to move on it.
+
+================= Phase 5 Planning Complete =======================

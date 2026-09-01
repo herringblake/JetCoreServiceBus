@@ -414,7 +414,7 @@ Item #4 in the original numbering here (the sender-authentication gap found in S
 3. **Phase 2** — One vertical slice end-to-end to prove the pattern: **Webhook Listener → File Storage Adapter** (inbound HTTP → encrypted+signed publish of a `FileWriteRequested` command → File Storage Adapter decrypts, verifies signature, writes the file, publishes a result event). Wire into `docker-compose`.
 4. **Phase 3** — Remaining adapters (HTTP Adapter, REST API Service, Webhook Sender, Database Adapter — including its CDC read path per Decision #10; nail down the File Storage Adapter's full command/response schema).
 5. **Phase 4** — Hardening: GitHub Actions CI (ruff, mypy, pytest, bandit, pip-audit). Schema population and an integration-test infra decision were also originally scoped here — both turned out to already be settled by the time Phase 3 finished (§14's own intro explains what changed and why); Phase 4 is narrower in practice than planned here, not larger.
-6. **Phase 5** — Finalize `docker-compose.yml` as the complete local demo environment.
+6. **Phase 5** — Finalize `docker-compose.yml` as the complete local demo environment. The compose file itself turned out already complete by the time Phase 4 finished; §15's own intro explains what changed and why — Phase 5 is documentation/verification only, not new infra.
 
 ---
 
@@ -771,7 +771,35 @@ So Phase 4 is smaller than originally scoped, and different in character from Ph
 
 **Track L is complete, modulo L2's real-CI confirmation and the optional L7 — Phase 4 is complete in every way this session could actually verify.**
 
-**Exit criteria:** a real push to the GitHub repo from L1 triggers the L2 workflow, and every job passes — the actual proof, not "the YAML looks right." L4-L6 (schema audit, pre-commit, fresh-clone) don't strictly require L1-L3 to exist first and can be done in either order; L7 depends on L1-L2 both existing and is explicitly optional.
+---
+
+## 15. Phase 5 — Detailed Breakdown
+
+§10's original Phase 5 scope was "Finalize `docker-compose.yml` as the complete local demo environment." Checking that against what's actually true today, the way §14 did for Phase 4: `docker-compose.yml` itself is **already** a complete, working local environment — all 6 adapters plus `nats`/`mysql`, built across Steps E1 (Phase 2) and K2 (Phase 3), and just proven from a genuinely fresh clone in Step L6 (230/230 passing, zero reliance on this dev environment's own accumulated state). There is no missing service, no missing wiring, no unfinished container. Phase 5 is **not** "keep building the compose file" — that work is done.
+
+What's actually missing is narrower and different in kind: the compose file was built piecewise, one adapter pair at a time (Phase 2's Webhook Listener → File Storage Adapter slice, then Phase 3's four more adapters bolted on one Track at a time). Nobody has ever written down — or even deliberately walked — what the *whole wired mesh* does when exercised as one system. Two concrete gaps found while scoping this section, not assumed:
+
+- **§7.6 made a promise it never kept.** That section's env-vars/ports/volumes table is explicitly marked "a preview, not a commitment — it will be corrected/expanded against the real compose file once written" (§7.6, written at Phase 1). The real file has existed since Phase 2 and been stable since Phase 3; the table was never revisited.
+- **README has no demo walkthrough at all.** "Running the checks" (§ testing) is documented; actually bringing up the full stack and watching it do something is not — despite the compose file's own wiring already being a genuinely good demo. Tracing it out: a single `POST /api/orders` on REST API Service publishes `OrderCreated`, which fans out to **every other adapter at once** — Webhook Sender relays it to Webhook Listener, which converts it to `FileWriteRequested` for the File Storage Adapter to write; Database Adapter's write path upserts the row and replies with `OrderPersisted` (optionally synchronously, via REST API Service's own `?wait=` param); that same row change is picked up independently by Database Adapter's CDC path as `RowChanged`; HTTP Adapter also reacts to `OrderCreated` with its own outbound call. One HTTP request, six adapters, five distinct events — and nothing in the repo currently tells a reader that, or how to see it happen.
+
+So Phase 5 is one track, small and entirely documentation/verification — no new code, no new infra, matching Phase 4's own "smaller and different in character" pattern.
+
+**Parameters this breakdown settles:**
+
+| Parameter | Decision | Rationale |
+|---|---|---|
+| Where the walkthrough lives | A new `## Running the demo` section in `README.md`, not a separate `DEMO.md` | README is already this project's one entry point for "how do I run this thing" (setup, checks); a second file for "how do I run *this other* thing" fragments that without a real reason to split it. |
+| What the walkthrough demonstrates | The `POST /api/orders` fan-out traced above — one trigger touching all 6 adapters — rather than one flow per adapter pair | Phases 2/3 already exercised each adapter individually in tests; the thing genuinely missing is the *whole-mesh* view, which is also what makes this worth calling a "demo" instead of just "instructions." |
+| How each step is confirmed | Real commands against a real running stack (`curl`, `docker compose logs`, inspecting `infra/files/`, a `nats kv get` on `service-directory` if useful) with actual observed output pasted into the walkthrough as expected output, not prose describing what "should" happen | Matches this project's own standing rule: nothing gets written down as fact until it's been run for real. |
+
+### Track M — Demo Environment Finalization
+
+- [ ] **M1. Correct §7.6's table.** Replace the "preview, not a commitment" env-vars/ports/volumes table with the real thing, read directly off `docker-compose.yml` (all 6 adapters, not just the 2 that existed when the placeholder was written) — one row per service, no longer hedged as anticipated.
+- [ ] **M2. Write the demo walkthrough** — new `README.md` section: bring up the full stack (`infra/nats/up.sh` → `docker compose up -d --build`), one `curl -X POST http://localhost:8081/api/orders ...` (with and without `?wait=`), and where to look for each of the five resulting effects (file under `infra/files/`, MySQL row via a `SELECT`, the `OrderPersisted` reply body, log lines from Webhook Sender/HTTP Adapter/CDC showing they reacted). Every command and every piece of "expected output" copied from a real run, not written from memory of how it should behave.
+- [ ] **M3. Execute the walkthrough end to end, for real**, against a clean stack (`docker compose down -v` first, so it's provably not riding on state left over from months of manual testing — `infra/files/`'s existing `d5`/`e4`/notes/`proof` leftovers are exactly that kind of accumulated state, harmless since already git-ignored, but not what M2's documented output should be sourced from). Confirm each of the five effects actually occurs, capture the real output, fix the walkthrough if reality differs from the first draft.
+- [ ] **M4 (optional, not required to close this track).** A one-paragraph "what this demo is/isn't" note near the top of the walkthrough — every target URL is an in-network placeholder (Decision #14), every secret is a checked-in dev-only value, nothing here is a production deployment guide. Most of this is already said elsewhere in the repo (Decision #14 itself, individual compose comments); worth one consolidated pointer where a first-time reader actually lands, but not new information.
+
+**Exit criteria:** M1's table matches the real compose file exactly (line-by-line diffable, not eyeballed); M2's walkthrough exists; M3 has actually been run against a clean stack with real captured output backing every claimed effect in it. M4 is a nice-to-have, not a blocker.
 
 ---
 
