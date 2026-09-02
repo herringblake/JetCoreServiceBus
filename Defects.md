@@ -2,7 +2,7 @@
 
 Companion to [Design.md](Design.md) — tracks real, confirmed defects found while building this project: what's broken, how it was diagnosed, and the recommended (or applied) fix. Distinct from [Design.md §9](Design.md#9-open-questions-summary)'s "Open Questions," which are deliberate, deferred *design* choices, not bugs — a defect here may reference an §9 item (or vice versa) when the two are related, but they're tracked separately: §9 is "not decided yet, on purpose," this document is "decided, and it's wrong, here's the fix."
 
-**Status: 4 fixed, 0 open.** See the management instructions at the bottom for how entries get added, updated, and closed. Running the test suite locally should always go through [test.sh](test.sh) (`./test.sh` in place of `uv run --all-packages pytest`) — see Defect 3.
+**Status: 5 fixed, 0 open.** See the management instructions at the bottom for how entries get added, updated, and closed. Running the test suite locally should always go through [test.sh](test.sh) (`./test.sh` in place of `uv run --all-packages pytest`) — see Defect 3.
 
 | # | Name | Status | Severity | Found |
 |---|---|---|---|---|
@@ -10,6 +10,7 @@ Companion to [Design.md](Design.md) — tracks real, confirmed defects found whi
 | 2 | [Ambient Test Traffic Undecryptable by Real Containers](#defect-2-ambient-test-traffic-undecryptable-by-real-containers) | Fixed — Verified | Low-Medium (log noise + unbounded redelivery on the real containers; no observed effect on pytest's own pass/fail results) | Found and reproduced verifying Defect 1's fix |
 | 3 | [Real Adapters React to Shared-Subject Test Traffic](#defect-3-real-adapters-react-to-shared-subject-test-traffic) | Fixed — Verified | Medium (8 real pytest failures per run, a regression from Defects 1/2 fully working) | Found immediately after applying Defect 2's fix |
 | 4 | [`bootstrap_auth.sh` Idempotency Check Races Against Its Own Pipeline](#defect-4-bootstrap_authsh-idempotency-check-races-against-its-own-pipeline) | Fixed — Verified | Medium (script aborts, or hangs, on a genuinely idempotent rerun — blocks local dev and would intermittently break CI's own `infra/nats/up.sh` step, Design.md §14 Step L2) | Design.md §15 Step M3, a fresh-teardown `docker compose down -v` rebuild |
+| 5 | [Un-acked Test Message Masked by the Old Flat AckWait](#defect-5-un-acked-test-message-masked-by-the-old-flat-ackwait) | Fixed — Verified | Low (a single test's own false-negative risk, pre-existing but latent — never actually flaked before, since nothing had reduced AckWait below the test's own observation window until now) | Design.md §16 Step N1, immediately after implementing the real per-attempt backoff delay |
 
 ---
 
@@ -227,6 +228,40 @@ Before the fix: 2 failures in a tight loop of 5 reruns against the fully-populat
 ### Scope
 
 Fixes the idempotency-check race in `bootstrap_auth.sh` specifically. Does **not** change anything about the identities/permissions the script provisions, and doesn't touch `bootstrap_jetstream.sh` or `up.sh`'s own orchestration — neither showed the same live-pipe-with-early-exit pattern on inspection.
+
+---
+
+## Defect 5: Un-acked Test Message Masked by the Old Flat AckWait
+
+**Status:** Fixed — Verified. See "Applied fix" and "Verification" below.
+**Severity:** Low. Never actually caused a flaky test in this project's own history — it's a latent gap that only became observable once something else changed the timing it was implicitly relying on. No production/adapter-code impact at all; purely a test-suite correctness issue.
+**Found:** [Design.md §16 Step N1](Design.md#16-phase-6--detailed-breakdown), immediately after implementing `ReceivedEvent.nak()`'s new per-attempt backoff delay — a full-suite run that had been clean moments earlier started failing `adapters/file_storage_adapter/tests/test_create_watch.py::test_command_triggered_creation_is_not_also_reported_by_watch` consistently (3/3 reruns), with no other tests affected.
+
+### Symptom
+
+`test_command_triggered_creation_is_not_also_reported_by_watch` fetches a correlated `FileCreateCompleted` event (`first`), asserts it looks right, then fetches again with a 4-second timeout expecting nothing else (`second == []`) — proving `recent_writes.py`'s suppression of the filesystem watch's own uncorrelated republish actually works. After Step N1's change, that second fetch started returning one extra item every time.
+
+### Root cause
+
+`first` was never acked (or nakked) by the test — a violation of this project's own stated invariant (`ReceivedEvent`'s own docstring: "Ack/nak explicitly — nothing here is auto-acked") that had been silently harmless up to this point. An un-acked message becomes eligible for ordinary JetStream redelivery, timed by the consumer's own AckWait/backoff — before Step N1, that was a flat, unset 30s default, comfortably longer than this test's own 4-second observation window, so the redelivery never actually happened *during* the test. Step N1 made `nak()`'d messages redeliver fast (2s first attempt) — but this message was never nakked *or* acked, so it was already riding the passive/silent path Step N1 also confirmed the consumer-level `backoff` genuinely governs (see that step's own verification). With `backoff[0] = 2s`, well inside this test's 4-second window, the same un-acked `first` message redelivered as a spurious "extra" item — not a real second publish from the watch at all, which is what the assertion was actually trying to detect.
+
+Not a bug in Step N1's own change — the change just removed a large, previously-generous safety margin (30s) this one test had been unknowingly depending on, exposing a real, pre-existing gap in the test itself.
+
+### Evidence
+
+Reproduced directly: 3 consecutive isolated reruns of the single test, 3/3 failures, `assert second == []` failing with exactly one extra `ReceivedEvent` each time — not a flake (deterministic given the new fast backoff). After adding the missing `await first[0].ack()`, 3 consecutive isolated reruns, 3/3 clean.
+
+### Applied fix
+
+Added the missing `await first[0].ack()` immediately after `first`'s assertions, in [test_create_watch.py](adapters/file_storage_adapter/tests/test_create_watch.py) — every message this project's own code fetches now gets ack()'d or nak()'d exactly once, this test included, closing the gap rather than working around Step N1's own (correct) timing change.
+
+### Verification
+
+3 consecutive isolated reruns clean post-fix (see Evidence). Full suite via `./test.sh -q`: 236/236 passing immediately after, with Step N1's real backoff change still in place — confirms this was the only test in the whole suite relying on the old flat AckWait as an implicit safety margin (a broader search for the same "fetch, don't ack, fetch-again-expecting-empty" shape across every test file turned up no other instances).
+
+### Scope
+
+Fixes this one test's own gap. Does not change anything about `ReceivedEvent.nak()`'s new behavior (Design.md §16 Step N1) or suggest other tests need auditing beyond the search already done above.
 
 ---
 

@@ -16,11 +16,12 @@ otherwise point at sequence numbers a purge just invalidated).
 """
 
 import base64
+import time
 import uuid
 
 import pytest
 from _helpers import SUBJECT, connect, settings, wait_until_cache_nonempty
-from jetcore.bus_client import BusClient
+from jetcore.bus_client import REDELIVERY_BACKOFF_SECONDS, BusClient
 from jetcore.crypto import encrypt_for_recipients, generate_signing_keypair, sign
 from jetcore.envelope import EncryptionMetadata, Event, EventDetails, EventEnvelope
 
@@ -262,6 +263,113 @@ async def test_message_from_unregistered_sender_is_rejected(durable_name: str) -
 
         assert received == []
     finally:
+        await consumer.close()
+
+
+async def test_publish_with_same_msg_id_does_not_duplicate(durable_name: str) -> None:
+    """Design.md §16 Step N2 (§9 item #10). A real, consumer-visible proof
+    — not just "the second publish() call didn't raise" — that a repeated
+    `msg_id` within the stream's own dedup window results in exactly one
+    fetchable message, the actual thing an idempotency key needs to
+    guarantee for a retried HTTP request."""
+    publisher = await _connect("webhook-listener-01-test")
+    consumer = await _connect("file-storage-01-test")
+    try:
+        await consumer.subscribe(SUBJECT, durable_name=durable_name)
+        await _wait_until_cache_nonempty(await publisher._cache_for(SUBJECT))
+
+        shared_msg_id = f"idempotency-probe-{uuid.uuid4().hex[:8]}"
+        first_event_id = await publisher.publish(
+            SUBJECT, b"attempt one", event_type="FileWriteRequested", msg_id=shared_msg_id
+        )
+        second_event_id = await publisher.publish(
+            SUBJECT, b"attempt two (a retry)", event_type="FileWriteRequested", msg_id=shared_msg_id
+        )
+        # publish()'s own docstring: on a duplicate, it fetches the real
+        # original message back and returns *its* eventId, not the second
+        # call's own locally-built-but-never-persisted one — a caller
+        # correlating a sync reply against this id (REST API Service's
+        # own ?wait=) needs the real, original id, not a fresh one
+        # nothing will ever reply to.
+        assert second_event_id == first_event_id
+
+        received = await consumer.fetch(durable_name, timeout=3)
+        assert len(received) == 1
+        assert received[0].payload == b"attempt one"
+        assert received[0].details.event_id == first_event_id
+        await received[0].ack()
+
+        # Confirm there's genuinely nothing else queued behind it — not
+        # just "fetch happened to return 1", but "there was only ever 1".
+        nothing_more = await consumer.fetch(durable_name, timeout=1)
+        assert nothing_more == []
+    finally:
+        await publisher.close()
+        await consumer.close()
+
+
+async def test_publish_without_msg_id_is_unaffected(durable_name: str) -> None:
+    """The additive half of Design.md §16 Step N2: two publishes with no
+    `msg_id` at all (every existing caller, unchanged) must NOT be treated
+    as duplicates of each other just because they share identical payload
+    bytes — dedup is keyed on Nats-Msg-Id, never inferred from content."""
+    publisher = await _connect("webhook-listener-01-test")
+    consumer = await _connect("file-storage-01-test")
+    try:
+        await consumer.subscribe(SUBJECT, durable_name=durable_name)
+        await _wait_until_cache_nonempty(await publisher._cache_for(SUBJECT))
+
+        await publisher.publish(SUBJECT, b"identical payload", event_type="FileWriteRequested")
+        await publisher.publish(SUBJECT, b"identical payload", event_type="FileWriteRequested")
+
+        received = await consumer.fetch(durable_name, timeout=3)
+        assert len(received) == 1
+        await received[0].ack()
+        received_second = await consumer.fetch(durable_name, timeout=3)
+        assert len(received_second) == 1
+        await received_second[0].ack()
+    finally:
+        await publisher.close()
+        await consumer.close()
+
+
+async def test_nak_applies_escalating_backoff_delay(durable_name: str) -> None:
+    """Design.md §16 Step N1 (§9 item #9). A real, live-timed proof, not
+    just "nak() didn't raise" — confirms ReceivedEvent.nak() actually
+    delays redelivery per REDELIVERY_BACKOFF_SECONDS rather than the bare
+    `msg.nak()` this project found (empirically, via a throwaway probe
+    against this exact pinned nats-server/nats-py) redelivers near-
+    instantly regardless of a consumer's configured `backoff`."""
+    publisher = await _connect("webhook-listener-01-test")
+    consumer = await _connect("file-storage-01-test")
+    try:
+        await consumer.subscribe(SUBJECT, durable_name=durable_name)
+        await _wait_until_cache_nonempty(await publisher._cache_for(SUBJECT))
+        await publisher.publish(SUBJECT, b"backoff probe", event_type="FileWriteRequested")
+
+        first = await consumer.fetch(durable_name, timeout=3)
+        assert len(first) == 1
+        t0 = time.monotonic()
+        await first[0].nak()
+
+        # Immediately after nak() — nothing should be available yet; the
+        # first backoff entry hasn't elapsed. A short timeout, well under
+        # REDELIVERY_BACKOFF_SECONDS[0], so this can't accidentally pass
+        # by just being slow enough to stumble past the real delay.
+        too_soon = await consumer.fetch(durable_name, timeout=REDELIVERY_BACKOFF_SECONDS[0] / 2)
+        assert too_soon == []
+
+        second = await consumer.fetch(durable_name, timeout=REDELIVERY_BACKOFF_SECONDS[0] + 3)
+        elapsed = time.monotonic() - t0
+        assert len(second) == 1
+        assert second[0].details.event_id == first[0].details.event_id
+        # Real redelivery genuinely waited for roughly the configured
+        # first backoff entry, not near-zero (the bare-nak() bug this
+        # fix replaces) and not implausibly longer either.
+        assert REDELIVERY_BACKOFF_SECONDS[0] * 0.5 < elapsed < REDELIVERY_BACKOFF_SECONDS[0] + 3
+        await second[0].ack()
+    finally:
+        await publisher.close()
         await consumer.close()
 
 

@@ -162,6 +162,20 @@ async def test_command_triggered_creation_is_not_also_reported_by_watch(
         first = await observer.fetch(completed_durable, timeout=3)
         assert len(first) == 1
         assert first[0].details.correlation_id is not None  # the real, command-triggered one
+        # Ack it — found while implementing Design.md §16 Step N1: this
+        # was previously left un-acked, which happened to not matter only
+        # because the old flat 30s AckWait comfortably outlasted the
+        # second fetch's own short window below. Once ReceivedEvent.nak()
+        # started applying a fast first backoff (2s, §9 item #9) to
+        # *nakked* messages, an un-acked-and-un-nakked one here (this
+        # test's own gap, not that fix's fault) became eligible for its
+        # own ordinary redelivery well inside that window — surfacing as
+        # a spurious *second* delivery of this same message, not a real
+        # extra publish from the watch. Acking it removes the ambiguity:
+        # every message this project's own code fetches gets ack()'d or
+        # nak()'d exactly once, tests included (ReceivedEvent's own
+        # docstring: "nothing here is auto-acked").
+        await first[0].ack()
 
         # The important assertion: if recent_writes hadn't suppressed it,
         # the external watch's own (uncorrelated) publish would show up

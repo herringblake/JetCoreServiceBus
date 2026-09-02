@@ -33,6 +33,10 @@ class FakeBusClient(BusClient):
 
     def __init__(self) -> None:
         self.published: list[tuple[str, bytes, str]] = []
+        # Separate from `published` above (kept as-is — every existing
+        # caller unpacks it as a 3-tuple) rather than widening that one to
+        # a 4-tuple: Design.md §16 Step N2's own msg_id param.
+        self.published_msg_ids: list[str | None] = []
 
     async def publish(
         self,
@@ -42,8 +46,10 @@ class FakeBusClient(BusClient):
         event_type: str,
         event_schema_version: str = "1.0.0",
         correlation_id: str | None = None,
+        msg_id: str | None = None,
     ) -> str:
         self.published.append((subject, payload, event_type))
+        self.published_msg_ids.append(msg_id)
         # A real, distinct id each call — Design.md §13 Step I1 made this a
         # real return value, not None; a fixed constant here would silently
         # pass a REST API Service test that (bug) reused the SAME id for
@@ -97,6 +103,35 @@ def test_valid_secret_publishes_and_returns_202(
     data = json.loads(payload)
     assert data["path"] == "notes/todo.txt"
     assert base64.b64decode(data["content"]) == b"hello from a webhook"
+
+
+def test_idempotency_key_header_is_passed_through_as_msg_id(
+    client: TestClient, fake_bus: FakeBusClient
+) -> None:
+    """Design.md §16 Step N2 (§9 item #10). The real dedup effect itself
+    is proven against a live bus in libs/jetcore/tests/test_bus_client.py
+    (BusClient.publish()'s own responsibility) — this only needs to prove
+    this adapter's own, narrower job: the header reaches publish()'s
+    msg_id parameter unchanged."""
+    client.post(
+        "/webhooks/notes/todo.txt",
+        content=b"hello",
+        headers={"X-Webhook-Secret": WEBHOOK_SECRET, "Idempotency-Key": "caller-key-123"},
+    )
+
+    assert fake_bus.published_msg_ids == ["caller-key-123"]
+
+
+def test_no_idempotency_key_header_passes_none(client: TestClient, fake_bus: FakeBusClient) -> None:
+    """The additive half — a caller that never sends the header (every
+    existing caller, unchanged) must not have some value invented for it."""
+    client.post(
+        "/webhooks/notes/todo.txt",
+        content=b"hello",
+        headers={"X-Webhook-Secret": WEBHOOK_SECRET},
+    )
+
+    assert fake_bus.published_msg_ids == [None]
 
 
 def test_missing_secret_header_is_rejected(client: TestClient, fake_bus: FakeBusClient) -> None:

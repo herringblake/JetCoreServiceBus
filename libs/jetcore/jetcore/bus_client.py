@@ -32,6 +32,7 @@ import logging
 from typing import TYPE_CHECKING
 
 import nats
+from nats.js import api
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 
 from jetcore.config import AdapterSettings
@@ -81,7 +82,33 @@ class ReceivedEvent:
         await self._msg.ack()
 
     async def nak(self) -> None:
-        await self._msg.nak()
+        """Negatively acknowledges the message, requesting redelivery —
+        with an explicit delay computed from REDELIVERY_BACKOFF_SECONDS
+        and this message's own delivery count (Design.md §16 Step N1,
+        §9 item #9).
+
+        NOT a bare `self._msg.nak()`: confirmed empirically (a real,
+        purpose-built probe against this project's own pinned nats-server/
+        nats-py, not assumed from docs) that a plain NAK with no delay
+        redelivers near-instantly EVERY time, completely bypassing a
+        consumer's configured `backoff` schedule (_consumer_config()
+        below) — three consecutive bare naks all landed at t=0.0s despite
+        a real `backoff=[2, 5, 15]` on the consumer. Every handler in
+        this project calls `event.nak()` (this method) on a transient
+        failure — the deliberate, common case, not an edge case — so
+        without this, configuring `backoff` at all would have had zero
+        practical effect on this codebase's actual redelivery timing.
+        The consumer-level `backoff` config still matters independently:
+        confirmed (same probe methodology) to correctly govern the
+        passive case — a message that's never acked OR nakked at all
+        (an unhandled exception escaping a handler before reaching
+        either) — where there's no explicit nak() call for this method's
+        own delay logic to run in the first place."""
+        num_delivered = self._msg.metadata.num_delivered
+        delay = REDELIVERY_BACKOFF_SECONDS[
+            min(num_delivered - 1, len(REDELIVERY_BACKOFF_SECONDS) - 1)
+        ]
+        await self._msg.nak(delay=delay)
 
 
 # Defects.md Defect 2's own recommended-next-step: this module's docstring
@@ -100,6 +127,15 @@ class ReceivedEvent:
 # enough to ride out this project's own observed gaps (Defect 2: 8-59s).
 MAX_DELIVER_ATTEMPTS = 5
 
+# Design.md §16 Step N1 (§9 item #9) — without this, every redelivery
+# attempt waits the flat server-default AckWait (30s), including the
+# first. One entry per attempt in MAX_DELIVER_ATTEMPTS, escalating: a
+# genuinely transient failure (Defects.md Defect 2's own measured 8-59s
+# registration gaps) gets a fast first retry instead of a fixed 30s wait
+# regardless of how quickly the underlying problem actually clears, while
+# a persistent one still backs off to the same 60s ceiling either way.
+REDELIVERY_BACKOFF_SECONDS: list[float] = [2, 5, 15, 30, 60]
+
 
 def _consumer_config(subject: str) -> ConsumerConfig:
     return ConsumerConfig(
@@ -107,6 +143,7 @@ def _consumer_config(subject: str) -> ConsumerConfig:
         ack_policy=AckPolicy.EXPLICIT,
         deliver_policy=DeliverPolicy.ALL,
         max_deliver=MAX_DELIVER_ATTEMPTS,
+        backoff=REDELIVERY_BACKOFF_SECONDS,
     )
 
 
@@ -226,12 +263,41 @@ class BusClient:
         event_type: str,
         event_schema_version: str = "1.0.0",
         correlation_id: str | None = None,
+        msg_id: str | None = None,
     ) -> str:
         """Publishes `payload` and returns the generated `eventId` (Design.md
         §13 Step I1, Decision #24) — the REST API Service needs it as the
         `correlationId` for a synchronous-reply request, and every existing
         caller that ignored the previous `None` return is unaffected by this
-        becoming a real value (additive, not breaking)."""
+        becoming a real value (additive, not breaking).
+
+        `msg_id`, when given, is set as the `Nats-Msg-Id` header — Design.md
+        §16 Step N2 (§9 item #10). Every stream in this project already has
+        a real `duplicate_window` (confirmed live via `stream info` — the
+        NATS/`nats kv add` defaults, never explicitly set here), so this is
+        the one missing piece: without a `Nats-Msg-Id`, that dedup capacity
+        is provisioned but inert. Optional and additive — every existing
+        caller that never passes one gets today's plain at-least-once
+        behavior, unchanged.
+
+        A caller that publishes the exact same `msg_id` again within the
+        stream's own dedup window does NOT get a second message appended
+        to the stream — confirmed via the real consumer-visible effect
+        (only one message ever fetchable), not just a client-side
+        assumption. It DOES still get back the true *original* call's
+        `eventId`, not the constructed-but-discarded one this retry's own
+        envelope carried: found while wiring this into REST API Service's
+        own sync-reply `?wait=` path, not before — a retry that got back
+        its own locally-built (but never-persisted) eventId would
+        register a pending reply future under an id nothing will ever
+        correlate against, timing out even though the underlying request
+        genuinely already succeeded on the first attempt. `PubAck.seq` on
+        a duplicate points at the *original* message (confirmed directly:
+        two publishes sharing one `msg_id` returned the same `seq` both
+        times), so on `PubAck.duplicate=True` this fetches that original
+        message back and returns its real embedded eventId instead — one
+        extra round trip, only on the genuinely-rare duplicate path, never
+        on the common one."""
         cache = await self._cache_for(subject)
         recipients = cache.current()
         if not recipients:
@@ -253,7 +319,35 @@ class BusClient:
             encryption=EncryptionMetadata(algorithm=ENCRYPTION_ALGORITHM, recipients=recipients),
             eventPayload=base64.b64encode(ciphertext).decode(),
         )
-        await self._js.publish(subject, Event(event=envelope).to_wire())
+        # api.Header.MSG_ID.value, NOT str(api.Header.MSG_ID) or the bare
+        # enum member — a real bug caught by this project's own dedup
+        # test, not assumed away: `Header` is a `(str, Enum)` mix-in, not
+        # a `StrEnum` (Python 3.11+), so plain `str()` on a member gives
+        # Python's default Enum repr ("Header.MSG_ID"), not its actual
+        # string value ("Nats-Msg-Id") — confirmed directly. Sent that
+        # wrong header once for real (a live probe against this project's
+        # own NATS), got two distinct sequence numbers back for what
+        # should have deduplicated to one, and only then found why.
+        # `.value` is the real fix; also gives mypy `dict[str, str]`
+        # cleanly, unlike passing the bare (non-`str`-typed-to-mypy) member.
+        headers: dict[str, str] | None = (
+            {api.Header.MSG_ID.value: msg_id} if msg_id is not None else None
+        )
+        pub_ack = await self._js.publish(subject, Event(event=envelope).to_wire(), headers=headers)
+        if pub_ack.duplicate:
+            original = await self._js.get_msg(pub_ack.stream, seq=pub_ack.seq)
+            if original.data is None:
+                # Shouldn't be reachable for a real prior publish() — a
+                # bare `assert` here would be a bandit B101 finding
+                # (stripped under -O) for something load-bearing, so a
+                # real exception instead, same as fetch()'s "no consumer
+                # named" check above.
+                raise RuntimeError(
+                    f"duplicate publish's own original message "
+                    f"({pub_ack.stream}#{pub_ack.seq}) came back with no data"
+                )
+            original_event = Event.from_wire(original.data)
+            return original_event.event.event_details.event_id
         return details.event_id
 
     # --- Consume ---------------------------------------------------------

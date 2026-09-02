@@ -33,7 +33,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Query, Request, Response
+from fastapi import FastAPI, Header, Query, Request, Response
 from jetcore.bus_client import BusClient
 
 from rest_api_service.pending_replies import (
@@ -97,10 +97,24 @@ def create_app(settings: RestApiServiceSettings, *, bus_client: BusClient | None
         return {"status": "ok"}
 
     @app.post("/api/orders")
-    async def create_order(request: Request, wait: float = Query(default=0.0, ge=0.0)) -> Response:
+    async def create_order(
+        request: Request,
+        wait: float = Query(default=0.0, ge=0.0),
+        idempotency_key: str | None = Header(default=None),
+    ) -> Response:
+        # Design.md §16 Step N2 (§9 item #10) — optional, additive: a
+        # caller that never sends this header gets today's plain
+        # at-least-once behavior, unchanged. One that retries the exact
+        # same `Idempotency-Key` after a network blip (e.g. it never saw
+        # this endpoint's own response, even though the publish already
+        # landed) gets the retry's publish suppressed server-side by
+        # JetStream's own dedup window (BusClient.publish()'s own
+        # docstring), not a second OrderCreated.
         body = await request.body()
         client: BusClient = request.app.state.bus_client
-        event_id = await client.publish(ORDER_CREATED_SUBJECT, body, event_type="OrderCreated")
+        event_id = await client.publish(
+            ORDER_CREATED_SUBJECT, body, event_type="OrderCreated", msg_id=idempotency_key
+        )
 
         if wait <= 0:
             return Response(

@@ -75,6 +75,26 @@ logger = logging.getLogger(__name__)
 BUCKET_NAME = "service-directory"
 IDENTITY_BUCKET_NAME = "service-identity"
 
+# Design.md §16 Step N3 (§9 item #11) — how long a fresh identity
+# registration stays valid before it's eligible to age out on its own, if
+# the adapter never reconnects again. Refreshed automatically on every
+# real `register_identity()` call (every BusClient.connect()), so a
+# live, periodically-restarting adapter never actually reaches this;
+# it only matters for a genuinely decommissioned one.
+IDENTITY_TTL_SECONDS = 90 * 24 * 60 * 60  # 90 days
+
+# The standard NATS KV wire-subject convention ($KV.<bucket>.<key>) — a
+# stable, public part of the KV protocol, not a nats-py implementation
+# detail. Used directly here because `KeyValue.put()` doesn't support a
+# per-message TTL at all (its own docstring: "This method does not
+# support TTL. Use create() if you need TTL support" — confirmed by
+# reading nats-py's source, not just the docstring) and `KeyValue.create()`
+# has the wrong semantics for this call site (put-if-absent, would raise
+# on every re-registration instead of the intended "register or refresh"
+# behavior register_identity() already documents). `js.publish()` with an
+# explicit `msg_ttl` and no "expected last sequence" header is what
+# `put()` itself does internally, minus the TTL restriction.
+
 # Design.md §11 parameter table: TTL 60s, heartbeat well under that (3x
 # safety margin) so a couple of missed beats don't drop registration.
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 20.0
@@ -122,15 +142,19 @@ class RegistryClient:
     call, which is exactly what Design.md §4.5 says NOT to do per publish.
     """
 
-    def __init__(self, kv: KeyValue, identity_kv: KeyValue) -> None:
+    def __init__(self, kv: KeyValue, identity_kv: KeyValue, js: JetStreamContext) -> None:
         self._kv = kv
         self._identity_kv = identity_kv
+        # Held directly (not just via kv/identity_kv) for register_identity()'s
+        # own js.publish(..., msg_ttl=...) call — see IDENTITY_TTL_SECONDS'
+        # own comment for why that can't go through KeyValue.put()/create().
+        self._js = js
 
     @classmethod
     async def connect(cls, js: JetStreamContext) -> RegistryClient:
         kv = await js.key_value(BUCKET_NAME)
         identity_kv = await js.key_value(IDENTITY_BUCKET_NAME)
-        return cls(kv, identity_kv)
+        return cls(kv, identity_kv, js)
 
     async def register(
         self, *, subject: str, service_id: str, adapter_type: str, encryption_public_key: str
@@ -158,16 +182,23 @@ class RegistryClient:
     ) -> None:
         """Registers this adapter's own signing public key in the
         service-identity directory — call once, at connect time (not on a
-        heartbeat; see the module docstring for why no TTL is involved
-        here). Every adapter does this, publisher or subscriber, since a
-        recipient needs to be able to look up *any* claimed sender's key."""
-        await self._identity_kv.put(
-            service_id,
+        repeating heartbeat; see the module docstring for why). Every
+        adapter does this, publisher or subscriber, since a recipient
+        needs to be able to look up *any* claimed sender's key.
+
+        Carries a long, set-once per-key TTL (IDENTITY_TTL_SECONDS,
+        Design.md §16 Step N3) — refreshed every time this is called
+        (i.e. every real connect), so a live adapter's own entry never
+        actually approaches expiry; only a genuinely decommissioned one
+        (never reconnects again) eventually ages out on its own."""
+        await self._js.publish(
+            f"$KV.{IDENTITY_BUCKET_NAME}.{service_id}",
             _identity_value(
                 service_id=service_id,
                 adapter_type=adapter_type,
                 signing_public_key=signing_public_key,
             ),
+            msg_ttl=IDENTITY_TTL_SECONDS,
         )
 
     async def lookup_signing_key(self, service_id: str) -> str | None:

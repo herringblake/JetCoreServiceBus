@@ -33308,3 +33308,1736 @@ Each step also names its own real verification (force a nak and check real redel
 All four are independent — happy to take "proceed with Track N" as a whole, or you can point at just one (e.g. N1 and N4 are the cheapest/lowest-risk if you'd rather stage this).
 
 -------------- scope recommended fixes from NATS Audit -------------------
+
+Proceed with Track N
+Now let's implement N1 (backoff) first:
+
+Let me verify the actual server-side constraint on backoff length vs max_deliver empirically rather than assume:
+
+Let me verify a subtler but important point — whether event.nak() (used throughout every handler) bypasses the backoff schedule entirely:
+
+This is a real, load-bearing finding — event.nak() (called explicitly by every handler in this codebase) causes near-instant redelivery regardless of the configured backoff, which only governs the silent/crashed-consumer case. Let me confirm the mechanism precisely before deciding the fix:
+
+Good — that confusion was a test-methodology artifact (stream backlog from repeated probe runs), not a real NATS surprise. Let me redo the original bare-nak()-with-backoff test cleanly to get the real answer:
+
+Now let's cleanly verify the passive/silent case (no explicit ack/nak — e.g. a crashed handler) so I know exactly what the consumer-level backoff field actually buys us:
+
+Excellent — that settles it: the consumer-level backoff genuinely works for the passive/crashed-handler case, but every handler's own deliberate nak() calls bypass it entirely and redeliver near-instantly. Both halves are needed. Let me implement the real fix:
+
+Fixing both — declare the constant as list[float] and let ruff reformat:
+
+Now let's add the new test, following the same style:
+
+Real test passes, confirming the actual nak() timing behavior. Now let's run the full jetcore test suite to check for regressions from touching nak():
+
+That's the known Defect 3 mechanism — I used bare pytest instead of ./test.sh. Let me rerun properly:
+
+Found the real root cause — a pre-existing test bug the new fast backoff just exposed, not a bug in my change. first[0] in this test is fetched but never acked or nakked — it always relied on the old 30s default AckWait being longer than the test's own 4s "confirm nothing else arrives" window. Let me check the whole suite for this pattern before fixing just one instance:
+
+Confirmed — this is the one genuinely affected test (a two-step "fetch, don't ack, fetch again expecting empty" pattern that implicitly relied on the old 30s AckWait). The other == [] assertions are single-fetch()-call patterns immune to this. Let me fix it properly:
+
+Now let's verify this fix and re-run the full suite:
+
+3/3 clean now. Let's run the full suite via test.sh to confirm nothing else surfaces:
+
+Remote Control is active · Continue here, on your phone, or at claude.ai/code
+
+N1 is fully done and verified — real backoff behavior, a genuine pre-existing test bug found and fixed along the way, full suite clean (236/236). Now let's do N4 (cheapest remaining):
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+  kv rm probe-ttl-bucket -f 2>&1 | tail -3
+
+cat > /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_kv_ttl.py <<'EOF'
+import asyncio
+import nats
+
+async def main():
+    nc = await nats.connect("nats://localhost:4222", user_credentials="infra/nats/operator/creds/jetcore-admin.creds")
+    js = nc.jetstream()
+    from nats.js.api import KeyValueConfig
+    kv = await js.create_key_value(KeyValueConfig(bucket="probe-ttl-bucket2", history=5, storage="file"))
+    # does create() support msg_ttl?
+    rev = await kv.create("some-key", b"hello", msg_ttl=5)
+    print("create() with msg_ttl=5 worked, revision:", rev)
+    entry = await kv.get("some-key")
+    print("entry value:", entry.value)
+    await asyncio.sleep(6)
+    try:
+        entry2 = await kv.get("some-key")
+        print("UNEXPECTED still present:", entry2.value)
+    except Exception as e:
+        print("expired as expected:", type(e).__name__)
+
+    await js.delete_key_value("probe-ttl-bucket2")
+    await nc.close()
+
+asyncio.run(main())
+EOF
+uv run python /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_kv_ttl.py
+
+OUT
+Exit code 1
+nats: encountered error
+nats.errors.Error: nats: permissions violation for publish to "$kv.probe-ttl-bucket2.some-key"
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+asyncio.exceptions.CancelledError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/nats/aio/client.py", line 1103, in _request_new_style
+    return await asyncio.wait_for(future, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 519, in wait_for
+    async with timeouts.timeout(timeout):
+  File "/usr/lib/python3.12/asyncio/timeouts.py", line 115, in __aexit__
+    raise TimeoutError from exc_val
+TimeoutError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_kv_ttl.py", line 24, in <module>
+    asyncio.run(main())
+  File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 687, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_kv_ttl.py", line 10, in main
+    rev = await kv.create("some-key", b"hello", msg_ttl=5)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/nats/js/kv.py", line 239, in create
+    pa = await self._update(key, value, last=0, validate_keys=validate_keys, msg_ttl=msg_ttl)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/nats/js/kv.py", line 295, in _update
+    pa = await self._js.publish(f"{self._pre}{key}", value, headers=hdrs, msg_ttl=msg_ttl)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/nats/js/client.py", line 208, in publish
+    msg = await self._nc.request(
+          ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/nats/aio/client.py", line 1068, in request
+    msg = await self._request_new_style(subject, payload, timeout=timeout, headers=headers)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/nats/aio/client.py", line 1105, in _request_new_style
+    raise errors.TimeoutError
+nats.errors.TimeoutError: nats: timeout
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+  kv rm probe-ttl-bucket2 -f 2>&1 | tail -3
+
+OUT
+(Bash completed with no output)
+Read bootstrap_jetstream.sh (lines 2-61)
+Edit bootstrap_jetstream.sh
+Added 21 lines
+Edit bootstrap_jetstream.sh
+Added 6 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "IDENTITY_KV_TTL\|IDENTITY_KV_MARKER_TTL\|KV_HISTORY" infra/nats/bootstrap_jetstream.sh
+
+OUT
+71:KV_HISTORY=5               # Design.md §16 Step N4 (§9 item #12), both buckets
+80:IDENTITY_KV_MARKER_TTL="1h"
+119:    --history "$KV_HISTORY"
+129:    --history "$KV_HISTORY" \
+130:    --marker-ttl "$IDENTITY_KV_TTL"
+Edit bootstrap_jetstream.sh
+Modified
+Let's view the full file to sanity-check it end to end:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+bash -n infra/nats/bootstrap_jetstream.sh && echo "syntax OK"
+sed -n '95,133p' infra/nats/bootstrap_jetstream.sh
+
+OUT
+syntax OK
+
+echo "== Stream: $STREAM_NAME =="
+if nats stream ls -n 2>/dev/null | grep -qx "$STREAM_NAME"; then
+  echo "already exists, skipping add"
+else
+  nats stream add "$STREAM_NAME" \
+    --subjects "$STREAM_SUBJECTS" \
+    --storage file \
+    --retention limits \
+    --discard old \
+    --max-age "$STREAM_MAX_AGE" \
+    --max-bytes "$STREAM_MAX_BYTES" \
+    --replicas 1 \
+    --defaults
+fi
+
+echo "== KV bucket: $KV_BUCKET =="
+if nats kv ls -n 2>/dev/null | grep -qx "$KV_BUCKET"; then
+  echo "already exists, skipping add"
+else
+  nats kv add "$KV_BUCKET" \
+    --storage file \
+    --ttl "$KV_TTL" \
+    --replicas 1 \
+    --history "$KV_HISTORY"
+fi
+
+echo "== KV bucket: $IDENTITY_KV_BUCKET =="
+if nats kv ls -n 2>/dev/null | grep -qx "$IDENTITY_KV_BUCKET"; then
+  echo "already exists, skipping add"
+else
+  nats kv add "$IDENTITY_KV_BUCKET" \
+    --storage file \
+    --replicas 1 \
+    --history "$KV_HISTORY" \
+    --marker-ttl "$IDENTITY_KV_MARKER_TTL"
+fi
+
+echo "Done. Next: Step A6 wires everything into docker-compose."
+Now let's recreate both buckets for real (existing buckets don't pick up new config on rerun — as documented in §16, a recreate is the safe default at this dev scale):
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+  kv rm service-directory -f 2>&1 | tail -3
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+  kv rm service-identity -f 2>&1 | tail -3
+bash infra/nats/bootstrap_jetstream.sh 2>&1 | tail -30
+
+OUT
+== Stream: EVENTS ==
+nats: error: could not create Stream: dial tcp: lookup nats on 10.0.0.1:53: no such host
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+DOCKER_NETWORK=jetcore_default bash infra/nats/bootstrap_jetstream.sh 2>&1 | tail -40
+
+OUT
+           History Kept: 5
+          Values Stored: 0
+             Compressed: false
+  Per-Key TTL Supported: false
+     Backing Store Kind: JetStream
+            Bucket Size: 0 B
+    Maximum Bucket Size: unlimited
+     Maximum Value Size: unlimited
+            Maximum Age: 1m0s
+       JetStream Stream: KV_service-directory
+                Storage: File
+
+Cluster Information:
+
+                   Name: 
+                 Leader: NBZRTRFZH2R5NX3EF72ODAI7UC46IQBLFOLW3LOB4LBKJCIRKT4HWPZF
+== KV bucket: service-identity ==
+Information for Key-Value Store Bucket service-identity created 2026-09-01 19:59:17
+
+Configuration:
+
+            Bucket Name: service-identity
+           History Kept: 5
+          Values Stored: 0
+             Compressed: false
+  Per-Key TTL Supported: true
+       Limit Marker TTL: 1h0m0s
+     Backing Store Kind: JetStream
+            Bucket Size: 0 B
+    Maximum Bucket Size: unlimited
+     Maximum Value Size: unlimited
+            Maximum Age: unlimited
+       JetStream Stream: KV_service-identity
+                Storage: File
+
+Cluster Information:
+
+                   Name: 
+                 Leader: NBZRTRFZH2R5NX3EF72ODAI7UC46IQBLFOLW3LOB4LBKJCIRKT4HWPZF
+Done. Next: Step A6 wires everything into docker-compose.
+Both buckets recreated correctly: service-directory has History Kept: 5, service-identity has History Kept: 5 and Per-Key TTL Supported: true. Now let's implement the registry.py side (N3's actual TTL write):
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+.venv/bin/python3 -c "
+import inspect
+from nats.js.kv import KeyValue
+print(inspect.getsource(KeyValue._update))
+"
+
+OUT
+    async def _update(
+        self,
+        key: str,
+        value: bytes,
+        last: Optional[int] = None,
+        validate_keys: bool = True,
+        msg_ttl: Optional[float] = None,
+    ) -> int:
+        if validate_keys and not _is_key_valid(key):
+            raise nats.js.errors.InvalidKeyError(key)
+
+        hdrs = {}
+        if not last:
+            last = 0
+        hdrs[api.Header.EXPECTED_LAST_SUBJECT_SEQUENCE] = str(last)
+
+        pa = None
+        try:
+            pa = await self._js.publish(f"{self._pre}{key}", value, headers=hdrs, msg_ttl=msg_ttl)
+        except nats.js.errors.APIError as err:
+            # Check for a BadRequest::KeyWrongLastSequenceError error code.
+            # 10071: JSStreamWrongLastSequenceErrF
+            # 10164: JSStreamWrongLastSequenceConstantErr
+            if err.err_code in (10071, 10164):
+                raise nats.js.errors.KeyWrongLastSequenceError(description=err.description)
+            else:
+                raise err
+        return pa.seq
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+.venv/bin/python3 -c "
+import inspect
+from nats.js.kv import KeyValue
+print(inspect.getsource(KeyValue.put))
+print()
+print('_pre attr:')
+print(inspect.getsource(KeyValue.__init__))
+"
+
+OUT
+    async def put(self, key: str, value: bytes, validate_keys: bool = True) -> int:
+        """
+        put will place the new value for the key into the store
+        and return the revision number.
+
+        Note: This method does not support TTL. Use create() if you need TTL support.
+
+        :param key: The key to put
+        :param value: The value to store
+        :param validate_keys: Whether to validate the key format
+        """
+        if validate_keys and not _is_key_valid(key):
+            raise nats.js.errors.InvalidKeyError(key)
+
+        pa = await self._js.publish(f"{self._pre}{key}", value)
+        return pa.seq
+
+
+_pre attr:
+    def __init__(
+        self,
+        name: str,
+        stream: str,
+        pre: str,
+        js: JetStreamContext,
+        direct: bool,
+    ) -> None:
+        self._name = name
+        self._stream = stream
+        self._pre = pre
+        self._js = js
+        self._direct = direct
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -rn "\._pre\b\|\._js\b" libs/jetcore/jetcore/*.py | grep -v "self._js\s*=" 
+
+OUT
+libs/jetcore/jetcore/registry.py:39:    real NATS subject (`f"{self._pre}{keys}"`, feeding an actual consumer
+libs/jetcore/jetcore/bus_client.py:292:        await self._js.publish(subject, Event(event=envelope).to_wire())
+libs/jetcore/jetcore/bus_client.py:311:        self._subscriptions[durable_name] = await self._js.pull_subscribe(
+Edit registry.py
+Added 20 lines
+Now let's update RegistryClient to hold js and use it in register_identity():
+
+Read registry.py (lines 131-180)
+Edit registry.py
+Added 4 lines
+Read registry.py (lines 181-195)
+Read registry.py (lines 181-200)
+Edit registry.py
+Added 7 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "no TTL\|isn't scoped to\|Identity registration/lookup" libs/jetcore/jetcore/registry.py
+
+OUT
+13:  - Identity registration/lookup (`register_identity`/`lookup_signing_key`,
+19:    service-directory, this isn't scoped to "subjects subscribed to" — a
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run ruff check libs/jetcore/jetcore/registry.py
+uv run ruff format --check libs/jetcore/jetcore/registry.py
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -15
+
+OUT
+All checks passed!
+1 file already formatted
+Success: no issues found in 100 source files
+Clean. Now let's verify N3 for real — check a live entry's TTL metadata and confirm normal reconnect still works:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run --all-packages pytest libs/jetcore/tests -q 2>&1 | tail -10
+
+OUT
+>           assert "no registered recipients yet" in caplog.text
+E           AssertionError: assert 'no registered recipients yet' in ''
+E            +  where '' = <_pytest.logging.LogCaptureFixture object at 0x70731236a150>.text
+
+libs/jetcore/tests/test_bus_client.py:88: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+=========================== short test summary info ============================
+FAILED libs/jetcore/tests/test_bus_client.py::test_publish_with_no_recipients_does_not_crash
+1 failed, 57 passed in 4.22s
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+./test.sh -q 2>&1 | grep -E "passed|failed|error"
+
+OUT
+236 passed, 2568 warnings in 61.49s (0:01:01)
+236/236 clean. Now let's do the real N3 verification — inspect a live identity entry's TTL metadata, and confirm a real adapter's own reconnect still works cleanly:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+docker compose restart webhook-listener >/dev/null 2>&1
+sleep 3
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+  kv get service-identity webhook-listener-01 --json 2>&1 | python3 -m json.tool 2>&1 | head -30
+
+OUT
+Expecting value: line 1 column 1 (char 0)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+  kv get service-identity webhook-listener-01 --json 2>&1
+
+OUT
+Exit code 1
+error: unknown long flag '--json'
+
+usage: nats kv get [<flags>] <bucket> <key>
+
+Gets a value for a key
+
+Args:
+  <bucket>  The bucket to act on
+  <key>     The key to act on
+
+Flags:
+  --revision=REVISION  Gets a specific revision
+  --raw                Show only the value string
+
+
+Pass --help to see global flags applicable to this command.
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+  kv get service-identity webhook-listener-01 2>&1
+
+OUT
+service-identity > webhook-listener-01 revision: 160 created @ 2026-09-01 20:02:01
+
+Showing first 120 bytes of 203, use --raw for full data
+
+{"serviceId": "webhook-listener-01", "adapterType": "webhook-listener", "signingPublicKey": "UBZEEKNP6GZK4NVIELWPE3ZYTDH
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+  stream get KV_service-identity --last-for '$KV.service-identity.webhook-listener-01' --json 2>&1 | python3 -m json.tool
+
+OUT
+{
+    "subject": "$KV.service-identity.webhook-listener-01",
+    "seq": 160,
+    "data": "eyJzZXJ2aWNlSWQiOiAid2ViaG9vay1saXN0ZW5lci0wMSIsICJhZGFwdGVyVHlwZSI6ICJ3ZWJob29rLWxpc3RlbmVyIiwgInNpZ25pbmdQdWJsaWNLZXkiOiAiVUJaRUVLTlA2R1pLNE5WSUVMV1BFM1pZVERISUhGVTNKM0dRTU9PWlNLWldFVU5RVk9UM0pTNzMiLCAicmVnaXN0ZXJlZEF0IjogIjIwMjYtMDktMDFUMjA6MDI6MDEuODk1MDMwKzAwOjAwIn0=",
+    "time": "2026-09-01T20:02:01.895286311Z"
+}
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+cat > /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_identity_ttl.py <<'EOF'
+import asyncio
+import nats
+import jetcore.registry as registry_mod
+from jetcore.registry import RegistryClient
+from nats.js.errors import KeyNotFoundError
+
+async def main():
+    nc = await nats.connect("nats://localhost:4222", user_credentials="infra/nats/operator/creds/jetcore-admin.creds")
+    js = nc.jetstream()
+    rc = await RegistryClient.connect(js)
+
+    # Temporarily use a short TTL for this probe only
+    registry_mod.IDENTITY_TTL_SECONDS = 3
+
+    await rc.register_identity(
+        service_id="ttl-probe-identity",
+        adapter_type="probe",
+        signing_public_key="fake-key-for-probe",
+    )
+    key = await rc.lookup_signing_key("ttl-probe-identity")
+    print("immediately after register:", key)
+
+    await asyncio.sleep(5)
+
+    key2 = await rc.lookup_signing_key("ttl-probe-identity")
+    print("after 5s (TTL was 3s):", key2)
+
+    await nc.close()
+
+asyncio.run(main())
+EOF
+uv run python /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_identity_ttl.py
+
+OUT
+immediately after register: fake-key-for-probe
+after 5s (TTL was 3s): fake-key-for-probe
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+  stream get KV_service-identity --last-for '$KV.service-identity.ttl-probe-identity' 2>&1
+
+OUT
+Item: KV_service-identity#161 received 2026-09-01 20:02:36.203018156 +0000 UTC (23.47s) on Subject $KV.service-identity.ttl-probe-identity
+
+Headers:
+  Nats-TTL: 3600
+
+{"serviceId": "ttl-probe-identity", "adapterType": "probe", "signingPublicKey": "fake-key-for-probe", "registeredAt": "2026-09-01T20:02:36.202776+00:00"}
+That's a real, important surprise — the written TTL (3600s = 1h) matches my bucket's --marker-ttl setting exactly, not the 90-day value I configured, nor my 3-second test override. Let me confirm this clamping behavior is real before drawing conclusions:
+
+Web SearchNATS JetStream SubjectDeleteMarkerTTL maximum per-message TTL clamp AllowMsgTTL LimitMarkerTTL
+OUT
+Web search results for query: "NATS JetStream SubjectDeleteMarkerTTL maximum per-message TTL clamp AllowMsgTTL LimitMarkerTTL"
+
+Links: [{"title":"nats-architecture-and-design/adr/ADR-43.md at main · nats-io/nats-architecture-and-design","url":"https://github.com/nats-io/nats-architecture-and-design/blob/main/adr/ADR-43.md"},{"title":"NATS KV should allow mirrors to set --allow-msg-ttl in mirrors. Otherwise, mirrors are forced to perform periodic compats. · Issue #1430 · nats-io/natscli","url":"https://github.com/nats-io/natscli/issues/1430"},{"title":"NATS C Client with JetStream and Streaming support: nats.h Source File","url":"https://nats-io.github.io/nats.c/nats_8h_source.html"},{"title":"Streams | NATS Docs","url":"https://docs.nats.io/nats-concepts/jetstream/streams"},{"title":"Per-message TTL doesn't cause a delete marker · Issue #6710 · nats-io/nats-server","url":"https://github.com/nats-io/nats-server/issues/6710"},{"title":"Class StreamConfig","url":"https://nats-io.github.io/nats.net/api/NATS.Client.JetStream.Models.StreamConfig.html"},{"title":"NATS C Client with JetStream and Streaming support: jsStreamConfig Struct Reference","url":"http://nats-io.github.io/nats.c/structjs_stream_config.html"},{"title":"https://raw.githubusercontent.com/nats-io/nack/mai...","url":"https://raw.githubusercontent.com/nats-io/nack/main/deploy/crds.yml"},{"title":"Message Lifecycle Management | nats-io/nats-architecture-and-design | DeepWiki","url":"https://deepwiki.com/nats-io/nats-architecture-and-design/2.6-message-lifecycle-management"}]
+
+Based on the search results, I found relevant information about these NATS JetStream concepts:
+
+**AllowMsgTTL**: AllowMsgTTL allows header initiated per-message TTLs. If disabled, then the NATS-TTL header will be ignored.
+
+**SubjectDeleteMarkerTTL**: The creation of deletion markers is controlled by the SubjectDeleteMarkerTTL stream configuration option. This setting determines how long the deletion markers themselves should exist before being automatically removed.
+
+**TTL Minimum Value**: The Nats-TTL header value and SubjectDeleteMarkerTTL setting have a minimum value of 1 second.
+
+**Mirror Stream Restrictions**: The SubjectDeleteMarkerTTL setting may not be set on a Mirror Stream.
+
+**Marker Behavior**: When someone calls the purge subject API of a stream the server will place a marker carrying Nats-Marker-Reason: Purge and a Nats-TTL set to the stream's SubjectDeleteMarkerTTL (formatted as a Go duration string).
+
+Note: The search results don't contain specific information about maximum per-message TTL clamps or a "LimitMarkerTTL" setting. You may want to search the official NATS documentation or server configuration files for those specific parameters.
+
+
+REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+cat > /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_raw_ttl.py <<'EOF'
+import asyncio
+import nats
+
+async def main():
+    nc = await nats.connect("nats://localhost:4222", user_credentials="infra/nats/operator/creds/jetcore-admin.creds")
+    js = nc.jetstream()
+
+    for val in [3, 10, 100, 7776000]:
+        key = f"raw-ttl-probe-{val}"
+        pa = await js.publish(f"$KV.service-identity.{key}", b"probe-value", msg_ttl=val)
+        print(f"requested msg_ttl={val} -> PubAck seq={pa.seq}")
+
+    await nc.close()
+
+asyncio.run(main())
+EOF
+uv run python /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_raw_ttl.py
+echo "--- inspect headers ---"
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+for val in 3 10 100 7776000; do
+  echo "=== requested $val ==="
+  docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+    nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+    stream get KV_service-identity --last-for "\$KV.service-identity.raw-ttl-probe-$val" 2>&1 | grep -A1 "Headers:"
+done
+
+OUT
+requested msg_ttl=3 -> PubAck seq=162
+requested msg_ttl=10 -> PubAck seq=163
+requested msg_ttl=100 -> PubAck seq=164
+requested msg_ttl=7776000 -> PubAck seq=165
+--- inspect headers ---
+=== requested 3 ===
+Headers:
+  Nats-TTL: 3600
+=== requested 10 ===
+Headers:
+  Nats-TTL: 3600
+=== requested 100 ===
+Headers:
+  Nats-TTL: 3600
+=== requested 7776000 ===
+Headers:
+  Nats-TTL: 7776000
+That's a real and useful finding — --marker-ttl acts as a floor on the per-key TTL (any requested value below it gets raised to match), not a ceiling. Since my real 90-day value is far above the 1h floor, production behavior is correct — but my code comment describing --marker-ttl was incomplete. Let me confirm the real code path end-to-end, then fix the comment:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+cat > /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_real_register.py <<'EOF'
+import asyncio
+import nats
+from jetcore.registry import RegistryClient, IDENTITY_TTL_SECONDS
+
+async def main():
+    nc = await nats.connect("nats://localhost:4222", user_credentials="infra/nats/operator/creds/jetcore-admin.creds")
+    js = nc.jetstream()
+    rc = await RegistryClient.connect(js)
+    print("IDENTITY_TTL_SECONDS constant:", IDENTITY_TTL_SECONDS, "=", IDENTITY_TTL_SECONDS / 86400, "days")
+    await rc.register_identity(
+        service_id="real-code-path-probe", adapter_type="probe", signing_public_key="fake-key",
+    )
+    await nc.close()
+
+asyncio.run(main())
+EOF
+uv run python /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_real_register.py
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+  stream get KV_service-identity --last-for '$KV.service-identity.real-code-path-probe' 2>&1
+
+OUT
+IDENTITY_TTL_SECONDS constant: 7776000 = 90.0 days
+Item: KV_service-identity#166 received 2026-09-01 20:04:16.756415365 +0000 UTC (305ms) on Subject $KV.service-identity.real-code-path-probe
+
+Headers:
+  Nats-TTL: 7776000
+
+{"serviceId": "real-code-path-probe", "adapterType": "probe", "signingPublicKey": "fake-key", "registeredAt": "2026-09-01T20:04:16.756208+00:00"}
+Confirmed end-to-end via the real code path: Nats-TTL: 7776000 (exactly 90 days), unclamped. Now let's fix the code comment to reflect the real, confirmed floor behavior:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "Tombstone-retention" infra/nats/bootstrap_jetstream.sh
+
+OUT
+77:# Tombstone-retention window for an expired per-key TTL entry, not the
+Read bootstrap_jetstream.sh (lines 74-83)
+Edit bootstrap_jetstream.sh
+Added 9 lines
+Now let's add a real automated test for N3, and clean up probe keys from the shared identity bucket:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '1,50p' libs/jetcore/tests/test_registry.py
+
+OUT
+"""Tests for registry.py (Design.md §4.5) — Step B5.
+
+Requires a live NATS server, bootstrapped per Steps A3-A6: `bash
+infra/nats/up.sh` (or, if already up, just `docker compose up -d nats`).
+Connects as `jetcore-admin` (full `$KV.service-directory.>` access — Step A3),
+so these tests can exercise both the "own namespace" and "other adapter's
+namespace" cases without hitting the per-adapter permission scoping tested
+separately in Step A7.
+
+Each test uses a unique subject (a fresh uuid4 suffix) so tests can't
+interfere with each other or with anything left in the real bucket.
+"""
+
+import asyncio
+import uuid
+from collections.abc import AsyncGenerator
+
+import nats
+import pytest
+from jetcore.registry import RecipientCache, RegistryClient
+from nats.js import JetStreamContext
+
+CREDS_PATH = "infra/nats/operator/creds/jetcore-admin.creds"
+NATS_URL = "nats://localhost:4222"
+
+
+@pytest.fixture
+async def jetstream() -> AsyncGenerator[JetStreamContext]:
+    nc = await nats.connect(NATS_URL, user_credentials=CREDS_PATH)
+    try:
+        yield nc.jetstream()
+    finally:
+        await nc.close()
+
+
+@pytest.fixture
+async def registry(jetstream: JetStreamContext) -> RegistryClient:
+    return await RegistryClient.connect(jetstream)
+
+
+@pytest.fixture
+def subject() -> str:
+    """A fresh, never-used-before subject per test."""
+    return f"events.test.RegistryTest{uuid.uuid4().hex[:8]}"
+
+
+@pytest.fixture
+def service_id() -> str:
+    """A fresh, never-used-before service id per test — for the
+    service-identity tests, which key entries by service id alone (no TTL,
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "no TTL\|def test_.*identity\|register_identity\|IDENTITY_TTL" libs/jetcore/tests/test_registry.py
+
+OUT
+50:    service-identity tests, which key entries by service id alone (no TTL,
+230:async def test_register_identity_then_lookup(registry: RegistryClient, service_id: str) -> None:
+231:    await registry.register_identity(
+238:async def test_lookup_unknown_identity_returns_none(
+245:async def test_register_identity_overwrites_previous_key(
+251:    await registry.register_identity(
+254:    await registry.register_identity(
+Read
+Read test_registry.py (lines 46-265)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+.venv/bin/python3 -c "
+import inspect
+from nats.js.client import JetStreamContext
+print(inspect.signature(JetStreamContext.get_last_msg))
+from nats.js.api import RawStreamMsg
+import dataclasses
+print([f.name for f in dataclasses.fields(RawStreamMsg)])
+"
+
+OUT
+(self, stream_name: 'str', subject: 'str', direct: 'Optional[bool]' = False) -> 'api.RawStreamMsg'
+['subject', 'seq', 'data', 'hdrs', 'headers', 'stream', 'time']
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+cat > /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_get_last_msg.py <<'EOF'
+import asyncio
+import nats
+
+async def main():
+    nc = await nats.connect("nats://localhost:4222", user_credentials="infra/nats/operator/creds/jetcore-admin.creds")
+    js = nc.jetstream()
+    msg = await js.get_last_msg("KV_service-identity", "$KV.service-identity.real-code-path-probe")
+    print("headers:", msg.headers)
+    await nc.close()
+
+asyncio.run(main())
+EOF
+uv run python /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_get_last_msg.py
+
+OUT
+headers: {'Nats-TTL': '7776000'}
+Now let's write the real automated test and fix the two stale comments:
+
+Edit test_registry.py
+Added 1 line
+Edit test_registry.py
+Added 21 lines
+Edit test_registry.py
+Modified
+Now let's run checks and the real test suite:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run ruff check libs/jetcore/tests/test_registry.py adapters/file_storage_adapter/tests/test_create_watch.py libs/jetcore/tests/test_bus_client.py
+uv run ruff format --check libs/jetcore/tests/test_registry.py adapters/file_storage_adapter/tests/test_create_watch.py libs/jetcore/tests/test_bus_client.py
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -15
+
+OUT
+All checks passed!
+3 files already formatted
+Success: no issues found in 100 source files
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run --all-packages pytest libs/jetcore/tests/test_registry.py -q -k "identity" 2>&1 | tail -15
+
+OUT
+....                                                                     [100%]
+4 passed, 11 deselected in 0.12s
+Now let's move to N2 (dedup / idempotency). First BusClient.publish():
+
+Read bus_client.py (lines 241-280)
+Read bus_client.py (lines 279-293)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+.venv/bin/python3 -c "
+from nats.js.api import PubAck
+import dataclasses
+print([f.name for f in dataclasses.fields(PubAck)])
+"
+
+OUT
+['stream', 'seq', 'domain', 'duplicate']
+Good, PubAck.duplicate confirmed. Now let's implement the msg_id parameter on publish():
+
+Edit bus_client.py
+Added 17 lines
+Let me check whether eventId can be explicitly set (which would make dedup semantics genuinely correct) rather than always auto-generated:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "event_id\|eventId" libs/jetcore/jetcore/envelope.py | head -20
+
+OUT
+9:fresh metadata (eventId/eventCreated) for a new event.
+22:def new_event_id() -> str:
+39:    event_id: str = Field(default_factory=new_event_id, alias="eventId")
+Edit bus_client.py
+Added 8 lines
+Now let's wire msg_id through to the actual js.publish() call:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "await self._js.publish" libs/jetcore/jetcore/bus_client.py
+
+OUT
+317:        await self._js.publish(subject, Event(event=envelope).to_wire())
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+.venv/bin/python3 -c "
+from nats.js import api
+print([h for h in dir(api.Header) if not h.startswith('_')])
+"
+
+OUT
+['CONSUMER_STALLED', 'DESCRIPTION', 'EXPECTED_LAST_MSG_ID', 'EXPECTED_LAST_SEQUENCE', 'EXPECTED_LAST_SUBJECT_SEQUENCE', 'EXPECTED_STREAM', 'LAST_CONSUMER', 'LAST_STREAM', 'MSG_ID', 'MSG_TTL', 'ROLLUP', 'STATUS', 'capitalize', 'casefold', 'center', 'count', 'encode', 'endswith', 'expandtabs', 'find', 'format', 'format_map', 'index', 'isalnum', 'isalpha', 'isascii', 'isdecimal', 'isdigit', 'isidentifier', 'islower', 'isnumeric', 'isprintable', 'isspace', 'istitle', 'isupper', 'join', 'ljust', 'lower', 'lstrip', 'maketrans', 'partition', 'removeprefix', 'removesuffix', 'replace', 'rfind', 'rindex', 'rjust', 'rpartition', 'rsplit', 'rstrip', 'split', 'splitlines', 'startswith', 'strip', 'swapcase', 'title', 'translate', 'upper', 'zfill']
+api.Header.MSG_ID exists — let's use that:
+
+Read bus_client.py (lines 301-320)
+Edit bus_client.py
+Added 1 line
+Now let's add the api import:
+
+Edit bus_client.py
+Added 1 line
+Now let's check the checks pass and add a real test:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run ruff check libs/jetcore/jetcore/bus_client.py
+uv run ruff format --check libs/jetcore/jetcore/bus_client.py
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -15
+
+OUT
+All checks passed!
+1 file already formatted
+libs/jetcore/jetcore/bus_client.py:319: error: Argument "headers" to "publish" of "JetStreamContext" has incompatible type "dict[Header, str] | None"; expected "dict[str, Any] | None"  [arg-type]
+adapters/webhook_listener/tests/test_webhook_listener_app.py:37: error: Signature of "publish" incompatible with supertype "jetcore.bus_client.BusClient"  [override]
+adapters/webhook_listener/tests/test_webhook_listener_app.py:37: note:      Superclass:
+adapters/webhook_listener/tests/test_webhook_listener_app.py:37: note:          def publish(self, subject: str, payload: bytes, *, event_type: str, event_schema_version: str = ..., correlation_id: str | None = ..., msg_id: str | None = ...) -> Coroutine[Any, Any, str]
+adapters/webhook_listener/tests/test_webhook_listener_app.py:37: note:      Subclass:
+adapters/webhook_listener/tests/test_webhook_listener_app.py:37: note:          def publish(self, subject: str, payload: bytes, *, event_type: str, event_schema_version: str = ..., correlation_id: str | None = ...) -> Coroutine[Any, Any, str]
+Found 2 errors in 2 files (checked 100 source files)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+.venv/bin/python3 -c "
+from nats.js import api
+print(type(api.Header), api.Header.MSG_ID, repr(api.Header.MSG_ID))
+print(api.Header.__mro__ if hasattr(api.Header,'__mro__') else 'n/a')
+"
+
+OUT
+<class 'enum.EnumType'> Header.MSG_ID <Header.MSG_ID: 'Nats-Msg-Id'>
+(<enum 'Header'>, <class 'str'>, <enum 'Enum'>, <class 'object'>)
+Edit bus_client.py
+Added 8 lines
+Now let's fix the FakeBusClient subclass:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '1,60p' adapters/webhook_listener/tests/test_webhook_listener_app.py
+
+OUT
+"""Tests for app.py (Design.md §12 Step D3) — HTTP-facing behavior only,
+against a FakeBusClient, no live NATS needed. The one test that needs a
+real bus (confirming a real POST results in a real FileWriteRequested on
+the stream) is Step D5's job, not duplicated here.
+
+Named test_webhook_listener_app.py, not test_app.py: proactively unique,
+per the naming-collision lesson learned repeatedly in Track C (Design.md
+§12 Step C1) — a future FastAPI-based adapter (e.g. the REST API Service,
+Phase 3) would very plausibly also want a module named app.py/test_app.py.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+from collections.abc import Iterator
+
+import pytest
+from fastapi.testclient import TestClient
+from jetcore.bus_client import BusClient
+from jetcore.envelope import new_event_id
+from webhook_listener.app import create_app
+from webhook_listener.settings import WebhookListenerSettings
+
+WEBHOOK_SECRET = "test-secret-value"
+
+
+class FakeBusClient(BusClient):
+    """A publish-recording stand-in — subclasses BusClient (not just
+    duck-typed) so mypy --strict accepts it wherever a real BusClient is
+    expected, without calling the real __init__ (which needs a live
+    connection this fake never makes)."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, bytes, str]] = []
+
+    async def publish(
+        self,
+        subject: str,
+        payload: bytes,
+        *,
+        event_type: str,
+        event_schema_version: str = "1.0.0",
+        correlation_id: str | None = None,
+    ) -> str:
+        self.published.append((subject, payload, event_type))
+        # A real, distinct id each call — Design.md §13 Step I1 made this a
+        # real return value, not None; a fixed constant here would silently
+        # pass a REST API Service test that (bug) reused the SAME id for
+        # every request's correlationId.
+        return new_event_id()
+
+
+@pytest.fixture
+def fake_bus() -> FakeBusClient:
+    return FakeBusClient()
+
+
+@pytest.fixture
+def client(fake_bus: FakeBusClient) -> Iterator[TestClient]:
+Edit test_webhook_listener_app.py
+Added 1 line
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -rln "class.*BusClient.*:\|def publish(" --include="*.py" adapters libs tests | xargs grep -l "async def publish" 
+
+OUT
+adapters/webhook_listener/tests/test_webhook_listener_app.py
+libs/jetcore/jetcore/bus_client.py
+Only the one. Let's re-check mypy/ruff:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run ruff check libs/jetcore/jetcore/bus_client.py adapters/webhook_listener/tests/test_webhook_listener_app.py
+uv run ruff format --check libs/jetcore/jetcore/bus_client.py adapters/webhook_listener/tests/test_webhook_listener_app.py
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -10
+
+OUT
+All checks passed!
+2 files already formatted
+Success: no issues found in 100 source files
+Clean. Now let's write a real test proving dedup actually works, then wire Idempotency-Key into the two HTTP front doors:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '35,60p' libs/jetcore/tests/test_bus_client.py
+
+OUT
+async def test_publish_and_fetch_round_trip(durable_name: str) -> None:
+    publisher = await _connect("webhook-listener-01-test")
+    consumer = await _connect("file-storage-01-test")
+    try:
+        await consumer.subscribe(SUBJECT, durable_name=durable_name)
+        # subscribe() starts the heartbeat; wait for the publisher's
+        # recipient cache to actually see it registered.
+        await _wait_until_cache_nonempty(await publisher._cache_for(SUBJECT))
+
+        event_id = await publisher.publish(
+            SUBJECT, b"hello from the round trip", event_type="FileWriteRequested"
+        )
+
+        received = await consumer.fetch(durable_name, timeout=3)
+
+        assert len(received) == 1
+        assert received[0].payload == b"hello from the round trip"
+        assert received[0].details.event_type == "FileWriteRequested"
+        assert received[0].details.source_service_id == "webhook-listener-01-test"
+        # Design.md §13 Step I1 — publish() now returns the generated
+        # eventId, and it must be the *same* id the receiver actually sees.
+        assert event_id == received[0].details.event_id
+        await received[0].ack()
+    finally:
+        await publisher.close()
+Edit test_bus_client.py
+Added 65 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run ruff check libs/jetcore/tests/test_bus_client.py
+uv run ruff format libs/jetcore/tests/test_bus_client.py
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -10
+
+OUT
+All checks passed!
+1 file left unchanged
+Success: no issues found in 100 source files
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run --all-packages pytest libs/jetcore/tests/test_bus_client.py -q -k "msg_id or duplicate" 2>&1 | tail -15
+
+OUT
+            # Confirm there's genuinely nothing else queued behind it — not
+            # just "fetch happened to return 1", but "there was only ever 1".
+            nothing_more = await consumer.fetch(durable_name, timeout=1)
+>           assert nothing_more == []
+E           assert [<jetcore.bus...7b3505a1c7d0>] == []
+E             
+E             Left contains one more item: <jetcore.bus_client.ReceivedEvent object at 0x7b3505a1c7d0>
+E             Use -v to get more diff
+
+libs/jetcore/tests/test_bus_client.py:303: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  nats.js.kv:kv.py:456 Server may ignore filters if version is < 2.10.
+=========================== short test summary info ============================
+FAILED libs/jetcore/tests/test_bus_client.py::test_publish_with_same_msg_id_does_not_duplicate
+1 failed, 1 passed, 10 deselected in 0.16s
+Real finding — dedup did NOT actually happen; let's investigate directly:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+docker compose stop file-storage-adapter webhook-listener webhook-sender http-adapter rest-api-service db-adapter-mysql >/dev/null 2>&1
+cat > /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_dedup.py <<'EOF'
+import asyncio
+import nats
+from nats.js import api
+
+async def main():
+    nc = await nats.connect("nats://localhost:4222", user_credentials="infra/nats/operator/creds/webhook-listener-01-test.creds")
+    js = nc.jetstream()
+    msg_id = "probe-dedup-test-1"
+    pa1 = await js.publish("events.files.FileWriteRequested", b"one", headers={str(api.Header.MSG_ID): msg_id})
+    print("pa1:", pa1)
+    pa2 = await js.publish("events.files.FileWriteRequested", b"two", headers={str(api.Header.MSG_ID): msg_id})
+    print("pa2:", pa2)
+    await nc.close()
+
+asyncio.run(main())
+EOF
+uv run python /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_dedup.py
+
+OUT
+pa1: PubAck(stream='EVENTS', seq=5496996, domain=None, duplicate=None)
+pa2: PubAck(stream='EVENTS', seq=5496997, domain=None, duplicate=None)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+echo "--- current EVENTS duplicate_window ---"
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+  stream info EVENTS --json 2>&1 | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['config'].get('duplicate_window'))"
+echo "--- headers on seq 5496996 ---"
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+  stream get EVENTS 5496996 2>&1
+
+OUT
+--- current EVENTS duplicate_window ---
+120000000000
+--- headers on seq 5496996 ---
+Item: EVENTS#5496996 received 2026-09-01 20:08:08.455448776 +0000 UTC (9.75s) on Subject events.files.FileWriteRequested
+
+Headers:
+  Header.MSG_ID: probe-dedup-test-1
+
+one
+Found the bug — str(api.Header.MSG_ID) produces "Header.MSG_ID", not the header's actual value "Nats-Msg-Id" (a classic Python str-mixin-Enum gotcha — needs .value, not str()). My own test caught this immediately. Let me confirm and fix:
+
+Bash
+IN
+.venv/bin/python3 -c "
+from nats.js import api
+print(repr(str(api.Header.MSG_ID)))
+print(repr(api.Header.MSG_ID.value))
+"
+
+OUT
+'Header.MSG_ID'
+'Nats-Msg-Id'
+Edit bus_client.py
+Added 5 lines
+Now let's verify the fix for real, run checks, and clean up probe data:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run ruff check libs/jetcore/jetcore/bus_client.py
+uv run ruff format --check libs/jetcore/jetcore/bus_client.py
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -10
+
+OUT
+All checks passed!
+1 file already formatted
+Success: no issues found in 100 source files
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run --all-packages pytest libs/jetcore/tests/test_bus_client.py -q -k "msg_id or duplicate" 2>&1 | tail -15
+
+OUT
+..                                                                       [100%]
+2 passed, 10 deselected in 1.10s
+Both real. Let's double-confirm via the raw probe too:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+cat > /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_dedup2.py <<'EOF'
+import asyncio
+import nats
+from nats.js import api
+
+async def main():
+    nc = await nats.connect("nats://localhost:4222", user_credentials="infra/nats/operator/creds/webhook-listener-01-test.creds")
+    js = nc.jetstream()
+    msg_id = "probe-dedup-test-2"
+    pa1 = await js.publish("events.files.FileWriteRequested", b"one", headers={api.Header.MSG_ID.value: msg_id})
+    print("pa1:", pa1)
+    pa2 = await js.publish("events.files.FileWriteRequested", b"two", headers={api.Header.MSG_ID.value: msg_id})
+    print("pa2:", pa2)
+    await nc.close()
+
+asyncio.run(main())
+EOF
+uv run python /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_dedup2.py
+
+OUT
+pa1: PubAck(stream='EVENTS', seq=5497001, domain=None, duplicate=None)
+pa2: PubAck(stream='EVENTS', seq=5497001, domain=None, duplicate=True)
+Dedup genuinely works now — same sequence number, duplicate=True. Let's restart the fleet and run the full suite:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+docker compose up -d file-storage-adapter webhook-listener webhook-sender http-adapter rest-api-service db-adapter-mysql >/dev/null 2>&1
+sleep 3
+./test.sh -q 2>&1 | grep -E "passed|failed|error"
+
+OUT
+239 passed, 2896 warnings in 62.55s (0:01:02)
+Now let's wire Idempotency-Key into the two HTTP front doors. Starting with REST API Service:
+
+Read
+Read app.py (lines 96-115)
+Read app.py (lines 27-36)
+Read app.py (lines 36-45)
+Edit app.py
+Modified
+Edit app.py
+Added 14 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+.venv/bin/python3 -c "
+import inspect
+from nats.js.client import JetStreamContext
+print(inspect.signature(JetStreamContext.get_msg))
+"
+
+OUT
+(self, stream_name: 'str', seq: 'Optional[int]' = None, subject: 'Optional[str]' = None, direct: 'Optional[bool]' = False, next: 'Optional[bool]' = False) -> 'api.RawStreamMsg'
+Read bus_client.py (lines 258-322)
+Edit bus_client.py
+Added 4 lines
+Now the implementation:
+
+Read bus_client.py (lines 319-333)
+Read bus_client.py (lines 333-342)
+Edit bus_client.py
+Added 4 lines
+Now let's check types/lint and add a real test proving this exact behavior:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run ruff check libs/jetcore/jetcore/bus_client.py
+uv run ruff format --check libs/jetcore/jetcore/bus_client.py
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -15
+
+OUT
+All checks passed!
+1 file already formatted
+libs/jetcore/jetcore/bus_client.py:339: error: Argument 1 to "from_wire" of "Event" has incompatible type "bytes | None"; expected "bytes"  [arg-type]
+Found 1 error in 1 file (checked 100 source files)
+Edit bus_client.py
+Added 4 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run bandit -q libs/jetcore/jetcore/bus_client.py 2>&1 | tail -20
+
+OUT
+--------------------------------------------------
+
+Code scanned:
+	Total lines of code: 355
+	Total lines skipped (#nosec): 0
+	Total potential issues skipped due to specifically being disabled (e.g., #nosec BXXX): 0
+
+Run metrics:
+	Total issues (by severity):
+		Undefined: 0
+		Low: 1
+		Medium: 0
+		High: 0
+	Total issues (by confidence):
+		Undefined: 0
+		Low: 0
+		Medium: 0
+		High: 1
+Files skipped (0):
+Edit bus_client.py
+Added 6 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run ruff check libs/jetcore/jetcore/bus_client.py
+uv run ruff format --check libs/jetcore/jetcore/bus_client.py
+uv run bandit -q libs/jetcore/jetcore/bus_client.py
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -10
+
+OUT
+All checks passed!
+1 file already formatted
+Success: no issues found in 100 source files
+All clean. Now let's update the test to verify the fixed eventId-preservation behavior:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "test_publish_with_same_msg_id_does_not_duplicate" libs/jetcore/tests/test_bus_client.py
+
+OUT
+269:async def test_publish_with_same_msg_id_does_not_duplicate(durable_name: str) -> None:
+Read test_bus_client.py (lines 270-301)
+Now the fixed behavior means second_event_id should equal first_event_id, not differ. Let me update this test:
+
+Edit test_bus_client.py
+Added 2 lines
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run ruff check libs/jetcore/tests/test_bus_client.py
+uv run ruff format libs/jetcore/tests/test_bus_client.py
+uv run --all-packages pytest libs/jetcore/tests/test_bus_client.py -q -k "msg_id or duplicate" 2>&1 | tail -15
+
+OUT
+All checks passed!
+1 file left unchanged
+..                                                                       [100%]
+2 passed, 10 deselected in 1.13s
+Both pass with the corrected assertion. Now let's finish wiring Webhook Listener's Idempotency-Key:
+
+Read app.py (lines 19-48)
+Read app.py (lines 66-91)
+Edit app.py
+Added 12 lines
+Now let's run checks and the real end-to-end test for both endpoints:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run ruff check adapters/rest_api_service adapters/webhook_listener
+uv run ruff format --check adapters/rest_api_service adapters/webhook_listener
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -15
+
+OUT
+All checks passed!
+23 files already formatted
+Success: no issues found in 100 source files
+Now let's write real tests confirming both endpoints suppress a duplicate:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+ls adapters/rest_api_service/tests/ adapters/webhook_listener/tests/
+
+OUT
+adapters/rest_api_service/tests/:
+conftest.py
+__pycache__
+_rest_api_service_helpers.py
+test_pending_replies.py
+test_rest_api_service_app.py
+test_rest_api_service_scaffold.py
+test_rest_api_service_settings.py
+
+adapters/webhook_listener/tests/:
+conftest.py
+__pycache__
+test_webhook_listener_app.py
+test_webhook_listener_entrypoint.py
+test_webhook_listener_scaffold.py
+test_webhook_listener_settings.py
+_webhook_listener_helpers.py
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '55,110p' adapters/webhook_listener/tests/test_webhook_listener_app.py
+
+OUT
+@pytest.fixture
+def fake_bus() -> FakeBusClient:
+    return FakeBusClient()
+
+
+@pytest.fixture
+def client(fake_bus: FakeBusClient) -> Iterator[TestClient]:
+    settings = WebhookListenerSettings(
+        service_id="webhook-listener-01",
+        nats_creds_path="infra/nats/operator/creds/webhook-listener-01.creds",
+        webhook_secret=WEBHOOK_SECRET,
+    )
+    app = create_app(settings, bus_client=fake_bus)
+    # Context-managed, not a bare TestClient(app): FastAPI/Starlette only
+    # runs the app's `lifespan` (which sets app.state.bus_client) on
+    # __enter__/__exit__ — confirmed by testing, a bare TestClient(app)
+    # used outside a `with` block never triggers it, silently leaving
+    # app.state.bus_client unset until a request actually needs it.
+    with TestClient(app) as client:
+        yield client
+
+
+def test_healthz_returns_ok(client: TestClient) -> None:
+    response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_valid_secret_publishes_and_returns_202(
+    client: TestClient, fake_bus: FakeBusClient
+) -> None:
+    response = client.post(
+        "/webhooks/notes/todo.txt",
+        content=b"hello from a webhook",
+        headers={"X-Webhook-Secret": WEBHOOK_SECRET},
+    )
+
+    assert response.status_code == 202
+    assert len(fake_bus.published) == 1
+    subject, payload, event_type = fake_bus.published[0]
+    assert subject == "events.files.FileWriteRequested"
+    assert event_type == "FileWriteRequested"
+    data = json.loads(payload)
+    assert data["path"] == "notes/todo.txt"
+    assert base64.b64decode(data["content"]) == b"hello from a webhook"
+
+
+def test_missing_secret_header_is_rejected(client: TestClient, fake_bus: FakeBusClient) -> None:
+    response = client.post("/webhooks/notes/todo.txt", content=b"hello")
+
+    assert response.status_code == 401
+    assert fake_bus.published == []
+
+
+def test_wrong_secret_is_rejected(client: TestClient, fake_bus: FakeBusClient) -> None:
+Read test_webhook_listener_app.py (lines 28-54)
+Edit test_webhook_listener_app.py
+Added 5 lines
+Now let's add the test right after test_valid_secret_publishes_and_returns_202:
+
+Edit test_webhook_listener_app.py
+Added 31 lines
+Now let's do the same for REST API Service:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "class Fake\|published\b\|def publish" adapters/rest_api_service/tests/test_rest_api_service_app.py adapters/rest_api_service/tests/_rest_api_service_helpers.py 2>/dev/null | head -30
+
+OUT
+(Bash completed with no output)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '1,70p' adapters/rest_api_service/tests/test_rest_api_service_app.py
+
+OUT
+"""Integration tests for app.py (Design.md §13 Step I5/I7) — against the
+real Phase 1 stack, no injected bus_client and no FakeBusClient layer:
+`create_app(settings)`'s own `lifespan` connects a real BusClient (via
+`connect_as_adapter`) exactly the way `python -m rest_api_service` does
+in production (Step I6), the same "D5's pattern" the design breakdown
+calls for explicitly — this track's whole point is the real sync-reply
+correlation, so there's little value in a FakeBusClient-only layer that
+can't exercise it (unlike webhook_listener's D3/D5 split, which had a
+pure fire-and-forget path worth unit-testing fast and separately).
+
+Uses db-adapter-mysql-01-TEST's identity as the "fake replier" for the
+sync-reply tests — a dedicated test-only twin of db-adapter-mysql-01
+(Defects.md Defect 1), not that real serviceId itself: Track J's real
+Database Adapter is now a live docker-compose container (Step K2), and
+this whole app also connects as rest-api-service-01-TEST rather than
+rest-api-service-01 for the same reason. test-observer-01 (extended in
+this step) independently captures a request's real eventId where a test
+needs to, mirroring Step F6's precedent — it has no live production
+counterpart to collide with, so it's unaffected by Defect 1 and stays as
+the real test-observer-01 identity.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+
+from _rest_api_service_helpers import (
+    ORDER_CREATED_SUBJECT,
+    ORDER_PERSISTED_SUBJECT,
+    connect,
+    wait_until_cache_has,
+)
+from fastapi.testclient import TestClient
+from rest_api_service.app import create_app
+from rest_api_service.settings import RestApiServiceSettings
+
+SETTINGS = RestApiServiceSettings(
+    service_id="rest-api-service-01-test",
+    nats_url="nats://localhost:4222",
+    nats_creds_path="infra/nats/operator/creds/rest-api-service-01-test.creds",
+    default_reply_timeout_seconds=5.0,
+)
+
+
+def test_healthz_returns_ok() -> None:
+    with TestClient(create_app(SETTINGS)) as client:
+        response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+async def test_fire_and_forget_publishes_a_real_order_created(durable_name: str) -> None:
+    observer = await connect("test-observer-01")
+    try:
+        observer_durable = await observer.subscribe(
+            ORDER_CREATED_SUBJECT, durable_name=durable_name
+        )
+
+        with TestClient(create_app(SETTINGS)) as client:
+            response = client.post("/api/orders", content=b'{"item": "widget"}')
+
+        assert response.status_code == 202
+        event_id = response.json()["eventId"]
+        assert event_id
+
+        received = await observer.fetch(observer_durable, timeout=5)
+        assert len(received) == 1
+        assert received[0].details.event_type == "OrderCreated"
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '70,100p' adapters/rest_api_service/tests/test_rest_api_service_app.py
+
+OUT
+        assert received[0].details.event_type == "OrderCreated"
+        assert received[0].details.event_id == event_id
+        assert received[0].payload == b'{"item": "widget"}'
+    finally:
+        await observer.close()
+
+
+async def test_sync_reply_returns_the_real_order_persisted_payload(durable_name: str) -> None:
+    replier = await connect("db-adapter-mysql-01-test")
+    try:
+        replier_durable = await replier.subscribe(ORDER_CREATED_SUBJECT, durable_name=durable_name)
+
+        async def _fake_database_adapter() -> None:
+            # Waits for the real OrderCreated, then plays the Database
+            # Adapter's own write-ack role (Decision #26) — publishes a
+            # matching OrderPersisted, correlationId set to the trigger's
+            # real eventId, same as the real adapter (Track J) will.
+            [triggering] = await replier.fetch(replier_durable, timeout=5)
+            await triggering.ack()
+            await replier.publish(
+                ORDER_PERSISTED_SUBJECT,
+                b'{"orderId": "abc-123", "status": "persisted"}',
+                event_type="OrderPersisted",
+                correlation_id=triggering.details.event_id,
+            )
+
+        # client.post() is a blocking call — TestClient's own ASGI app
+        # (and this endpoint's asyncio.wait_for(future, ...)) really does
+        # run on a separate thread (Starlette's anyio blocking portal, see
+        # webhook_listener's test_webhook_listener_entrypoint.py for the
+        # fuller writeup of that mechanism), but calling it synchronously
+Edit test_rest_api_service_app.py
+Added 38 lines
+Now let's run checks and the real tests:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run ruff check adapters/rest_api_service adapters/webhook_listener
+uv run ruff format --check adapters/rest_api_service adapters/webhook_listener
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -15
+
+OUT
+E501 Line too long (101 > 100)
+   --> adapters/rest_api_service/tests/test_rest_api_service_app.py:105:101
+    |
+103 |         received = await observer.fetch(observer_durable, timeout=5)
+104 |         assert len(received) == 1
+105 |         assert received[0].payload == b'{"item": "widget"}'  # the first call's body, not the retry's
+    |                                                                                                     ^
+106 |         assert received[0].details.event_id == first_event_id
+107 |         await received[0].ack()
+    |
+
+Found 1 error.
+unformatted: File would be reformatted
+   --> adapters/rest_api_service/tests/test_rest_api_service_app.py:105:16
+    |
+104 |         assert len(received) == 1
+    -         assert received[0].payload == b'{"item": "widget"}'  # the first call's body, not the retry's
+105 +         assert (
+106 +             received[0].payload == b'{"item": "widget"}'
+107 +         )  # the first call's body, not the retry's
+108 |         assert received[0].details.event_id == first_event_id
+    |
+
+unformatted: File would be reformatted
+   --> adapters/webhook_listener/tests/test_webhook_listener_app.py:125:48
+    |
+124 |
+    - def test_no_idempotency_key_header_passes_none(
+    -     client: TestClient, fake_bus: FakeBusClient
+    - ) -> None:
+125 + def test_no_idempotency_key_header_passes_none(client: TestClient, fake_bus: FakeBusClient) -> None:
+126 |     """The additive half — a caller that never sends the header (every
+    |
+
+2 files would be reformatted, 21 files already formatted
+Success: no issues found in 100 source files
+Edit test_rest_api_service_app.py
+Added 1 line
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run ruff format adapters/rest_api_service adapters/webhook_listener
+uv run ruff check adapters/rest_api_service adapters/webhook_listener
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -10
+
+OUT
+1 file reformatted, 22 files left unchanged
+All checks passed!
+Success: no issues found in 100 source files
+[This command modified 1 file you've previously read: adapters/webhook_listener/tests/test_webhook_listener_app.py. Call Read before editing.]
+Now let's run everything for real:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run --all-packages pytest adapters/webhook_listener/tests/test_webhook_listener_app.py -q 2>&1 | tail -10
+
+OUT
+.........                                                                [100%]
+9 passed in 0.49s
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run --all-packages pytest adapters/rest_api_service/tests/test_rest_api_service_app.py -q -k "idempotency" 2>&1 | tail -20
+
+OUT
+.                                                                        [100%]
+1 passed, 5 deselected in 1.29s
+All real tests pass. Now let's run the complete suite once more via test.sh for the final, comprehensive check:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+./test.sh -q 2>&1 | grep -E "passed|failed|error"
+
+OUT
+242 passed, 3216 warnings in 64.14s (0:01:04)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run --all-packages pre-commit run --all-files 2>&1 | tail -10
+
+OUT
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+mypy.....................................................................Passed
+bandit...................................................................Passed
+All clean. Let's clean up scratch probe data and confirm the stack is healthy:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+for c in test-nak-timing test-backoff-clean test-silent-clean test-nak-delay3; do
+  docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+    nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+    consumer rm EVENTS "$c" -f >/dev/null 2>&1
+done
+docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+  stream purge EVENTS -f 2>&1 | tail -3
+for k in ttl-probe-identity real-code-path-probe raw-ttl-probe-3 raw-ttl-probe-10 raw-ttl-probe-100 raw-ttl-probe-7776000; do
+  docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+    nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+    kv del service-identity "$k" -f >/dev/null 2>&1
+done
+echo "cleaned"
+docker compose ps --format "table {{.Name}}\t{{.Status}}"
+
+OUT
+      First Sequence: 5,548,994
+       Last Sequence: 5,548,993 @ 2026-09-01 20:15:15
+    Active Consumers: 712
+cleaned
+NAME                             STATUS
+jetcore-db-adapter-mysql-1       Up 20 seconds
+jetcore-file-storage-adapter-1   Up 20 seconds
+jetcore-http-adapter-1           Up 20 seconds
+jetcore-mysql-1                  Up 16 hours
+jetcore-nats-1                   Up 17 hours
+jetcore-rest-api-service-1       Up 20 seconds
+jetcore-webhook-listener-1       Up 20 seconds
+jetcore-webhook-sender-1         Up 20 seconds
+This is a real, pre-existing bug I found via reproduction (not something introduced this session) — matching the pattern of Defects 1-4. Let me record it properly in Defects.md:
+
+Read Defects.md (lines 2-16)
+Edit Defects.md
+Added 1 line
+Edit Defects.md
+Added 34 lines
+Now let's finalize the Design.md checklist. First, view current state:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^- \[ \] \*\*N[1-4]\." Design.md
+grep -n "^\*\*Exit criteria.*Track N\|Existing buckets don't pick up" Design.md
+
+OUT
+840:- [ ] **N1. Redelivery backoff.** Add `backoff=[2, 5, 15, 30, 60]` (see parameter table) to `_consumer_config()` in [libs/jetcore/jetcore/bus_client.py](libs/jetcore/jetcore/bus_client.py) — one shared function, every adapter's `subscribe()` call picks it up automatically, no per-adapter change needed. Confirm `len(backoff) <= max_deliver` holds (it does, 5 == 5) and that NATS actually applies the schedule as expected — inspect a real consumer's config post-deploy (`nats consumer info`) rather than assuming the client-side field alone is sufficient. Verify against a real redelivery: force one nak (a handler that always naks, or a temporarily-unreachable target), confirm the real inter-attempt timing matches the configured schedule, not the old flat 30s.
+841:- [ ] **N2. Publish-side dedup / idempotency.** Add `msg_id: str | None = None` to `BusClient.publish()` (see wrinkle above); when given, set it as the `Nats-Msg-Id` header on the underlying `js.publish()` call. Add `Idempotency-Key` header handling to REST API Service's `POST /api/orders` and Webhook Listener's `POST /webhooks/{path}` (both in their respective `app.py`), passed through as `publish()`'s new `msg_id`. Verify for real: two identical requests with the same `Idempotency-Key` within the stream's own `duplicate_window` (already live, per §9 item #10) produce exactly one message on the bus, not two — confirm via a real consumer fetch count, not just "the second `publish()` call didn't error" (JetStream dedup rejects silently from the publisher's own perspective — its `PubAck` reports `duplicate: true`, worth asserting on directly).
+842:- [ ] **N3. `service-identity` per-key TTL.** Resolve the wrinkle above for real (confirm nats-py's actual `put()`/`create()`/lower-level-`publish()` capability at implementation time — it may have changed since this was scoped). Enable per-key TTL on the `service-identity` bucket in [infra/nats/bootstrap_jetstream.sh](infra/nats/bootstrap_jetstream.sh) (`--marker-ttl`, confirmed via `nats kv add --help` to be the flag that enables per-key TTL — distinct from `--ttl`, which sets a uniform bucket-wide expiry and is already correctly in use for `service-directory`, not what this step touches). Set a 90-day TTL (parameter table) on each `register_identity()` write. Verify for real: a fresh identity registration's TTL is visible on the live entry (`nats kv get service-identity <id> --json` should show its own expiry metadata, not just the bucket's), and confirm a normal adapter restart/reconnect still re-registers correctly (this shouldn't change `register_identity()`'s "once at connect time" call pattern — see `registry.py`'s own module docstring for why no heartbeat is involved here).
+843:- [ ] **N4. KV history depth.** Change `--history 1` to `--history 5` for both `service-directory` and `service-identity` in `bootstrap_jetstream.sh`. Verify for real: overwrite a test identity's registration twice, confirm `nats kv history service-identity <id>` shows all 3 versions (original + 2 overwrites), not just the latest.
+845:Existing buckets don't pick up a config change from a re-run of `bootstrap_jetstream.sh` alone (its own `if ... already exists, skipping add` idempotency guard, matching every other bootstrap script in this project) — N3/N4 both need either the guard updated to `edit` an existing bucket's config, or the bucket recreated from nothing. Decide which per-step at implementation time; for this dev/demo-scale project a recreate (`nats kv rm` + rerun) is the lower-risk default, matching how L6/M3's own fresh-rebuild verification already treats infra as cheaply disposable — flag if that stops being true.
+Read Design.md (lines 839-848)
+Now let's rewrite this whole block with the real, verified outcomes:
+
+Edit Design.md
+Added 2 lines
+Now let's update §9 items #9-12 to reflect the fixed status:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^9\. \*\*No redelivery\|^10\. \*\*JetStream message\|^11\. \*\*Per-key TTL\|^12\. \*\*KV" Design.md
+
+OUT
+410:9. **No redelivery backoff configured — every retry waits the flat server-default AckWait (30s), including the first.** Found during a JetStream feature audit (post-Phase 5), not a build step: `bus_client.py`'s `_consumer_config()` sets `max_deliver=5` (Defect 2's own fix) but never sets `ack_wait`/`backoff`, so a genuinely transient failure (the exact shape Defect 2 diagnosed — 8-59 second registration gaps) waits a full 30s before its first retry even attempts to land inside the window where the problem may have already resolved. `ConsumerConfig.backoff: list[float]` is a real, present field in the pinned client (`nats-py>=2.15.0`, confirmed via direct introspection of the installed library, not docs) — an escalating schedule (e.g. `[2, 5, 15, 30, 60]` seconds) would let the first retry happen fast while still backing off for a persistent problem. Purely additive (one new field on an existing `ConsumerConfig` call); no schema or behavior change elsewhere. **Scoped for build: [§16 Track N, Step N1](#16-phase-6--detailed-breakdown).**
+411:10. **JetStream message deduplication is already paid for on every stream and completely unused.** Found the same audit: live `stream info` on `EVENTS`, `service-directory`, and `service-identity` all show a `duplicate_window` already set (120s/60s/120s — NATS's own `nats stream add`/`kv add` defaults), but nothing in `bus_client.py`'s `publish()` ever sets the `Nats-Msg-Id` header that capability keys off — confirmed by direct inspection of the one `publish()` call site. Currently latent rather than an active bug: nothing in this project produces a client-supplied idempotency key today. It would become a real gap the moment a caller retries a `POST /api/orders` (REST API Service) or `POST /webhooks/{path}` (Webhook Listener) after a network blip that actually succeeded server-side — a second, indistinguishable publish, with no way for any downstream consumer to know it's a duplicate. Needs a design decision before it's actionable: where the idempotency key comes from (a caller-supplied HTTP header? an adapter-derived hash of the body?) and which of the two HTTP front doors actually need it. **Scoped for build: [§16 Track N, Step N2](#16-phase-6--detailed-breakdown).**
+412:11. **Per-key TTL (`allow_msg_ttl`) on `service-identity` — a narrower angle on Decision #20's flagged limitation, not previously evaluated on its own terms.** Confirmed live (`stream info`): `allow_msg_ttl` is not enabled on any bucket today. Decision #20 and [Defects.md Defect 1](Defects.md#defect-1-testproduction-identity-collision) both flag `service-identity`'s "no revocation beyond overwrite" as future hardening, and Defect 1's own "Considered and not applied" section rejected *a heartbeat-refreshed TTL matching `service-directory`'s own model* — correctly, since re-heartbeating doesn't fix the dual-live-instance race, it just changes the flip-flop cadence. Per-key TTL is a different, cheaper mechanism that was never itself evaluated: a long, set-once expiry (e.g. 90 days) on each identity registration, refreshed only if the adapter ever reconnects, would let a genuinely decommissioned identity age out on its own with zero ongoing cost — pure garbage collection, not a fix for the concurrent-registration race (item stays open for that half). **Scoped for build, TTL value proposed at 90 days: [§16 Track N, Step N3](#16-phase-6--detailed-breakdown).**
+413:12. **KV `--history 1` on both buckets destroys the only evidence a collision under Decision #20 would leave behind.** Found the same audit. Decision #20's stated risk is "whichever registration lands last simply overwrites the previous one, permanently" — with `--history 1` (both buckets, [infra/nats/bootstrap_jetstream.sh](infra/nats/bootstrap_jetstream.sh)), the overwritten prior value isn't retrievable even moments later to confirm a suspected collision actually happened. Bumping to `--history 5` (or similar) is a one-line change to that script, no application code change (`nats-py`'s `KeyValue.history()` already exists), a small, bounded storage cost. Doesn't fix the underlying race — pure post-hoc observability. **Scoped for build, depth proposed at 5: [§16 Track N, Step N4](#16-phase-6--detailed-breakdown).**
+Edit Design.md
+Modified
+Let's do a final complete verification pass:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+./test.sh -q 2>&1 | grep -E "passed|failed|error"
+echo "---"
+uv run --all-packages pre-commit run --all-files 2>&1 | tail -10
+echo "---"
+docker compose ps --format "table {{.Name}}\t{{.Status}}"
+
+OUT
+242 passed, 3536 warnings in 64.49s (0:01:04)
+---
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+mypy.....................................................................Passed
+bandit...................................................................Passed
+---
+NAME                             STATUS
+jetcore-db-adapter-mysql-1       Up 2 seconds
+jetcore-file-storage-adapter-1   Up 2 seconds
+jetcore-http-adapter-1           Up 2 seconds
+jetcore-mysql-1                  Up 17 hours
+jetcore-nats-1                   Up 17 hours
+jetcore-rest-api-service-1       Up 2 seconds
+jetcore-webhook-listener-1       Up 2 seconds
+jetcore-webhook-sender-1         Up 2 seconds
+Everything's clean and the stack is healthy. Track N (Phase 6) is complete.
+
+Summary
+All four steps done, and — matching this project's own rule that nothing counts as done on "the code looks right" — every one of them surfaced something real during actual verification, not just during design:
+
+N1 (redelivery backoff): Found that a bare nak() (what every handler actually calls) completely bypasses a consumer's backoff config — fixed by moving the backoff logic into ReceivedEvent.nak() itself. Along the way, found and fixed a genuine pre-existing bug in test_create_watch.py (an un-acked test message that had been silently relying on the old 30s AckWait) — recorded as Defects.md Defect 5.
+N2 (dedup/idempotency): Found two real bugs while verifying — a str()-on-enum gotcha that silently sent the wrong header name (caught because my own dedup test failed), and a duplicate publish returning the wrong eventId (which would have broken REST API Service's sync-reply path on a retry). Both fixed; Idempotency-Key now live on both HTTP front doors.
+N3 (per-key TTL): Found KeyValue.put() doesn't support TTL at all (needed the lower-level js.publish() instead), and found --marker-ttl acts as a floor on requested TTLs, not just a tombstone-retention window as its own --help text implies. 90-day TTL confirmed live on a real entry's header.
+N4 (KV history): Straightforward — bumped to 5 on both buckets, confirmed in each bucket's real config.
+Full suite: 242/242 (7 new tests), pre-commit clean, stack healthy. Design.md §16 and §9 items #9-12 are updated to reflect what actually happened, Defects.md has the new entry, and everything is cross-linked. Nothing left open in this track.
+
+----------------- Track N Completed --------------------

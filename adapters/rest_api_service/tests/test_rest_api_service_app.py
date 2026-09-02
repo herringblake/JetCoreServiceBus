@@ -74,6 +74,45 @@ async def test_fire_and_forget_publishes_a_real_order_created(durable_name: str)
         await observer.close()
 
 
+async def test_repeated_idempotency_key_publishes_only_once(durable_name: str) -> None:
+    """Design.md §16 Step N2 (§9 item #10) — a real, end-to-end proof
+    against this adapter's actual HTTP surface: two POSTs sharing one
+    Idempotency-Key produce exactly one OrderCreated on the bus, and both
+    responses carry the *same* eventId (BusClient.publish()'s own
+    duplicate-fetches-the-original behavior, exercised here through the
+    real app, not called directly)."""
+    observer = await connect("test-observer-01")
+    try:
+        observer_durable = await observer.subscribe(
+            ORDER_CREATED_SUBJECT, durable_name=durable_name
+        )
+
+        with TestClient(create_app(SETTINGS)) as client:
+            headers = {"Idempotency-Key": f"test-idem-{durable_name}"}
+            first = client.post("/api/orders", content=b'{"item": "widget"}', headers=headers)
+            second = client.post(
+                "/api/orders", content=b'{"item": "widget-retry"}', headers=headers
+            )
+
+        assert first.status_code == 202
+        assert second.status_code == 202
+        first_event_id = first.json()["eventId"]
+        second_event_id = second.json()["eventId"]
+        assert second_event_id == first_event_id
+
+        received = await observer.fetch(observer_durable, timeout=5)
+        assert len(received) == 1
+        # The first call's body, not the retry's
+        assert received[0].payload == b'{"item": "widget"}'
+        assert received[0].details.event_id == first_event_id
+        await received[0].ack()
+
+        nothing_more = await observer.fetch(observer_durable, timeout=1)
+        assert nothing_more == []
+    finally:
+        await observer.close()
+
+
 async def test_sync_reply_returns_the_real_order_persisted_payload(durable_name: str) -> None:
     replier = await connect("db-adapter-mysql-01-test")
     try:
