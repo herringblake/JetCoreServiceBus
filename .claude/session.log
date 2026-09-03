@@ -35041,3 +35041,431 @@ N4 (KV history): Straightforward — bumped to 5 on both buckets, confirmed in e
 Full suite: 242/242 (7 new tests), pre-commit clean, stack healthy. Design.md §16 and §9 items #9-12 are updated to reflect what actually happened, Defects.md has the new entry, and everything is cross-linked. Nothing left open in this track.
 
 ----------------- Track N Completed --------------------
+
+Lets plan a Jetcore demo based on the bullets listed in Petstore_Demo.md. Ask lots of questions for clarification.
+Read Petstore_Demo.md
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+find Demo -type f | sort
+echo "---"
+ls -la Demo 2>/dev/null
+echo "--- git log for Demo dir ---"
+git log --oneline -- Demo | head -20
+echo "--- git status ---"
+git status Demo 2>&1
+
+OUT
+Demo/Petstore_Demo.md
+Demo/resources/openapi.yaml
+---
+total 16
+drwxrwxr-x  3 bherring bherring 4096 Sep  1 20:02 .
+drwxrwxr-x 15 bherring bherring 4096 Sep  1 20:01 ..
+-rw-rw-r--  1 bherring bherring  672 Sep  1 20:20 Petstore_Demo.md
+drwxrwxr-x  2 bherring bherring 4096 Sep  1 20:02 resources
+--- git log for Demo dir ---
+--- git status ---
+On branch develop
+Your branch is up to date with 'origin/develop'.
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	Demo/
+
+nothing added to commit but untracked files present (use "git add" to track)
+Read openapi.yaml
+I read both files. This is a substantial new scope — a lot more than the six placeholder adapters currently demonstrate (a real-ish bounded context, CSV file processing, a payment integration, a new documentation toolchain in LinkML). Before I sketch anything, let me nail down the decisions that would reshape everything downstream.
+
+AskUserQuestion
+OUT
+Your questions have been answered: "Should the Petstore Service and its supporting pieces be built as first-class jetcore adapters (BusClient, adapter_identities.yaml entries, docker-compose services, the full existing convention), or as a more loosely-coupled standalone app that just happens to live in this repo?"="Full jetcore adapter pattern (Recommended)", "The reference openapi.yaml has ~15 endpoints across pet/store/user (including OAuth flows, XML content types, image upload). Should Petstore Service implement all of it, or a trimmed subset scoped to what the demo flow actually needs?"="Trim to what the demo needs (Recommended)", ""Use Moov ACH service" — a real Moov sandbox integration (you'd provide API credentials), or a local mock that mimics Moov's API shape, matching this project's existing pattern for every other external integration (Decision #14: in-network placeholders, no real outbound dependency)?"="Local mock, matching Decision #14 (Recommended)", "Where should this demo's own planning/design work live?"="Separate Demo/Design.md (Recommended)". You can now continue with these answers in mind.
+Good — four foundational calls made. Now the next layer:
+
+AskUserQuestion
+OUT
+Your questions have been answered: "Persistence: should Petstore data (pets, suppliers, orders/invoices) live in new tables in the existing MySQL instance (reusing db_adapter_mysql's pattern, maybe even the same adapter extended), or a separate database/schema?"="New tables, same MySQL instance (Recommended)", "Bus subject naming: the existing 6 adapters use placeholder subjects (events.orders.*, per Decision #14 — real bounded-context names deferred). Petstore is a real, named bounded context. Should its subjects use real names now (events.petstore.PetCreated, etc.), or keep following the same placeholder convention?"="Real names now: events.petstore.* (Recommended)", "Where does the invoice CSV get detected — reuse the existing File Storage Adapter's watch mechanism (extended to parse CSVs), or a new, dedicated adapter just for invoice ingestion?"="New dedicated adapter (Recommended)", "Pet suppliers: is this a static seed/reference list (a handful of suppliers with their bank details, defined once as demo fixture data), or should creating/managing suppliers be a live CRUD API you'll exercise as part of the demo?"="Static seed data (Recommended)". You can now continue with these answers in mind.
+AskUserQuestion
+OUT
+Your questions have been answered: ""Add entry to ACH file for payment" — given the mock Moov service, does this mean building a real NACHA-format batch file (fixed-width, ACH's actual wire format) that gets submitted as a batch, or is "file" here just informal for "queue a payment record" that a new ACH adapter sends to the mock Moov API per-pet (or batched) via a normal API call?"="Simple payment record via API call (Recommended)", "Should the new Petstore demo run alongside the existing 6-adapter/orders demo in docker-compose (both live at once), or is Petstore meant to replace it as the project's primary demo?"="Run alongside the existing demo (Recommended)". You can now continue with these answers in mind.
+That's the full architecture nailed down. A few more things I need from you directly rather than as multiple-choice — these are about actual content, not design tradeoffs:
+
+CSV invoice schema. Do you have a sample invoice file, or a real set of columns in mind? My working guess would be something like supplierId, petName, category, quantity, unitPrice, photoUrl — but I'd rather use your real shape than invent one, especially since the Pet schema (from openapi.yaml) needs name/photoUrls at minimum and the ACH side needs to resolve which supplier gets paid for each row.
+
+Supplier exposure. You picked static seed data for suppliers — does that mean no supplier HTTP API at all (suppliers live only as DB rows/seed fixtures the invoice watcher looks up internally), or do you still want at least a read-only GET /suppliers (something to show in Postman, or for other future use)? This also affects whether "add supplier APIs if needed and update openAPI document" from the bullets is fully satisfied or partially deferred.
+
+LinkML scope. Which data mappings should actually get a LinkML schema? My guess at the chain: CSV row → PetCreated/pet-DB-row → ACH payment record. Confirm that's the right chain, or tell me if there's a different/narrower set of transformations you have in mind — this is the one deliverable in the bullets I have the least established precedent for in this codebase (LinkML isn't used anywhere yet).
+
+Postman collection. A real .postman_collection.json committed to the repo with example requests for every endpoint we build (Pet CRUD + mock Moov's endpoints, at minimum), or is "import openapi.yaml directly into Postman" sufficient and the deliverable is just documenting that step?
+
+Sample/seed data. Do you have real reference data (actual supplier names/bank info, a real sample CSV) to seed from, or should I draft representative placeholder data — matching how the existing demo already picked one placeholder orders table (Decision #25)?
+
+Naming. Any preference for the new adapters' names, or should I propose defaults matching the existing convention (petstore-service, pet-invoice-adapter, ach-adapter, etc.)?
+
+Conduent_BusinessSolutionArchitect.md#1-1
+Invoice Schema: invoiceId, category, quantity,  description, unitPrice, photoUrl, name(optional) .... if name is not provided, it will be put upon the petstore to provide a name. For the sake of the demo, just generate a random pet name if one is not provided.
+
+Suppliers can be limited to `GET /suppliers` for now
+
+LinkML notation would be used to map any necessary data transformations between schemas/systems/tables/etc..  The important thing is that it is compliant with the standard and illustrates how data is mapped
+
+Sample/seed data source does not exist so draft representative placeholder data instead
+
+Use default naming to match existing convention
+That's everything I need. Two design calls I'm making myself (following this project's own established patterns rather than asking a fourth round — I'll flag them clearly for you to override):
+
+Quantity → individual pets: a CSV row's quantity produces that many separate Pet records (and separate ACH entries) — not one batched "SKU." Matches "for each pet → POST /pet" read literally, and Pet has no quantity concept of its own.
+Reads stay bus-mediated: GET /pet/{id}, findByStatus, GET /suppliers all go through the bus (sync-reply, same ?wait= mechanism rest_api_service already has) rather than giving petstore_service its own direct DB connection — preserves the "one adapter, one MySQL connection" boundary db_adapter_mysql is the only adapter to hold today.
+Let me draft the full plan now.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+ls infra/mysql/
+cat infra/mysql/init.sql 2>/dev/null | head -40
+echo "---"
+sed -n '590,600p' Design.md
+
+OUT
+init.sql
+my.cnf
+-- Database Adapter demo schema + users (Design.md §13 Step J1, Decision
+-- #25/#26 and the Track J parameter table's "two distinct MySQL users"
+-- entry). Runs automatically on first container start against a fresh
+-- data volume (the official mysql image's own /docker-entrypoint-initdb.d
+-- convention) — `MYSQL_DATABASE` (docker-compose.yml, Track K) creates
+-- the `jetcore` database itself before this file runs.
+
+USE jetcore;
+
+-- Decision #25: order_id is CALLER-supplied (not a DB-assigned
+-- autoincrement) so the write path can upsert idempotently without a
+-- round trip back through the bus first. A few placeholder business
+-- columns since `orders` is itself still a placeholder bounded context
+-- (Decision #14) — real columns replace these whenever a real domain
+-- does.
+CREATE TABLE IF NOT EXISTS orders (
+    order_id   VARCHAR(64)  NOT NULL PRIMARY KEY,
+    item       VARCHAR(255) NOT NULL,
+    quantity   INT          NOT NULL DEFAULT 1,
+    created_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- Two distinct identities (least privilege), not one set of credentials
+-- reused for both roles:
+--
+-- 1. Write path: normal DML only, scoped to this one table. No DELETE
+--    (the write path only ever upserts, Decision #25) and no access to
+--    any other table/database.
+--
+--    SELECT is included here too, confirmed necessary by testing (Step
+--    J4) — not the mistake it looks like: MySQL's `INSERT ... ON
+--    DUPLICATE KEY UPDATE` requires SELECT on any column read back from
+--    the new row during the update, whether written as the older
+--    `VALUES(col)` function OR the newer (8.0.19+) row-alias form
+--    (`... AS new ... col = new.col`) — both were tried against this
+--    exact grant set with only INSERT/UPDATE, and both failed with the
+--    same `SELECT command denied` error before this line was added.
+CREATE USER IF NOT EXISTS 'jetcore_write'@'%' IDENTIFIED BY 'jetcore-write-dev-only';
+GRANT INSERT, UPDATE, SELECT ON jetcore.orders TO 'jetcore_write'@'%';
+---
+  A second, compounding factor: by the time this was investigated, the shared dev NATS instance had accumulated **1223 leftover JetStream consumers** from this whole session's testing, and one failure's traceback showed a genuine `nats.js.errors.ServiceUnavailableError` from the JetStream API — real server-side strain, not just a client-side timing race. A full infra teardown/rebuild (`docker compose down -v`, wiped `infra/nats/operator/`, rebuilt via `up.sh`) was done alongside the `heartbeat()` fix; **17 consecutive full-suite runs passed cleanly afterward** (up from a baseline that failed roughly 1 in 5-8). Both changes are real and worth keeping regardless of which mattered more — the `heartbeat()` fix is a genuine correctness improvement on its own terms, not just a flakiness workaround, and periodic infra cleanup is good practice independent of this specific investigation.
+
+  **Executed and verified**: 116 tests total (1 new in `tests/`), full suite run 17× consecutively clean post-fix, clean `ruff`/`mypy`/`bandit`/`pip-audit` (`mypy` now also covers the new `tests/` directory). **Track E (E1-E4) is complete, and with it Phase 2 (Design.md §10, §12)** — the Webhook Listener → File Storage Adapter vertical slice works end-to-end: built, containerized, wired into `docker-compose`, manually smoke-tested through real HTTP against the real stack, and automatically verified. The pattern Phase 1 set out to prove (§10: "one vertical slice end-to-end to prove the pattern") now has two real adapters actually running it.
+
+**Exit criteria:** Track C passes standing alone, then Track D passes standing alone, then E3+E4 both pass against the fully wired `docker-compose` stack — mirroring Phase 1's "both tracks converge, then prove it end-to-end from a clean rebuild" pattern (§11's B7 checkpoint).
+
+### Suggested sequencing
+
+C1–C7 first (Track E's dependency note above explains why). D1–D5 follow, reusing C's schema/settings patterns. E1–E4 only make sense once both tracks pass independently.
+
+---
+Write Design.md
+227 lines
+# Petstore Demo — Design
+
+A second, additive demo built on the same `jetcore` bus as the root project's [Design.md](../Design.md) — a real-ish bounded context (Petstore) instead of the placeholder `orders` one, exercising: an OpenAPI-defined HTTP surface, file-triggered ingestion (CSV invoices), database persistence, and an outbound payment integration (mocked). Scoped from [Petstore_Demo.md](Petstore_Demo.md)'s own bullets plus a clarification pass (recorded in §2 below).
+
+**Relationship to the root project**: purely additive. Every existing adapter, the `orders` demo, and everything in the root Design.md's Phases 1-6 keeps working unchanged — this adds new services to the same `docker-compose` stack, new subjects to the same NATS bus, new tables to the same MySQL instance, and a new manifest section in [infra/nats/adapter_identities.yaml](../infra/nats/adapter_identities.yaml). Shared infrastructure (the `jetcore` library, NATS bootstrap, testing conventions, CI) is not duplicated — this document only covers what's new.
+
+**Numbering**: this document restarts its own Decision/Track numbering from scratch (its own §2, its own Track A) rather than continuing the root document's #1-#29/A-N sequences — the two are related but independently scoped, and cross-link by full section reference (e.g. "root Design.md §4") rather than sharing one number space.
+
+---
+
+## 1. Goals
+
+Demonstrate a second, realistic bounded context on the same bus, proving the architecture generalizes beyond the `orders` placeholder:
+
+- A real OpenAPI spec ([resources/openapi.yaml](resources/openapi.yaml)) driving an actual adapter's HTTP surface, not a hand-rolled one.
+- File-triggered business logic beyond generic file I/O (a CSV invoice, parsed, driving multiple downstream actions per row) — the root project's File Storage Adapter only detects/reports raw file creation; nothing there parses content today.
+- A multi-step, multi-adapter workflow with a real financial side effect (paying a supplier) — not just create-then-reply.
+- First real use of LinkML in this project, for the data mappings the CSV → Pet → payment pipeline actually needs.
+- First real subject names (`events.petstore.*`) — the root project's Decision #14 deferred this by choice; Petstore is the first genuinely-named bounded context to resolve it.
+
+## 2. Scope Decisions
+
+| # | Decision | Rationale |
+|---|---|---|
+| 1 | Every new piece is a first-class `jetcore` adapter — `BusClient`, `adapter_identities.yaml` entries, `docker-compose` services, tests against live NATS, the works. | Confirmed with the user — this stays a JetStream demo, not an app that happens to sit next to one. |
+| 2 | Trimmed OpenAPI surface: `POST /pet`, `GET /pet/{petId}`, `GET /pet/findByStatus`, plus a new `GET /suppliers` (not in the upstream spec — added per the demo's own bullets). Everything else in `openapi.yaml` (user management, OAuth2 flows, XML bodies, image upload, `/store/*`) is out of scope. | Confirmed with the user. These three Pet operations plus supplier lookup are what the CSV→pet→payment flow and a demonstrable read path actually need. |
+| 3 | Moov is mocked — a plain, non-bus-connected FastAPI service (`mock_moov_service`) shaped like enough of Moov's real transfer API to receive a payment call and answer realistically, in-network only. | Confirmed with the user, matching root Decision #14's existing pattern for every other external integration in this project (Webhook Sender/HTTP Adapter/Webhook Listener all point at in-stack placeholders, never real external services). |
+| 4 | ACH mechanism: a bus event per pet-unit payment, consumed by a new `ach_adapter`, which calls the mock Moov API directly — no NACHA fixed-width file format is implemented. | Confirmed with the user. "Add entry to ACH file" is satisfied as "queue a payment record," not literal NACHA batch-file generation — a real file format would be a project of its own, disproportionate to what this demo needs to prove. |
+| 5 | Petstore data (`pets`, `suppliers`) lives in new tables in the *existing* MySQL instance/`jetcore` database, via a new `petstore_db_adapter` — not `db_adapter_mysql` extended, and not a separate database. | Confirmed with the user for the instance; the *new adapter* (rather than extending `db_adapter_mysql`) is this document's own call — one adapter, one bounded context's tables, matching how `db_adapter_mysql` itself owns exactly one table (`orders`) today. Flagged in §9 if that boundary should be looser. |
+| 6 | Bus subjects use real names now: `events.petstore.<EventType>` — not the `events.orders.*`-style placeholder pattern. | Confirmed with the user — first real resolution of root Decision #14's deferred naming question, scoped to just this bounded context; the `orders` placeholder elsewhere is untouched. |
+| 7 | CSV ingestion is a new, dedicated adapter (`pet_invoice_adapter`) watching its own directory — not File Storage Adapter extended. | Confirmed with the user. File Storage Adapter's job is generic file I/O + raw creation detection; parsing CSV rows into business actions (pet creation, payment queuing) is a distinct responsibility. |
+| 8 | Suppliers are static seed data (`init.sql`-style fixture rows), exposed read-only via `GET /suppliers` — no supplier create/update/delete API. | Confirmed with the user. |
+| 9 | Runs alongside the existing `orders`/webhook demo — additive `docker-compose` services, not a replacement. | Confirmed with the user. |
+| 10 | Naming follows the existing convention exactly: snake_case Python packages/directories, hyphenated `serviceId`s (`<name>-01`), `jetcore-<name>` PyPI distribution names. | Confirmed with the user ("match existing"). |
+| 11 | A CSV row's `quantity` produces that many separate `Pet` records (and that many separate ACH payment entries) — not one record with a quantity field. | This document's own call, not asked separately — Pet (per `openapi.yaml`) has no quantity concept; "for each pet → POST /pet" read literally means N rows-worth of individual pets for a row with `quantity=N`. Flagged in §9 for confirmation. |
+| 12 | Every read (`GET /pet/{id}`, `findByStatus`, `GET /suppliers`) is bus-mediated (sync-reply, the same `?wait=` mechanism `rest_api_service` already has for `OrderCreated`/`OrderPersisted`) — `petstore_service` holds no direct MySQL connection of its own. | This document's own call. Preserves the "one adapter, one DB connection" boundary the root project has held throughout (only `db_adapter_mysql` ever touches MySQL directly, Decision #25) — the alternative (a direct read-model connection on `petstore_service`) would be the first adapter in this project to break that. Flagged in §9. |
+| 13 | A missing `name` on a CSV row is filled with a freshly-generated random name **per individual pet unit** (not one name reused across a row's whole `quantity`). | Follows from Decision #11 — once a row expands to N distinct `Pet` records, giving them identical names would be a worse demo, not a simpler one. |
+
+## 3. Data Model
+
+### `pets` (new table, `petstore_db_adapter`-owned)
+
+Mirrors `openapi.yaml`'s `Pet` schema for the fields the HTTP surface exposes, plus two columns the demo's own financial flow needs that aren't part of the public Pet API contract — kept on the same row for simplicity at this scale (a dedicated `pet_acquisitions` table would be the real-deployment answer if this ever needed more than one acquisition per pet; out of scope here, one row = one CSV-line-derived pet).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `VARCHAR(64)` PK | Caller/adapter-generated (UUID), matching `orders.order_id`'s own caller-supplied-key precedent (root Decision #25) — no round trip needed to learn a DB-assigned id first. |
+| `name` | `VARCHAR(255)` | From the CSV row, or a generated placeholder (§2 item 13) if blank. |
+| `category` | `VARCHAR(255)` | From the CSV row's `category` column. Kept as a plain string (not a normalized `categories` table) — the upstream `Pet.category` is itself just `{id, name}`, and a full category taxonomy is out of scope for this demo. |
+| `status` | `ENUM('available','pending','sold')` | Defaults to `available` on creation — matches `openapi.yaml`'s own enum. |
+| `photo_url` | `VARCHAR(2048)` NULL | From the CSV row. Singular, not the upstream's `photoUrls[]` array — one photo per invoice line is what the CSV actually carries; the HTTP response still returns it wrapped as a one-element array to stay shape-compatible with `openapi.yaml`'s `Pet.photoUrls`. |
+| `description` | `TEXT` NULL | From the CSV row. Not part of upstream `openapi.yaml`'s `Pet` schema — the demo's own extension, since the CSV carries it and dropping it silently would be worse than documenting the deviation (this row belongs in the LinkML mapping, §6, as an explicit CSV→Pet field not present in the upstream schema). |
+| `supplier_id` | `VARCHAR(64)` FK → `suppliers.id` | Which supplier this pet was acquired from — needed to know who the ACH payment goes to. |
+| `invoice_id` | `VARCHAR(64)` | From the CSV row — which invoice this pet was created from; not a FK (no `invoices` table — the CSV file itself is the invoice, not modeled as its own persisted entity for this demo). |
+| `unit_price` | `DECIMAL(10,2)` | From the CSV row — what the supplier is owed for this one pet unit. |
+| `created_at` / `updated_at` | `TIMESTAMP` | Same convention as `orders`. |
+
+### `suppliers` (new table, static seed data)
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `VARCHAR(64)` PK | |
+| `company_name` | `VARCHAR(255)` | |
+| `pet_types_supplied` | `VARCHAR(255)` | Comma-separated categories (e.g. `"Dogs,Cats"`) — matches `AdapterSettings.subjects`'s own comma-separated-string convention (root `jetcore/config.py`) rather than inventing a new list encoding. |
+| `bank_routing_number` | `VARCHAR(9)` | Placeholder/demo values only (§9 — real RTN checksum validation is out of scope). |
+| `bank_account_number` | `VARCHAR(34)` | Placeholder values, never a real account. |
+| `created_at` | `TIMESTAMP` | Seed rows only; no update path exists (§2 item 8). |
+
+Representative placeholder seed data (real reference data doesn't exist, per the user — drafted here, not sourced):
+
+| id | company_name | pet_types_supplied |
+|---|---|---|
+| `supplier-001` | Golden Gate Kennels | Dogs |
+| `supplier-002` | Whiskers & Co. | Cats |
+| `supplier-003` | Feathered Friends Aviary | Birds |
+
+### CSV invoice row shape (confirmed with the user)
+
+```
+invoiceId,category,quantity,description,unitPrice,photoUrl,name
+inv-1001,Dogs,3,"Golden Retriever puppy, 8 weeks",450.00,https://example.test/photos/gr1.jpg,
+inv-1001,Cats,1,"Tabby kitten, vaccinated",120.00,https://example.test/photos/tabby1.jpg,Whiskers
+```
+
+- `name` is optional (last column, blank in row 1 above) — a fresh random name is generated per resulting pet unit if omitted.
+- One CSV row with `quantity > 1` expands into that many individual `Pet` records (§2 item 11), each independently named if `name` was blank.
+- **Not yet resolved**: which supplier a row's pets come from. The CSV has no explicit `supplierId` column in what the user specified — see §9 item 1.
+
+### Payment record (in-flight only, not persisted as its own table)
+
+One per created pet unit: `{petId, supplierId, invoiceId, amount, bankRoutingNumber, bankAccountNumber}` — carried on the `events.petstore.PaymentRequested` bus event (§4), consumed once by `ach_adapter`, not stored anywhere else. If a real payment ledger/reconciliation view is ever needed, that's future scope, not this demo's.
+
+## 4. New Adapters & Bus Subjects
+
+| Adapter | `serviceId` | Role |
+|---|---|---|
+| `petstore_service` | `petstore-service-01` | HTTP front door (FastAPI, mirrors `rest_api_service`'s shape). Implements the trimmed OpenAPI surface (§2 item 2); every operation publishes a bus command and (for reads, and optionally for the write) awaits a correlated reply. |
+| `pet_invoice_adapter` | `pet-invoice-adapter-01` | Watches a dedicated directory for new CSV files (`watchfiles`, same library `file_storage_adapter`'s own watch already uses). Parses each row, expands `quantity`, publishes one `PetCreateRequested` + one `PaymentRequested` per resulting pet unit. |
+| `petstore_db_adapter` | `petstore-db-adapter-01` | Owns the `pets`/`suppliers` tables. Subscribes to `PetCreateRequested`/`PetReadRequested`/`PetListRequested`/`SupplierListRequested`; publishes the matching `*Completed` replies. Two MySQL identities (write/read-only), mirroring `db_adapter_mysql`'s own least-privilege split (root Decision #25). |
+| `ach_adapter` | `ach-adapter-01` | Subscribes to `PaymentRequested`; calls the mock Moov service's transfer endpoint; publishes `PaymentCompleted` (success) or `PaymentFailed` (the mock returned an error, or was unreachable). |
+| `mock_moov_service` | *(not a jetcore adapter — no `BusClient`, no bus identity)* | A bare FastAPI service, the same role Webhook Listener already plays as a "real external target" for Webhook Sender/HTTP Adapter (root Decision #14's own pattern) — exposes one endpoint shaped like a real Moov ACH transfer call, answers realistically, never touches the bus. |
+
+### Bus subjects (`events.petstore.*`)
+
+| Subject | Publisher | Subscriber | Payload shape (summary) |
+|---|---|---|---|
+| `events.petstore.PetCreateRequested` | `pet_invoice_adapter`, `petstore_service` (`POST /pet`) | `petstore_db_adapter` | `{name, category, status, photoUrl, description, supplierId, invoiceId, unitPrice}` |
+| `events.petstore.PetPersisted` | `petstore_db_adapter` | `petstore_service` (sync-reply), `pet_invoice_adapter` (correlation only, to learn the new `petId` for `PaymentRequested`) | `{petId, name, category, status, photoUrl}` — `correlationId` = triggering request's `eventId`. |
+| `events.petstore.PetReadRequested` | `petstore_service` (`GET /pet/{petId}`) | `petstore_db_adapter` | `{petId}` |
+| `events.petstore.PetReadCompleted` | `petstore_db_adapter` | `petstore_service` (sync-reply) | Full `Pet` shape, or... |
+| `events.petstore.PetOperationFailed` | `petstore_db_adapter` | `petstore_service` (sync-reply) | `{operation, reason}` — e.g. `reason: "not_found"`, mirroring root `events.files.FileOperationFailed`'s own shared-failure-subject pattern. |
+| `events.petstore.PetListRequested` / `PetListCompleted` | `petstore_service` (`GET /pet/findByStatus`) / `petstore_db_adapter` | (reciprocal) | `{status}` in; `{pets: [...]}` out. |
+| `events.petstore.SupplierListRequested` / `SupplierListCompleted` | `petstore_service` (`GET /suppliers`) / `petstore_db_adapter` | (reciprocal) | `{}` in; `{suppliers: [...]}` out. |
+| `events.petstore.PaymentRequested` | `pet_invoice_adapter` | `ach_adapter` | `{petId, supplierId, invoiceId, amount, bankRoutingNumber, bankAccountNumber}` |
+| `events.petstore.PaymentCompleted` / `PaymentFailed` | `ach_adapter` | *(nothing subscribes yet — logged/observable, same "report the outcome" posture as root `events.http.RequestCompleted`)* | `{petId, invoiceId, amount, moovTransferId}` / `{petId, invoiceId, reason}` |
+
+### Workflow (CSV ingestion → pet creation → payment)
+
+```mermaid
+sequenceDiagram
+    participant CSV as Invoice CSV file
+    participant PIA as pet_invoice_adapter
+    participant Bus as NATS JetStream
+    participant PDB as petstore_db_adapter
+    participant MySQL
+    participant ACH as ach_adapter
+    participant Moov as mock_moov_service
+
+    CSV->>PIA: file appears in watch dir
+    loop each CSV row
+        loop each unit (row's quantity)
+            PIA->>Bus: publish PetCreateRequested
+            Bus->>PDB: deliver
+            PDB->>MySQL: INSERT pets
+            PDB->>Bus: publish PetPersisted (correlationId)
+            Bus->>PIA: deliver (correlation only)
+            PIA->>Bus: publish PaymentRequested
+            Bus->>ACH: deliver
+            ACH->>Moov: POST /transfers
+            Moov-->>ACH: 200 (transferId) or error
+            ACH->>Bus: publish PaymentCompleted / PaymentFailed
+        end
+    end
+```
+
+### Workflow (a client reading pets/suppliers via `petstore_service`)
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant PS as petstore_service
+    participant Bus as NATS JetStream
+    participant PDB as petstore_db_adapter
+    participant MySQL
+
+    Client->>PS: GET /pet/findByStatus?status=available
+    PS->>Bus: publish PetListRequested
+    Bus->>PDB: deliver
+    PDB->>MySQL: SELECT
+    PDB->>Bus: publish PetListCompleted (correlationId)
+    Bus->>PS: deliver (matches pending ?wait= future)
+    PS-->>Client: 200 [Pet, Pet, ...]
+```
+
+## 5. Mock Moov Service
+
+One endpoint, shaped closely enough to Moov's real ACH transfer API to be recognizable, not a faithful full reimplementation:
+
+`POST /transfers` — body `{amount, source: {bankRoutingNumber, bankAccountNumber}, description}`, responds `201 {transferId, status: "pending"}` on success. Always in-network, always answers (matching root Decision #14's own reasoning for every existing placeholder target) — no real ACH network, no real bank validation.
+
+`GET /healthz` — same reasoning as every other FastAPI-based service in this project (no shell in some base images for a Compose-native healthcheck).
+
+## 6. LinkML Mapping Scope
+
+First use of LinkML in this project (not yet in root [Dependencies.md](../Dependencies.md) — added here, cross-referenced there once Track A actually starts). One schema, `Demo/linkml/petstore_mappings.yaml`, covering the chain confirmed with the user:
+
+1. **CSV row → `PetCreateRequested` payload** — the interesting mapping: one CSV row's `quantity` fans out to N separate instances (§2 item 11); a blank `name` is filled by generation, not left null.
+2. **`PetCreateRequested` payload → `pets` table row** — mostly 1:1, but `photoUrl` (singular) stored as-is while the HTTP API wraps it into `photoUrls: [photoUrl]` on the way back out (documented as a slot mapping, not silently different shapes in two places).
+3. **`pets` table row → `PaymentRequested` payload** — pulls `supplier_id`/`unit_price`/`invoice_id` forward into the payment event, joined against `suppliers` for the bank details.
+
+Must validate against the LinkML meta-schema (`linkml validate` / the `linkml` Python package's own schema-validity check) as part of this track's own verification — "compliant with the standard," not just YAML that happens to look like it, per the user's own stated bar.
+
+## 7. Postman Collection
+
+**Open, not yet decided with the user** — see §9 item 4.
+
+## 8. Repository Layout (proposed)
+
+```
+Demo/
+  Design.md                  (this file)
+  Petstore_Demo.md            (original scope bullets — unchanged)
+  resources/
+    openapi.yaml               (unchanged — upstream reference; petstore_service's
+                                 actual trimmed spec is authored separately, §9 item 5)
+  linkml/
+    petstore_mappings.yaml
+  postman/
+    (pending §9 item 4)
+
+adapters/
+  petstore_service/            (matches every existing adapter's own layout)
+  pet_invoice_adapter/
+  petstore_db_adapter/
+  ach_adapter/
+  mock_moov_service/            (no jetcore dependency — no BusClient)
+```
+
+`infra/mysql/init.sql` gains the `pets`/`suppliers` tables + seed rows + two new MySQL users (mirroring `db_adapter_mysql`'s own write/read split). `infra/nats/adapter_identities.yaml` gains four new entries (+ `-test` twins, root Defects.md Defect 1's own established pattern) under a new "Petstore demo identities" section. `docker-compose.yml` gains five new services.
+
+## 9. Open Questions
+
+1. **Which supplier does a CSV row's pets come from?** The confirmed CSV shape (§3) has no `supplierId` column. Options: (a) add a `supplierId` column to the CSV (the cleanest fix, but changes the schema the user already gave), (b) infer supplier from `category` via `suppliers.pet_types_supplied` (works cleanly for the 3 seed suppliers in §3, each single-category, but ambiguous the moment two suppliers share a category), (c) a fixed single "default" supplier for the whole demo. Blocking for `pet_invoice_adapter`'s own build — needs an answer before Track A's invoice-ingestion step.
+2. **`petstore_db_adapter` as its own adapter vs. extending `db_adapter_mysql`** (§2 item 5) — this document chose "own adapter" for consistency with the existing one-table-per-adapter shape, but flagging since it's this document's own call, not confirmed directly.
+3. **Bus-mediated reads vs. a direct read connection on `petstore_service`** (§2 item 12) — likewise this document's own call. The bus-mediated version is slower per read (a full pub→consume→pub→consume round trip for something a direct `SELECT` would do in one hop) — acceptable for a demo proving the architecture, worth flagging if read latency ever becomes a real concern.
+4. **Postman collection format** — not yet answered: a real, committed `.postman_collection.json` with example requests for every endpoint built here (Pet + Supplier + mock Moov), or is documenting "import `openapi.yaml`/the trimmed spec into Postman directly" sufficient? Affects whether §7/§8's `Demo/postman/` directory is real work or unnecessary.
+5. **`petstore_service`'s own OpenAPI spec** — `resources/openapi.yaml` is the *upstream, full* reference spec (kept as-is as a citation, per the bullets' own "implements Petstore example swagger"). The actual trimmed surface this project builds (§2 item 2, plus the non-upstream `GET /suppliers` and the `description` field extension) needs its own spec document — hand-authored as a trimmed derivative, or generated from FastAPI's own OpenAPI export (FastAPI can serve `/openapi.json` directly from the route definitions, which would need reconciling against the bullets' own "update openAPI document" instruction)? Proposed default: hand-maintain a trimmed `Demo/resources/petstore_service.openapi.yaml`, since generating from FastAPI's own introspection risks silently drifting from what "the OpenAPI document" is supposed to mean as a design artifact, not just implementation output — flag if the reverse is preferred.
+6. **RTN/account number realism** — placeholder values only (§3), no checksum/format validation implemented. Confirm this is fine for demo purposes (almost certainly yes, given Decision #14's own precedent, but not separately asked).
+
+## 10. Implementation Plan
+
+Not yet broken into a lettered Track with checkboxes — deliberately held back pending resolution of §9 items 1 and 4 (both materially change what gets built: item 1 affects `pet_invoice_adapter`'s core logic, item 4 affects whether a whole `Demo/postman/` deliverable exists at all). Once those are answered, this section gets a full Track A breakdown mirroring the root document's own style (parameter table, lettered/numbered steps, an exit-criteria line) before any code is written — matching this project's own standing rule that a Track gets scoped in a Design document before a "proceed" instruction starts building it.
+
+---
+
+*This document is a living draft, same convention as the root [Design.md](../Design.md) — update it as these open questions resolve, rather than letting decisions drift into code undocumented.*
+I've drafted Demo/Design.md — the full scoping document, mirroring the root Design.md's structure (goals, decisions table, data model, adapter/subject breakdown, two mermaid workflow diagrams, LinkML scope, open questions). Rather than presenting a wall of text, here's what actually needs your attention — six open questions, but two are genuinely blocking before I can write the Track A build plan:
+
+AskUserQuestion
+OUT
+Your questions have been answered: "The confirmed CSV columns (invoiceId, category, quantity, description, unitPrice, photoUrl, name) have no supplierId. How should pet_invoice_adapter determine which supplier to pay for a given row?"="Add a supplierId column to the CSV (Recommended)", "Postman collection: a real .postman_collection.json committed to the repo with example requests for every endpoint (Pet + Supplier + mock Moov), or is documenting "import the OpenAPI spec into Postman" sufficient?"="Real committed collection (Recommended)". You can now continue with these answers in mind.
+Both resolved. Let me update the document and write the Track A build plan.
+
+Edit Design.md
+Modified
+Edit Design.md
+Added 7 lines
+Now let's update §9 to mark items 1 and 4 resolved, and rewrite §10 with the real Track A breakdown:
+
+Edit Design.md
+Added 27 lines
+Let me do a final consistency check — verify internal links and section references resolve correctly:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^## " Demo/Design.md
+echo "---links---"
+grep -oE '\[[^]]+\]\(([^)]+)\)' Demo/Design.md | sed -E 's/.*\(([^)]+)\)/\1/' | sort -u | while read -r link; do
+  path="${link%%#*}"
+  [ -z "$path" ] && continue
+  resolved="$(realpath -m "Demo/$path" 2>/dev/null)"
+  if [ ! -e "$resolved" ]; then
+    echo "BROKEN: $link -> $resolved"
+  fi
+done
+echo "check done"
+
+OUT
+11:## 1. Goals
+21:## 2. Scope Decisions
+39:## 3. Data Model
+93:## 4. New Adapters & Bus Subjects
+165:## 5. Mock Moov Service
+173:## 6. LinkML Mapping Scope
+183:## 7. Postman Collection
+194:## 8. Repository Layout (proposed)
+218:## 9. Open Questions
+228:## 10. Implementation Plan
+---links---
+check done
+All links resolve, section structure is clean and sequential. Demo/Design.md is complete and ready for review.
+
+Summary
+The full plan is in Demo/Design.md, scoped through two rounds of clarifying questions plus your free-text answers. Structure:
+
+§1-2: Goals and a 13-item Decisions table — everything confirmed with you is marked as such; two items (petstore_db_adapter as its own adapter, bus-mediated reads) are my own architecturally-consistent calls, clearly flagged as such rather than silently assumed.
+§3: Data model — pets/suppliers tables, the CSV row shape (now with supplierId), representative placeholder seed data (3 suppliers) since no real reference data exists.
+§4: Five new adapters (petstore_service, pet_invoice_adapter, petstore_db_adapter, ach_adapter, mock_moov_service), the full events.petstore.* subject table, and two mermaid sequence diagrams (the CSV→pet→payment flow, and a read-path example).
+§5-7: Mock Moov's one endpoint, LinkML's three-mapping scope, the real committed Postman collection.
+§9: Open questions — down to 5 non-blocking ones (adapter-boundary judgment calls, the OpenAPI-authoring question, RTN realism, malformed-row handling) — none of these block starting the build.
+§10: A full Track A breakdown, 12 steps (A1-A12), each with real verification named, a parameter table with defaults flagged for override, and an exit-criteria line — same shape as every phase in the root Design.md.
+This is purely additive — nothing in the existing 8-service stack changes. When you're ready, "Proceed with Track A" (or a subset — A1-A2 first if you'd rather see the schema/manifest land before the adapters themselves) will start the build the same way every other track in this project has.
+
+
+================= Petstore Demo Planning Complete =================
