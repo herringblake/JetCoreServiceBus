@@ -53,6 +53,7 @@ Subclass `jetcore.config.AdapterSettings` and add only what's new. Every field i
 from jetcore.config import AdapterSettings
 from pydantic import SecretStr
 
+
 class HttpAdapterSettings(AdapterSettings):
     target_base_url: str
     auth_token: SecretStr | None = None

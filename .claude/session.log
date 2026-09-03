@@ -35469,3 +35469,1258 @@ This is purely additive — nothing in the existing 8-service stack changes. Whe
 
 
 ================= Petstore Demo Planning Complete =================
+
+Hit some errors in the CI process. First, what is ruff finding wrong with this file? JetCoreServiceBus/adapter/BUILDING_AN_ADAPTER.md  Here's the error:
+
+unformatted: File would be reformatted
+  --> BUILDING_AN_ADAPTER.md:56:1
+   |
+55 |
+56 +
+57 | class HttpAdapterSettings(AdapterSettings):
+   |
+Show less
+Let me check this empirically rather than guess — first the repo's ruff config, then actually run it:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n -A 30 "\[tool.ruff\]" pyproject.toml
+
+OUT
+39:[tool.ruff]
+40-line-length = 100
+41-target-version = "py312"
+42-
+43-[tool.ruff.lint]
+44-select = ["E", "F", "I", "UP", "B"]
+45-
+46-# conftest.py's filename is fixed by pytest (unlike test_*.py support
+47-# modules, it can't be renamed to dodge a duplicate-module collision — see
+48-# adapters/file_storage_adapter/tests/conftest.py and the sibling
+49-# test_file_storage_adapter_scaffold.py/_file_storage_helpers.py findings,
+50-# Design.md §12 Step C1/C4). mypy hits the exact "Duplicate module named
+51-# conftest" error once a second package's tests/ directory exists,
+52-# confirmed by testing; pytest itself is unaffected (it loads each
+53-# conftest.py as a directory-scoped plugin, not via this collision-prone
+54-# bare-import path). Excluded here rather than restructured — mypy's own
+55-# suggested resolution for this — since conftest.py content is thin
+56-# fixture wiring already exercised by every test run, not unverified logic.
+57-[tool.mypy]
+58-python_version = "3.12"
+59-strict = true
+60-exclude = '(^|/)tests/conftest\.py$'
+61-warn_unused_ignores = true
+62-plugins = ["pydantic.mypy"]
+63-
+64-[tool.pytest.ini_options]
+65-# "tests" (root-level): cross-adapter integration tests (Design.md §12
+66-# Step E4) — no single package under libs/ or adapters/ is the right home
+67-# for a test that spans two of them.
+68-testpaths = ["libs", "adapters", "tests"]
+69-asyncio_mode = "auto"
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run ruff format --check adapters/BUILDING_AN_ADAPTER.md 2>&1
+echo "exit: $?"
+echo "--- ruff version ---"
+uv run ruff --version
+
+OUT
+unformatted: File would be reformatted
+  --> adapters/BUILDING_AN_ADAPTER.md:56:1
+   |
+55 |
+56 +
+57 | class HttpAdapterSettings(AdapterSettings):
+   |
+
+1 file would be reformatted
+exit: 1
+--- ruff version ---
+ruff 0.16.4
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run ruff format --diff adapters/BUILDING_AN_ADAPTER.md 2>&1
+
+OUT
+Exit code 1
+--- adapters/BUILDING_AN_ADAPTER.md
++++ adapters/BUILDING_AN_ADAPTER.md
+@@ -53,6 +53,7 @@
+ from jetcore.config import AdapterSettings
+ from pydantic import SecretStr
+ 
++
+ class HttpAdapterSettings(AdapterSettings):
+     target_base_url: str
+     auth_token: SecretStr | None = None
+
+1 file would be reformatted
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "HttpAdapterSettings" adapters/BUILDING_AN_ADAPTER.md
+
+OUT
+56:class HttpAdapterSettings(AdapterSettings):
+Read BUILDING_AN_ADAPTER.md (lines 51-60)
+What's actually happening
+Ruff 0.16.x formats fenced ```python code blocks embedded in Markdown files too, not just .py files — this is a real, on-by-default behavior (no config needed to trigger it), not something specific to this repo's setup. ruff format walks the whole tree including .md files, and any ```python fence gets normalized the same as real source.
+
+The specific rule it's applying is the standard PEP 8 / Black convention: two blank lines before a top-level class/def, not one. Your snippet at adapters/BUILDING_AN_ADAPTER.md:51-59 has only one:
+
+
+from pydantic import SecretStr
+
+class HttpAdapterSettings(AdapterSettings):   # only 1 blank line above — ruff wants 2
+I confirmed this by running ruff format --diff directly — it wants to insert exactly one more blank line, nothing else.
+
+Fix
+Edit BUILDING_AN_ADAPTER.md
+Added 1 line
+Let's confirm it's clean now, and check whether any other new files (the six adapter READMEs, Demo/Design.md) have the same issue since they also contain Python code fences:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run ruff format --check . 2>&1 | tail -30
+
+OUT
+124 files already formatted
+All clean now — that was the only offender. That's your CI fix; want me to check the other error(s) you hit too?
+
+====================  BUILDING_AN_ADAPTER.md Fixed =====================
+
+Please. This is the command run: `uv run --all-packages pytest` The branch is develop.  Here's the message from Github: 
+
+=========================== short test summary info ============================
+FAILED libs/jetcore/tests/test_registry.py::test_deregister_removes_from_lookup - AssertionError: assert [] == ['pub-a']
+  
+  Right contains one more item: 'pub-a'
+  
+  Full diff:
+  + []
+  - [
+  -     'pub-a',
+  - ]
+============ 1 failed, 241 passed, 144 warnings in 63.12s (0:01:03) ============
+Show less
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+sed -n '95,115p' libs/jetcore/tests/test_registry.py
+
+OUT
+    await registry.register(
+        subject=subject, service_id="svc-b", adapter_type="t", encryption_public_key="pub-b"
+    )
+
+    assert sorted(await registry.lookup_recipients(subject)) == ["pub-a", "pub-b"]
+
+
+async def test_deregister_removes_from_lookup(registry: RegistryClient, subject: str) -> None:
+    await registry.register(
+        subject=subject, service_id="svc-a", adapter_type="t", encryption_public_key="pub-a"
+    )
+    assert await registry.lookup_recipients(subject) == ["pub-a"]
+
+    await registry.deregister(subject=subject, service_id="svc-a")
+
+    assert await registry.lookup_recipients(subject) == []
+
+
+async def test_heartbeat_registers_repeatedly(registry: RegistryClient, subject: str) -> None:
+    """Doesn't wait out the real 60s bucket TTL (that mechanism was already
+    proven empirically in Step A5/A7) — just confirms the heartbeat task
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+.venv/bin/python3 -c "
+import inspect
+from nats.js.kv import KeyValue
+print(inspect.getsource(KeyValue.keys))
+"
+
+OUT
+    async def keys(self, filters: List[str] = None, **kwargs) -> List[str]:
+        """
+        Returns a list of the keys from a KeyValue store.
+        Optionally filters the keys based on the provided filter list.
+        """
+        watcher = await self.watchall(
+            ignore_deletes=True,
+            meta_only=True,
+        )
+        keys = []
+
+        # Check consumer info and make sure filters are applied correctly
+        try:
+            consumer_info = await watcher._sub.consumer_info()
+            if consumer_info and filters:
+                # If NATS server < 2.10, filters might be ignored.
+                if consumer_info.config.filter_subject != ">":
+                    logger.warning("Server may ignore filters if version is < 2.10.")
+        except Exception as e:
+            raise e
+
+        async for key in watcher:
+            # None entry is used to signal that there is no more info.
+            if not key:
+                break
+
+            # Apply filters if any were provided
+            if filters:
+                if any(f in key.key for f in filters):
+                    keys.append(key.key)
+            else:
+                # No filters provided, append all keys
+                keys.append(key.key)
+
+        await watcher.stop()
+
+        if not keys:
+            raise nats.js.errors.NoKeysError
+
+        return keys
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+.venv/bin/python3 -c "
+import inspect
+from nats.js.kv import KeyValue
+print(inspect.getsource(KeyValue.watchall))
+"
+
+OUT
+    async def watchall(self, **kwargs) -> KeyWatcher:
+        """
+        watchall returns a KeyValue watcher that matches all the keys.
+        """
+        return await self.watch(">", **kwargs)
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+.venv/bin/python3 -c "
+import inspect
+from nats.js.kv import KeyValue
+print(inspect.getsource(KeyValue.watch))
+"
+
+OUT
+    async def watch(
+        self,
+        keys,
+        headers_only=False,
+        include_history=False,
+        ignore_deletes=False,
+        meta_only=False,
+        inactive_threshold=None,
+    ) -> KeyWatcher:
+        """
+        watch will fire a callback when a key that matches the keys
+        pattern is updated.
+        The first update after starting the watch is None in case
+        there are no pending updates.
+        """
+        subject = f"{self._pre}{keys}"
+        watcher = KeyValue.KeyWatcher(self)
+        init_setup: asyncio.Future[bool] = asyncio.Future()
+
+        async def watch_updates(msg):
+            if not init_setup.done():
+                await asyncio.wait_for(init_setup, timeout=self._js._timeout)
+
+            meta = msg.metadata
+            op = None
+            if msg.header and KV_OP in msg.header:
+                op = msg.header.get(KV_OP)
+            elif msg.header and KV_MARKER_REASON in msg.header:
+                # nats-server 2.11+: server-placed TTL/age expiry markers use
+                # Nats-Marker-Reason instead of KV-Operation.
+                reason = msg.header.get(KV_MARKER_REASON)
+                if reason in ("MaxAge", "Purge"):
+                    op = KV_PURGE
+                elif reason == "Remove":
+                    op = KV_DEL
+                else:
+                    # Unknown future reason — skip silently rather than emitting
+                    # an entry with operation=None that callers can't distinguish
+                    # from a regular value update.
+                    if meta.num_pending == 0 and not watcher._init_done:
+                        await watcher._updates.put(None)
+                        watcher._init_done = True
+                    return
+
+            # keys() uses this
+            if ignore_deletes and op in (KV_PURGE, KV_DEL):
+                if meta.num_pending == 0 and not watcher._init_done:
+                    await watcher._updates.put(None)
+                    watcher._init_done = True
+                return
+
+            entry = KeyValue.Entry(
+                bucket=self._name,
+                key=msg.subject[len(self._pre) :],
+                value=msg.data,
+                revision=meta.sequence.stream,
+                delta=meta.num_pending,
+                created=meta.timestamp,
+                operation=op,
+            )
+            await watcher._updates.put(entry)
+
+            # When there are no more updates send an empty marker
+            # to signal that it is done, this will unblock iterators
+            if meta.num_pending == 0 and (not watcher._init_done):
+                await watcher._updates.put(None)
+                watcher._init_done = True
+
+        deliver_policy = None
+        if not include_history:
+            deliver_policy = api.DeliverPolicy.LAST_PER_SUBJECT
+
+        # Cleanup watchers after 5 minutes of inactivity by default.
+        if not inactive_threshold:
+            inactive_threshold = 5 * 60
+
+        watcher._sub = await self._js.subscribe(
+            subject,
+            stream=self._stream,
+            cb=watch_updates,
+            ordered_consumer=True,
+            deliver_policy=deliver_policy,
+            headers_only=meta_only,
+            inactive_threshold=inactive_threshold,
+        )
+        await asyncio.sleep(0)
+
+        # Check from consumer info what is the number of messages
+        # awaiting to be consumed to send the initial signal marker.
+        try:
+            cinfo = await watcher._sub.consumer_info()
+            watcher._pending = cinfo.num_pending
+
+            # If no delivered and/or pending messages, then signal
+            # that this is the start.
+            # The consumer subscription will start receiving messages
+            # so need to check those that have already made it.
+            received = watcher._sub.delivered
+            init_setup.set_result(True)
+            if cinfo.num_pending == 0 and received == 0:
+                await watcher._updates.put(None)
+                watcher._init_done = True
+        except Exception as err:
+            init_setup.cancel()
+            await watcher._sub.unsubscribe()
+            raise err
+
+        return watcher
+That first-position failure ([] == ['pub-a'], right after a successful register()) points at something more interesting than a flake — let me check the underlying client library mechanism before concluding anything:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+cat > /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_race.py <<'EOF'
+import asyncio
+import nats
+import uuid
+
+async def one_iteration(js, kv, i):
+    subject = f"events.test.RaceProbe{uuid.uuid4().hex[:8]}"
+    key = f"{subject}.svc-a"
+    await kv.put(key, b'{"encryptionPublicKey": "pub-a"}')
+    # Mirrors lookup_recipients(): a fresh keys()-based scan immediately after
+    try:
+        keys = await kv.keys(filters=[f"{subject}."])
+    except Exception as e:
+        keys = []
+    if key not in keys:
+        print(f"  MISS at iteration {i}: just-written key not seen (keys={keys})")
+        return False
+    return True
+
+async def main():
+    nc = await nats.connect("nats://localhost:4222", user_credentials="infra/nats/operator/creds/jetcore-admin.creds")
+    js = nc.jetstream()
+    kv = await js.key_value("service-directory")
+
+    misses = 0
+    n = 300
+    for i in range(n):
+        ok = await one_iteration(js, kv, i)
+        if not ok:
+            misses += 1
+
+    print(f"{misses}/{n} misses")
+    await nc.close()
+
+asyncio.run(main())
+EOF
+uv run python /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_race.py
+
+OUT
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+Server may ignore filters if version is < 2.10.
+0/300 misses
+Not reproduced with 300 sequential iterations locally. Let me try throttling the NATS container to simulate a slower/more constrained CI runner rather than guessing further:
+
+Bash
+IN
+docker update --cpus=0.1 jetcore-nats-1 2>&1
+docker stats --no-stream jetcore-nats-1 2>&1 | head -3
+
+OUT
+jetcore-nats-1
+CONTAINER ID   NAME             CPU %     MEM USAGE / LIMIT   MEM %     NET I/O           BLOCK I/O        PIDS
+e5d963b5dc14   jetcore-nats-1   6.43%     318MiB / 62.14GiB   0.50%     48.8GB / 6.38GB   4.1kB / 48.6GB   381
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run python /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_race.py 2>&1 | grep -v "Server may ignore"
+
+OUT
+  MISS at iteration 286: just-written key not seen (keys=[])
+1/300 misses
+Reproduced: 1/300 under throttled CPU (vs 0/300 unthrottled) — a real, load-dependent race, not imagined. Let me restore the container first, then dig into the exact mechanism to build a real fix:
+
+Bash
+IN
+docker update --cpus=0 jetcore-nats-1 2>&1
+docker stats --no-stream jetcore-nats-1 2>&1
+
+OUT
+jetcore-nats-1
+CONTAINER ID   NAME             CPU %     MEM USAGE / LIMIT     MEM %     NET I/O           BLOCK I/O        PIDS
+e5d963b5dc14   jetcore-nats-1   6.33%     330.4MiB / 62.14GiB   0.52%     48.8GB / 6.41GB   4.1kB / 48.6GB   381
+Read registry.py (lines 279-303)
+Read registry.py (lines 293-310)
+Edit registry.py
+Added 20 lines
+Now let's add the constants:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "_WATCH_POLL_TIMEOUT_SECONDS" libs/jetcore/jetcore/registry.py
+
+OUT
+102:_WATCH_POLL_TIMEOUT_SECONDS = 5.0
+368:                    timeout=_WATCH_POLL_TIMEOUT_SECONDS
+Read registry.py (lines 99-104)
+Edit registry.py
+Added 11 lines
+Now let's run checks and empirically verify the fix under the same throttled conditions that reproduced the bug:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run ruff check libs/jetcore/jetcore/registry.py
+uv run ruff format --check libs/jetcore/jetcore/registry.py
+uv run --all-packages mypy libs adapters tests 2>&1 | tail -15
+uv run bandit -q libs/jetcore/jetcore/registry.py
+
+OUT
+All checks passed!
+1 file already formatted
+Success: no issues found in 100 source files
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run --all-packages pytest libs/jetcore/tests/test_registry.py -q -k deregister 2>&1 | tail -10
+
+OUT
+..                                                                       [100%]
+2 passed, 13 deselected in 8.31s
+Now let's throttle the container again and stress-test the fix with a larger iteration count than the reproduction used:
+
+Bash
+IN
+docker update --cpus=0.1 jetcore-nats-1 2>&1
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+cat > /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_race_fixed.py <<'EOF'
+import asyncio, uuid
+from jetcore.registry import RegistryClient
+import nats
+
+async def main():
+    nc = await nats.connect("nats://localhost:4222", user_credentials="infra/nats/operator/creds/jetcore-admin.creds")
+    js = nc.jetstream()
+    registry = await RegistryClient.connect(js)
+
+    misses = 0
+    n = 600
+    for i in range(n):
+        subject = f"events.test.RaceFixedProbe{uuid.uuid4().hex[:8]}"
+        await registry.register(subject=subject, service_id="svc-a", adapter_type="t", encryption_public_key="pub-a")
+        recipients = await registry.lookup_recipients(subject)
+        if recipients != ["pub-a"]:
+            misses += 1
+            print(f"  MISS at {i}: {recipients}")
+
+    print(f"{misses}/{n} misses")
+    await nc.close()
+
+asyncio.run(main())
+EOF
+uv run python /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/scratchpad/probe_race_fixed.py 2>&1 | grep -v "Server may ignore"
+
+OUT
+jetcore-nats-1
+0/600 misses
+0/600 under the same throttling that previously produced a failure — double the sample size, zero misses. Let's restore the container and run the full suite:
+
+Bash
+IN
+docker update --cpus=0 jetcore-nats-1 2>&1
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+./test.sh -q 2>&1 | grep -E "passed|failed|error"
+
+OUT
+Command did not complete within its 180s timeout and was moved to the background (ID: b8phjazgu). Output is being written to: /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/b8phjazgu.output. You will be notified when it completes. To check interim output, use Read on that file path.
+Session cwd remains /home/bherring/dev/clodhopper/JetCoreServiceBus; directory changes made by the backgrounded command do not apply to subsequent commands.
+Bash
+IN
+sleep 60; cat /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/b8phjazgu.output 2>&1 | tail -20
+
+OUT
+<tool_use_error>Blocked: sleep 60 followed by: cat /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/b8phjazgu.output tail -20. To wait for a condition, use Monitor with an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use run_in_background: true. Do not chain shorter sleeps to work around this block.</tool_use_error>
+TaskOutput task: "b8phjazgu"
+OUT
+<retrieval_status>timeout</retrieval_status>
+
+<task_id>b8phjazgu</task_id>
+
+<task_type>local_bash</task_type>
+
+<status>running</status>
+
+<output>
+jetcore-nats-1
+</output>
+Bash
+IN
+docker stats --no-stream jetcore-nats-1 2>&1
+echo "---"
+docker compose ps --format "table {{.Name}}\t{{.Status}}"
+echo "---nats logs tail---"
+docker compose logs --tail=15 nats
+
+OUT
+CONTAINER ID   NAME             CPU %     MEM USAGE / LIMIT     MEM %     NET I/O           BLOCK I/O        PIDS
+e5d963b5dc14   jetcore-nats-1   0.63%     198.8MiB / 62.14GiB   0.31%     48.9GB / 6.45GB   4.1kB / 48.7GB   381
+---
+NAME              STATUS
+jetcore-mysql-1   Up 2 days
+jetcore-nats-1    Up 2 days
+---nats logs tail---
+nats-1  | [1] 2026/09/01 03:45:01.473533 [INF] 
+nats-1  | [1] 2026/09/01 03:45:01.473535 [INF] ---------------- JETSTREAM ----------------
+nats-1  | [1] 2026/09/01 03:45:01.473537 [INF]   Strict:          true
+nats-1  | [1] 2026/09/01 03:45:01.473543 [INF]   Max Memory:      244.14 MB
+nats-1  | [1] 2026/09/01 03:45:01.473545 [INF]   Max Storage:     1.86 GB
+nats-1  | [1] 2026/09/01 03:45:01.473547 [INF]   Store Directory: "/data/jetstream/jetstream"
+nats-1  | [1] 2026/09/01 03:45:01.473549 [INF]   API Level:       4
+nats-1  | [1] 2026/09/01 03:45:01.473552 [INF] -------------------------------------------
+nats-1  | [1] 2026/09/01 03:45:01.474280 [INF] Took 916.087µs to start JetStream
+nats-1  | [1] 2026/09/01 03:45:01.474458 [INF] Listening for client connections on 0.0.0.0:4222
+nats-1  | [1] 2026/09/01 03:45:01.474716 [INF] Server is ready
+nats-1  | [1] 2026/09/01 03:49:13.893241 [ERR] 172.18.0.10:41160 - cid:3006 - "v1.51.0:go:NATS CLI Version 0.4.0" - "ADQZ7YR4PHZNRZCTLJJSQI6SGS2BABONWAI7QYFMTVTDTSSQPNYWK7T2/JETCORE/jwt:UDPEOCAHYODXQA6WFELHO2JMDTGWBNUSLHIKB3QXP6X6WLV5VG5TD5L2" - Subscription Violation - Subject "events.db.orders.RowChanged", SID 1
+nats-1  | [1] 2026/09/01 19:43:19.845429 [ERR] 172.18.0.1:51556 - cid:8902 - "v2.15.0:python3" - "ADQZ7YR4PHZNRZCTLJJSQI6SGS2BABONWAI7QYFMTVTDTSSQPNYWK7T2/JETCORE/jwt:UDPEOCAHYODXQA6WFELHO2JMDTGWBNUSLHIKB3QXP6X6WLV5VG5TD5L2" - Publish Violation - Subject "events.orders.OrderCreated"
+nats-1  | [1] 2026/09/01 19:58:02.820587 [ERR] 172.18.0.1:43960 - cid:21270 - "v2.15.0:python3" - "ADQZ7YR4PHZNRZCTLJJSQI6SGS2BABONWAI7QYFMTVTDTSSQPNYWK7T2/JETCORE/jwt:UDPEOCAHYODXQA6WFELHO2JMDTGWBNUSLHIKB3QXP6X6WLV5VG5TD5L2" - Publish Violation - Subject "$KV.probe-ttl-bucket2.some-key"
+nats-1  | [1] 2026/09/03 03:29:26.191117 [WRN] Internal subscription on "$JS.API.STREAM.PURGE.EVENTS" took too long: 3.704901883s
+Bash
+IN
+docker compose ps -a --format "table {{.Name}}\t{{.Status}}"
+echo "---pytest processes---"
+ps aux | grep -i pytest | grep -v grep
+
+OUT
+NAME                             STATUS
+jetcore-db-adapter-mysql-1       Exited (0) 6 minutes ago
+jetcore-file-storage-adapter-1   Exited (0) 6 minutes ago
+jetcore-http-adapter-1           Exited (0) 6 minutes ago
+jetcore-mysql-1                  Up 2 days
+jetcore-nats-1                   Up 2 days
+jetcore-rest-api-service-1       Exited (0) 6 minutes ago
+jetcore-webhook-listener-1       Exited (0) 6 minutes ago
+jetcore-webhook-sender-1         Exited (0) 6 minutes ago
+---pytest processes---
+bherring 1800253  0.0  0.0 224440 36872 ?        Sl   20:35   0:00 uv run --all-packages pytest -q
+bherring 1800256  1.1  0.1 266504 97916 ?        Sl   20:35   0:01 /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/bin/python /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/bin/pytest -q
+That's expected — pytest is genuinely still running (not hung), the six adapters are correctly stopped mid-test.sh. This dev environment has accumulated a lot of leftover JetStream state from today's stress-testing, which is clearly slowing the server down for real (nats log shows "Internal subscription... took too long: 3.7s"). Let me keep waiting for it:
+
+TaskOutput task: "b8phjazgu"
+OUT
+<retrieval_status>timeout</retrieval_status>
+
+<task_id>b8phjazgu</task_id>
+
+<task_type>local_bash</task_type>
+
+<status>running</status>
+
+<output>
+jetcore-nats-1
+</output>
+Bash
+IN
+ps aux | grep -i pytest | grep -v grep
+echo "---"
+py-spy dump --pid 1800256 2>&1 | head -40 || echo "py-spy not available"
+echo "---docker stats---"
+docker stats --no-stream jetcore-nats-1 jetcore-mysql-1 2>&1
+
+OUT
+bherring 1800253  0.0  0.0 224440 36872 ?        Sl   20:35   0:00 uv run --all-packages pytest -q
+bherring 1800256  0.3  0.1 266504 97916 ?        Sl   20:35   0:01 /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/bin/python /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/bin/pytest -q
+---
+/bin/bash: line 7: py-spy: command not found
+---docker stats---
+CONTAINER ID   NAME              CPU %     MEM USAGE / LIMIT     MEM %     NET I/O           BLOCK I/O        PIDS
+e5d963b5dc14   jetcore-nats-1    0.57%     187.9MiB / 62.14GiB   0.30%     48.9GB / 6.45GB   4.1kB / 48.7GB   381
+2215c3c0e216   jetcore-mysql-1   0.99%     451MiB / 62.14GiB     0.71%     1.95GB / 16.6GB   64.7MB / 328MB   40
+That's not slow, that's stuck — near-zero CPU on the pytest process for 25+ minutes. Let me check whether this is the same JetStream-consumer-accumulation issue documented elsewhere in this project's own history, before killing anything:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+CREDS_DIR="$(pwd)/infra/nats/operator/creds"
+timeout 20 docker run --rm --network jetcore_default -v "$CREDS_DIR:/creds:ro" natsio/nats-box:0.19.7-nonroot \
+  nats --server nats://nats:4222 --creds /creds/jetcore-admin.creds \
+  stream info EVENTS --json 2>&1 | python3 -c "import json,sys; d=json.load(sys.stdin); print('consumer_count:', d['state'].get('consumer_count'))" 2>&1
+
+OUT
+consumer_count: 789
+789 consumers on EVENTS alone — this matches a documented pattern elsewhere in this project's own history (a prior "too many leftover JetStream consumers causing real server strain" episode). Let me stop the stuck run and do a clean infra rebuild, which also clears out today's own heavy probe/stress-test accumulation:
+
+TaskStop
+IN
+{
+  "task_id": "b8phjazgu"
+}
+OUT
+{"message":"Successfully stopped task: b8phjazgu (docker update --cpus=0 jetcore-nats-1 2>&1\ncd /home/bherring/dev/clodhopper/JetCoreServiceBus\n./test.sh -q 2>&1 | grep -E \"passed|failed|error\")","task_id":"b8phjazgu","task_type":"local_bash","command":"docker update --cpus=0 jetcore-nats-1 2>&1\ncd /home/bherring/dev/clodhopper/JetCoreServiceBus\n./test.sh -q 2>&1 | grep -E \"passed|failed|error\""}
+Bash
+IN
+docker compose ps -a --format "table {{.Name}}\t{{.Status}}"
+
+OUT
+NAME                             STATUS
+jetcore-db-adapter-mysql-1       Exited (0) 13 minutes ago
+jetcore-file-storage-adapter-1   Exited (0) 13 minutes ago
+jetcore-http-adapter-1           Exited (0) 13 minutes ago
+jetcore-mysql-1                  Up 2 days
+jetcore-nats-1                   Up 2 days
+jetcore-rest-api-service-1       Exited (0) 13 minutes ago
+jetcore-webhook-listener-1       Exited (0) 13 minutes ago
+jetcore-webhook-sender-1         Exited (0) 13 minutes ago
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+docker compose down -v 2>&1 | tail -15
+
+OUT
+ Container jetcore-file-storage-adapter-1 Removed 
+ Container jetcore-http-adapter-1 Removed 
+ Container jetcore-nats-1 Stopping 
+ Container jetcore-mysql-1 Stopped 
+ Container jetcore-mysql-1 Removing 
+ Container jetcore-mysql-1 Removed 
+ Container jetcore-nats-1 Stopped 
+ Container jetcore-nats-1 Removing 
+ Container jetcore-nats-1 Removed 
+ Volume jetcore_nats-data Removing 
+ Volume jetcore_mysql-data Removing 
+ Network jetcore_default Removing 
+ Volume jetcore_nats-data Removed 
+ Volume jetcore_mysql-data Removed 
+ Network jetcore_default Removed
+Now bringing everything back up fresh:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+bash infra/nats/up.sh 2>&1 | tail -15
+
+OUT
+       Limit Marker TTL: 1h0m0s
+     Backing Store Kind: JetStream
+            Bucket Size: 0 B
+    Maximum Bucket Size: unlimited
+     Maximum Value Size: unlimited
+            Maximum Age: unlimited
+       JetStream Stream: KV_service-identity
+                Storage: File
+
+Cluster Information:
+
+                   Name: 
+                 Leader: NCAG3ESSSRWQ3MDQPRZTTXUSFZBWIH45ENEIGYTJHDVPK4SGNSU77UZE
+Done. Next: Step A6 wires everything into docker-compose.
+Done — infra is up. Try: docker compose logs -f nats
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+docker compose up -d --build 2>&1 | tail -20
+
+OUT
+ Container jetcore-mysql-1 Created 
+ Container jetcore-db-adapter-mysql-1 Creating 
+ Container jetcore-webhook-listener-1 Created 
+ Container jetcore-rest-api-service-1 Created 
+ Container jetcore-http-adapter-1 Created 
+ Container jetcore-db-adapter-mysql-1 Created 
+ Container jetcore-webhook-listener-1 Starting 
+ Container jetcore-file-storage-adapter-1 Starting 
+ Container jetcore-mysql-1 Starting 
+ Container jetcore-rest-api-service-1 Starting 
+ Container jetcore-webhook-sender-1 Starting 
+ Container jetcore-http-adapter-1 Starting 
+ Container jetcore-file-storage-adapter-1 Started 
+ Container jetcore-rest-api-service-1 Started 
+ Container jetcore-mysql-1 Started 
+ Container jetcore-db-adapter-mysql-1 Starting 
+ Container jetcore-http-adapter-1 Started 
+ Container jetcore-webhook-sender-1 Started 
+ Container jetcore-webhook-listener-1 Started 
+ Container jetcore-db-adapter-mysql-1 Started
+Let's wait for MySQL readiness, then run the full test suite clean:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+for i in $(seq 1 30); do
+  if docker compose exec -T mysql mysql -uroot -pdev-only-change-me jetcore -e "SELECT 1 FROM orders LIMIT 1" >/dev/null 2>&1; then
+    echo "mysql ready"
+    break
+  fi
+  sleep 2
+done
+docker compose ps --format "table {{.Name}}\t{{.Status}}"
+
+OUT
+mysql ready
+NAME                             STATUS
+jetcore-db-adapter-mysql-1       Up 1 second
+jetcore-file-storage-adapter-1   Up 12 seconds
+jetcore-http-adapter-1           Up 12 seconds
+jetcore-mysql-1                  Up 12 seconds
+jetcore-nats-1                   Up 37 seconds
+jetcore-rest-api-service-1       Up 12 seconds
+jetcore-webhook-listener-1       Up 12 seconds
+jetcore-webhook-sender-1         Up 12 seconds
+Everything's up fresh. Now the full suite:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+./test.sh -q 2>&1 | tail -15
+
+OUT
+==> Restarting adapter containers...
+ Container jetcore-mysql-1 Running 
+ Container jetcore-nats-1 Running 
+ Container jetcore-db-adapter-mysql-1 Starting 
+ Container jetcore-rest-api-service-1 Starting 
+ Container jetcore-file-storage-adapter-1 Starting 
+ Container jetcore-webhook-listener-1 Starting 
+ Container jetcore-http-adapter-1 Starting 
+ Container jetcore-webhook-sender-1 Starting 
+ Container jetcore-db-adapter-mysql-1 Started 
+ Container jetcore-http-adapter-1 Started 
+ Container jetcore-webhook-sender-1 Started 
+ Container jetcore-webhook-listener-1 Started 
+ Container jetcore-file-storage-adapter-1 Started 
+ Container jetcore-rest-api-service-1 Started
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+./test.sh -q 2>&1 | grep -E "passed|failed|error"
+
+OUT
+Command did not complete within its 120s timeout and was moved to the background (ID: bw3c95r01). Output is being written to: /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bw3c95r01.output. You will be notified when it completes. To check interim output, use Read on that file path.
+Session cwd remains /home/bherring/dev/clodhopper/JetCoreServiceBus; directory changes made by the backgrounded command do not apply to subsequent commands.
+TaskOutput task: "bw3c95r01"
+OUT
+The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.
+
+Note: The user's next message may contain a correction or preference. Pay close attention — if they explain what went wrong or how they'd prefer you to work, consider saving that to memory for future sessions.
+Remote Control is active · Continue here, on your phone, or at claude.ai/code
+
+Remote Control disabled.
+
+sorry for the interuption, let's try that again.
+Bash
+IN
+cat /tmp/claude-1000/-home-bherring-dev-clodhopper-JetCoreServiceBus/288f16f0-5254-44be-857a-6b5ca1ccdb49/tasks/bw3c95r01.output 2>&1 | tail -30
+echo "---process check---"
+ps aux | grep -i pytest | grep -v grep
+echo "---docker state---"
+docker compose ps --format "table {{.Name}}\t{{.Status}}"
+
+OUT
+[killed]
+---process check---
+---docker state---
+NAME              STATUS
+jetcore-mysql-1   Up 9 minutes
+jetcore-nats-1    Up 10 minutes
+The second run got killed before finishing (likely a stray termination signal, not a real hang) — the adapter containers are stopped mid-test.sh again. Let me restore them and run the suite fresh one more time.
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+docker compose up -d file-storage-adapter webhook-listener webhook-sender http-adapter rest-api-service db-adapter-mysql 2>&1 | tail -10
+sleep 3
+docker compose ps --format "table {{.Name}}\t{{.Status}}"
+
+OUT
+ Container jetcore-http-adapter-1 Starting 
+ Container jetcore-rest-api-service-1 Starting 
+ Container jetcore-file-storage-adapter-1 Starting 
+ Container jetcore-db-adapter-mysql-1 Starting 
+ Container jetcore-http-adapter-1 Started 
+ Container jetcore-rest-api-service-1 Started 
+ Container jetcore-webhook-listener-1 Started 
+ Container jetcore-db-adapter-mysql-1 Started 
+ Container jetcore-file-storage-adapter-1 Started 
+ Container jetcore-webhook-sender-1 Started 
+NAME                             STATUS
+jetcore-db-adapter-mysql-1       Up 3 seconds
+jetcore-file-storage-adapter-1   Up 3 seconds
+jetcore-http-adapter-1           Up 3 seconds
+jetcore-mysql-1                  Up 9 minutes
+jetcore-nats-1                   Up 10 minutes
+jetcore-rest-api-service-1       Up 3 seconds
+jetcore-webhook-listener-1       Up 3 seconds
+jetcore-webhook-sender-1         Up 3 seconds
+Stack restored to normal running state. Now let's run the full suite cleanly, foregrounded with a generous timeout:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+./test.sh -q 2>&1 | tail -20
+
+OUT
+  /home/bherring/dev/clodhopper/JetCoreServiceBus/.venv/lib/python3.12/site-packages/pymysqlreplication/row_event.py:328: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    datetime.datetime.utcfromtimestamp(self.packet.read_int_be_by_size(4)),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+242 passed, 681 warnings in 61.59s (0:01:01)
+==> Restarting adapter containers...
+ Container jetcore-nats-1 Running 
+ Container jetcore-mysql-1 Running 
+ Container jetcore-webhook-listener-1 Starting 
+ Container jetcore-db-adapter-mysql-1 Starting 
+ Container jetcore-http-adapter-1 Starting 
+ Container jetcore-file-storage-adapter-1 Starting 
+ Container jetcore-rest-api-service-1 Starting 
+ Container jetcore-webhook-sender-1 Starting 
+ Container jetcore-rest-api-service-1 Started 
+ Container jetcore-webhook-sender-1 Started 
+ Container jetcore-http-adapter-1 Started 
+ Container jetcore-db-adapter-mysql-1 Started 
+ Container jetcore-file-storage-adapter-1 Started 
+ Container jetcore-webhook-listener-1 Started
+242/242 passing, back to a normal ~61s runtime — confirms the earlier stall really was the leftover-consumer accumulation, not anything wrong with the fix. Let's do the final sanity pass:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+uv run --all-packages pre-commit run --all-files 2>&1 | tail -10
+echo "---"
+docker compose ps --format "table {{.Name}}\t{{.Status}}"
+
+OUT
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+mypy.....................................................................Passed
+bandit...................................................................Passed
+---
+NAME                             STATUS
+jetcore-db-adapter-mysql-1       Up 8 seconds
+jetcore-file-storage-adapter-1   Up 8 seconds
+jetcore-http-adapter-1           Up 8 seconds
+jetcore-mysql-1                  Up 11 minutes
+jetcore-nats-1                   Up 11 minutes
+jetcore-rest-api-service-1       Up 8 seconds
+jetcore-webhook-listener-1       Up 8 seconds
+jetcore-webhook-sender-1         Up 8 seconds
+Let's check whether the leftover-JetStream-consumer issue is already documented anywhere before deciding where new findings go:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "leftover\|consumer_count\|accumulat" infra/nats/README.md Design.md 2>/dev/null | head -20
+
+OUT
+infra/nats/README.md:47:**Executed and verified end-to-end** against real Docker + `nsc` — 3 consecutive runs confirmed the script is genuinely idempotent (no duplicate permission entries accumulate on repeat `edit user` calls). Three real bugs only surfaced by running it, not by reading docs, all now fixed in the script:
+Design.md:590:  A second, compounding factor: by the time this was investigated, the shared dev NATS instance had accumulated **1223 leftover JetStream consumers** from this whole session's testing, and one failure's traceback showed a genuine `nats.js.errors.ServiceUnavailableError` from the JetStream API — real server-side strain, not just a client-side timing race. A full infra teardown/rebuild (`docker compose down -v`, wiped `infra/nats/operator/`, rebuilt via `up.sh`) was done alongside the `heartbeat()` fix; **17 consecutive full-suite runs passed cleanly afterward** (up from a baseline that failed roughly 1 in 5-8). Both changes are real and worth keeping regardless of which mattered more — the `heartbeat()` fix is a genuine correctness improvement on its own terms, not just a flakiness workaround, and periodic infra cleanup is good practice independent of this specific investigation.
+Design.md:669:  **A recurrence of the known Step E4 flaky pattern, not a new bug**: the closing full-suite stability run hit 1 failure in an initial batch of 3 (`pyrage.DecryptError: No matching keys found` in `file_storage_adapter/tests/test_entrypoint.py`, an unrelated test) — the exact symptom already documented at length in Step E4, caused primarily by accumulated JetStream consumer strain on the shared dev NATS instance (938 leftover consumers found this time, versus Step E4's 1223) rather than a logic regression. Fixed the same way: a full `docker compose down -v` + wiped `infra/nats/operator/` + rebuilt via `up.sh`. 5 consecutive clean runs followed (188 passed each), matching Step E4's own before/after pattern closely enough to treat this as confirmation of that finding, not a new investigation — periodic infra cleanup remains a real operational cost of this project's shared-dev-instance testing style, independent of any one track's code.
+Design.md:692:  **The known Step E4/H5 flaky pattern recurred at a higher rate than before, worth recording as a refinement, not a new investigation**: the closing stability run hit the same symptom (`pyrage.DecryptError`/`SignatureVerificationError` in an unrelated `file_storage_adapter` test) 3 times across 5 runs before a full infra rebuild, and — new this time — still 3 times across 7 runs *after* a fresh `docker compose down -v` rebuild, worse than Step H5's 1-in-3 (then 5-for-5 clean). Isolated reruns of the specific failing test file alone (`test_read_handler.py`) passed 3/3, confirming this is genuinely the same cross-test race, not a bug in that test or introduced by this track's own code. Since pytest runs this workspace's tests serially in one process (`file_storage_adapter`'s tests collect and run *before* `rest_api_service`'s, confirmed by directory ordering — no `pytest-xdist`, no parallelism), Track I's own tests cannot be the *direct* cause of a `file_storage_adapter` test failing within the same invocation. The more likely explanation: the suite grew from 188 to 203 tests (plus this track's own background reply-watcher task/heartbeat, active for the duration of several of its tests) — more total per-run heartbeat/consumer churn accelerates the *same* pre-existing accumulation race (Step E4's original diagnosis) across repeated invocations, even shortly after a rebuild resets the starting count. Not chased further within this track's scope — a full rebuild is a diminishing-return response to a growing-suite problem, and a deeper fix (e.g., a lower heartbeat interval, or NATS resource limits) is a separate, standalone investigation Design.md should track as still-open rather than something any one track is expected to close. `EVENTS` stream purged and infra left running clean either way.
+Design.md:777:- [x] **L6. Fresh-clone verification** — the same spirit as Phase 1's own completion checkpoint (§11: a full teardown/rebuild from nothing), applied to the whole project this time: a genuine `git clone` of the `develop` branch into an isolated directory, then `uv sync --all-packages` → `infra/nats/up.sh` → `docker compose up -d --build` (all 6 adapter images built fresh from the clone's own Dockerfiles) → a real MySQL-readiness wait → `./test.sh -q` → the rest of README's checks, with nothing carried over from the main checkout. Required briefly stopping the main checkout's own stack first (`docker-compose.yml` hardcodes the Compose project name, so a second concurrent stack under the same name would collide) — done with the user's explicit go-ahead, restored to a freshly-rebuilt, fully healthy state afterward. **230/230 passing from genuinely nothing** (fresh `.venv`, fresh images, fresh NATS/MySQL, zero reliance on this long-lived dev environment's own accumulated state) — the clone reflected everything through the last commit at the time, so it also correctly (and expectedly) reproduced L5's then-still-uncommitted bandit-exclude gap, one more confirmation that finding was real. Main checkout restored and re-verified afterward: `./test.sh -q` → 235 passed (230 + L4's 5 new schema tests), `pre-commit run --all-files` clean.
+Design.md:788:§10's original Phase 5 scope was "Finalize `docker-compose.yml` as the complete local demo environment." Checking that against what's actually true today, the way §14 did for Phase 4: `docker-compose.yml` itself is **already** a complete, working local environment — all 6 adapters plus `nats`/`mysql`, built across Steps E1 (Phase 2) and K2 (Phase 3), and just proven from a genuinely fresh clone in Step L6 (230/230 passing, zero reliance on this dev environment's own accumulated state). There is no missing service, no missing wiring, no unfinished container. Phase 5 is **not** "keep building the compose file" — that work is done.
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "consumer.*strain\|resource limit\|heartbeat interval\|ephemeral consumer" Design.md | grep -v "^590:\|^669:\|^692:"
+
+OUT
+201:**Decision:** Registry entries use JetStream KV's native per-key TTL. Each adapter refreshes its own entry on a heartbeat interval (shorter than the TTL); if the adapter stops heartbeating, its entry expires and it silently drops out of the recipient list for new messages — no manual deregistration step needed for the common "adapter died" case. Explicit deregistration via the `tools/` CLI remains available for deliberate decommissioning.
+588:  **A genuine, harder-to-pin-down flake surfaced while stabilizing this test** — not a bug in E4's own code, but in `jetcore` itself, only exposed once two independently-connecting real adapters using the *same* fixed `serviceId`s were driven hard, back-to-back, across a long test session. Symptom: intermittent (~1-in-5-to-8 full-suite runs) `pyrage.DecryptError`/`SignatureVerificationError` failures in otherwise-unrelated tests. Root cause, confirmed by reading `RegistryClient.heartbeat()`'s implementation, not guessed: it returned a background `Task` whose *very first* recipient-registration write fired asynchronously inside the task, not before `subscribe()` returned to its caller — meaning a test that `subscribe()`s and `close()`s in quick succession could have `close()`'s `task.cancel()` land while that first write was still in flight. Cancelling a task can't retract bytes already sent to the server — the write would land anyway, at an indeterminate later moment, occasionally *after* a completely different, later test's `_clean_state` fixture had already purged and re-registered under the same `serviceId`, silently corrupting it with stale data. Fixed by making `heartbeat()` `async` and awaiting that first registration directly, before the background loop (for later, periodic re-registrations) even starts — closing the window for every test in this suite, all of which run far under the 20s heartbeat interval where the *original* design would still have been safe.
+Now let's document this properly. First, Defects.md:
+
+Read Defects.md (lines 2-15)
+Edit Defects.md
+Added 1 line
+Now the full entry:
+
+Edit Defects.md
+Added 36 lines
+Now let's close the loop in Design.md — L2's own "unverified until pushed" caveat now has a real answer:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "Real limit on how far this step's own verification can go" Design.md
+
+OUT
+772:  **Real limit on how far this step's own verification can go, stated plainly rather than glossed over**: every command inside the workflow was run for real in this session (`uv sync --all-packages --locked`, `ruff check .`, `ruff format --check .`, `mypy`, `bandit`, `pip-audit`, the MySQL-readiness loop against a real container) and all passed — but a GitHub Actions *runner* itself was never available to this sandboxed session, so the workflow file's own YAML structure, triggers, and job wiring are locally sanity-checked (parsed, every embedded command proven to work) rather than "Executed and verified" the way every other track's own code has been throughout this project. That gap closes the first time this gets pushed and a real run either passes or doesn't — genuinely outside this session's own reach, not a shortcut taken.
+Edit Design.md
+Added 2 lines
+Let's verify the cross-links resolve and do final checks:
+
+Bash
+IN
+cd /home/bherring/dev/clodhopper/JetCoreServiceBus
+grep -n "^## Defect 6" Defects.md
+grep -c "defect-6-registryclient" Defects.md Design.md
+echo "---final checks---"
+uv run --all-packages pre-commit run --all-files 2>&1 | tail -10
+
+OUT
+269:## Defect 6: `RegistryClient.lookup_recipients()` Races Against nats-py's Own Consumer-Creation Snapshot
+Defects.md:1
+Design.md:1
+---final checks---
+ruff check...............................................................Passed
+ruff format..............................................................Passed
+mypy.....................................................................Passed
+bandit...................................................................Passed
+All clean. Here's what happened with the CI run:
+
+Two separate, unrelated bugs — both real, both fixed
+1. ruff format on BUILDING_AN_ADAPTER.md (the one you originally asked about) — already fixed and confirmed clean.
+
+2. A genuine race in nats-py's KV client, surfaced by CI's own load — this one was more interesting. test_deregister_removes_from_lookup failed with [] == ['pub-a'] right after a successful register(). I traced it into nats-py's KeyValue.keys(): it creates a fresh ephemeral consumer per call and takes one snapshot of "how many messages are pending" right after creating it — if that snapshot lands before the server's own per-subject index has caught up to an already-acknowledged write, it wrongly concludes "nothing here," with no re-check.
+
+I confirmed this wasn't theoretical: 300 register→lookup pairs against the real bucket, 0 misses unthrottled, then 1/300 misses with the NATS container artificially CPU-throttled to simulate a busier CI runner — reproducing the exact failure shape. Fixed with a short bounded retry (3 attempts, 50ms apart) in RegistryClient.lookup_recipients(); verified with 600 more throttled iterations at 0 misses. Full writeup: Defects.md Defect 6.
+
+One deliberate non-fix, stated plainly: RecipientCache (what every real publish() actually uses) is built on the same underlying mechanism and carries the same theoretical exposure — but it's a long-lived watch that self-heals on the next real update (worst case, a 20s heartbeat), unlike the one-shot lookup_recipients() this bug was in. Left as-is, flagged as a real residual risk, not silently declared safe.
+
+A compounding wrinkle found mid-investigation: my own local ./test.sh run stalled for 25+ minutes — not caused by the fix, but the same "leftover JetStream consumer accumulation" issue already documented multiple times earlier in this project's own history (789 consumers this time). Resolved the established way (docker compose down -v + rebuild); confirmed the very next run back to a normal ~61s, 242/242 passing.
+
+Design.md §14's own "unverified until pushed" caveat on L2 is now updated with the real result — a real CI run, on real infrastructure, catching two real bugs neither of which had shown up in this sandbox's local testing. Everything's committed to your working tree (not git — that's still yours), stack is healthy, ready for you to push whenever you'd like.
+
+================= Defect 6 Fixed =====================

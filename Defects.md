@@ -2,7 +2,7 @@
 
 Companion to [Design.md](Design.md) — tracks real, confirmed defects found while building this project: what's broken, how it was diagnosed, and the recommended (or applied) fix. Distinct from [Design.md §9](Design.md#9-open-questions-summary)'s "Open Questions," which are deliberate, deferred *design* choices, not bugs — a defect here may reference an §9 item (or vice versa) when the two are related, but they're tracked separately: §9 is "not decided yet, on purpose," this document is "decided, and it's wrong, here's the fix."
 
-**Status: 5 fixed, 0 open.** See the management instructions at the bottom for how entries get added, updated, and closed. Running the test suite locally should always go through [test.sh](test.sh) (`./test.sh` in place of `uv run --all-packages pytest`) — see Defect 3.
+**Status: 6 fixed, 0 open.** See the management instructions at the bottom for how entries get added, updated, and closed. Running the test suite locally should always go through [test.sh](test.sh) (`./test.sh` in place of `uv run --all-packages pytest`) — see Defect 3.
 
 | # | Name | Status | Severity | Found |
 |---|---|---|---|---|
@@ -11,6 +11,7 @@ Companion to [Design.md](Design.md) — tracks real, confirmed defects found whi
 | 3 | [Real Adapters React to Shared-Subject Test Traffic](#defect-3-real-adapters-react-to-shared-subject-test-traffic) | Fixed — Verified | Medium (8 real pytest failures per run, a regression from Defects 1/2 fully working) | Found immediately after applying Defect 2's fix |
 | 4 | [`bootstrap_auth.sh` Idempotency Check Races Against Its Own Pipeline](#defect-4-bootstrap_authsh-idempotency-check-races-against-its-own-pipeline) | Fixed — Verified | Medium (script aborts, or hangs, on a genuinely idempotent rerun — blocks local dev and would intermittently break CI's own `infra/nats/up.sh` step, Design.md §14 Step L2) | Design.md §15 Step M3, a fresh-teardown `docker compose down -v` rebuild |
 | 5 | [Un-acked Test Message Masked by the Old Flat AckWait](#defect-5-un-acked-test-message-masked-by-the-old-flat-ackwait) | Fixed — Verified | Low (a single test's own false-negative risk, pre-existing but latent — never actually flaked before, since nothing had reduced AckWait below the test's own observation window until now) | Design.md §16 Step N1, immediately after implementing the real per-attempt backoff delay |
+| 6 | [`RegistryClient.lookup_recipients()` Races Against nats-py's Own Consumer-Creation Snapshot](#defect-6-registryclientlookup_recipients-races-against-nats-pys-own-consumer-creation-snapshot) | Fixed — Verified | Medium (a real, GitHub Actions CI failure on `develop` — the first real push-triggered CI run since Design.md §14 Step L2, per that step's own stated "unverified until pushed" caveat) | The user's first real CI run; root cause reproduced directly by artificially loading the NATS server |
 
 ---
 
@@ -262,6 +263,42 @@ Added the missing `await first[0].ack()` immediately after `first`'s assertions,
 ### Scope
 
 Fixes this one test's own gap. Does not change anything about `ReceivedEvent.nak()`'s new behavior (Design.md §16 Step N1) or suggest other tests need auditing beyond the search already done above.
+
+---
+
+## Defect 6: `RegistryClient.lookup_recipients()` Races Against nats-py's Own Consumer-Creation Snapshot
+
+**Status:** Fixed — Verified. See "Applied fix" and "Verification" below.
+**Severity:** Medium. First real GitHub Actions CI failure on `develop` — [Design.md §14 Step L2](Design.md#14-phase-4--detailed-breakdown) explicitly flagged "a real CI run either passes or doesn't" as the one thing outside this session's own reach; this is that gap closing for real, with a genuine bug on the other side of it, not a clean pass.
+**Found:** the user reported a GitHub Actions failure — `libs/jetcore/tests/test_registry.py::test_deregister_removes_from_lookup`, `assert [] == ['pub-a']` — right after `register()` had already been awaited and returned successfully.
+
+### Symptom
+
+`RegistryClient.register()` (a `KeyValue.put()`) completes normally, but an immediately-following `RegistryClient.lookup_recipients()` (built on `KeyValue.keys()`) sometimes returns empty — as if the write had never happened, even though it genuinely had.
+
+### Root cause
+
+Not this project's own code — a real race in `nats-py`'s `KeyValue.keys()`/`KeyValue.watch()` (confirmed by reading the installed library's source, not assumed). Every `keys()` call creates a brand-new ephemeral ordered consumer (`deliver_policy=LAST_PER_SUBJECT`) and, right after creating it, queries `consumer_info()` once: if that single snapshot reports `num_pending == 0`, `watch()` immediately signals "caught up, nothing here" — with no re-check. That snapshot can be taken *before* the server's own internal per-subject index has caught up to a write that had already been fully acknowledged to the client moments earlier — the raw message is durably in the stream, but the consumer's own "what's pending for this key" view of it isn't there yet. Under a fast, idle server this window is vanishingly small; under real load (the exact condition a shared CI runner is more likely to produce than a quiet local dev machine) it becomes reliably hittable.
+
+### Evidence
+
+Reproduced directly, not inferred: a tight loop of register-then-`lookup_recipients()` pairs against the real bucket, 300 iterations, **0 misses** against an unthrottled `nats` container. The identical loop against the same container CPU-throttled to `0.1` cores (`docker update --cpus=0.1`, simulating a slower/more contended runner) — **1/300 misses**, reproducing the exact `[] != ['pub-a']` shape of the real CI failure. Confirms the mechanism is genuinely load-dependent, not a fluke.
+
+### Applied fix
+
+`RegistryClient.lookup_recipients()` (`libs/jetcore/jetcore/registry.py`) now retries the `NoKeysError` case (the only path `keys()` takes when its result is empty) up to `_LOOKUP_RETRY_ATTEMPTS` (3) times, 50ms apart, before concluding the subject genuinely has no registered recipients. Deliberately not a fix to `RecipientCache` (the hot path every real `publish()` call actually uses) — that mechanism is built on the same underlying `watch()` machinery and carries the same theoretical exposure, but is structurally different in consequence: it's a long-lived watch that keeps listening after `start()` returns, so even a mis-timed initial snapshot self-heals on the next real KV update (worst case, the affected recipient's own next 20s heartbeat) — unlike `lookup_recipients()`'s one-shot nature, where whatever it returns is final with no follow-up. `RegistryClient.watch()`/`RecipientCache` are left as-is; this is a real, acknowledged residual risk, not silently declared safe — see [Design.md §9](Design.md#9-open-questions-summary) if it's ever worth hardening further.
+
+### Verification
+
+Same reproduction methodology, with the fix in place, throttled the same way: **0/600 misses** (double the sample size of the failing run, same artificial load). The originally-reported test (`test_deregister_removes_from_lookup`) passes repeatedly on its own. Full suite via `./test.sh -q`: **242/242**, clean, from a genuinely fresh `docker compose down -v` rebuild (done as part of this same investigation — see "A compounding factor" below). `ruff`/`mypy`/`bandit` all clean on the changed file.
+
+### A compounding factor, found and resolved in the same investigation, not a separate defect
+
+While investigating, a full local `./test.sh` run stalled for 25+ minutes with near-zero CPU on the pytest process — not a hang caused by this fix, but the same **leftover-JetStream-consumer accumulation** already documented at length elsewhere in this project's own history (Design.md §12 Step E4, §13 Steps H5/I7 — "1223 leftover JetStream consumers," "938 leftover consumers," real `ServiceUnavailableError`s, periodic full-rebuild as the established remedy). Confirmed directly this time too: `EVENTS` stream `consumer_count` was 789 at the point of the stall (this session's own heavy Track N + Defect 6 probing on top of the pre-existing backlog). Resolved the same established way — `docker compose down -v` + `infra/nats/up.sh` + `docker compose up -d --build` — after which the very next full-suite run completed in its normal ~60s. Not chased further as its own fix here (Step I7's own writeup already correctly scoped a deeper remedy — e.g. tuning `inactive_threshold`, or a periodic cleanup job — as a separate, standalone investigation, not something any one defect/track should absorb).
+
+### Scope
+
+Fixes `lookup_recipients()`'s own one-shot exposure. Does not change `RecipientCache`'s behavior (deliberately, see "Applied fix" above) and does not address the separate, already-tracked leftover-consumer accumulation issue beyond the same periodic-rebuild remedy this project has used consistently since Step E4.
 
 ---
 

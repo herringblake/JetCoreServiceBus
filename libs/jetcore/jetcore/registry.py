@@ -101,6 +101,17 @@ DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 20.0
 
 _WATCH_POLL_TIMEOUT_SECONDS = 5.0
 
+# Defects.md Defect 6 — nats-py's KeyValue.keys() can report "nothing
+# here" from a stale consumer_info() snapshot taken right as its
+# ephemeral watch consumer is created, before the server's own
+# per-subject index has caught up to an already-committed write. 3
+# attempts / 50ms apart is deliberately generous relative to the
+# confirmed real failure rate (1/300 under artificial CPU throttling,
+# 0/300 unthrottled) — cheap insurance for a call already documented as
+# "one-shot," not a hot path.
+_LOOKUP_RETRY_ATTEMPTS = 3
+_LOOKUP_RETRY_DELAY_SECONDS = 0.05
+
 
 def _registration_value(*, service_id: str, adapter_type: str, encryption_public_key: str) -> bytes:
     """The value shape from Design.md §4.5: {serviceId, adapterType,
@@ -292,12 +303,32 @@ class RegistryClient:
     async def lookup_recipients(self, subject: str) -> list[str]:
         """One-shot lookup of current recipient public keys for
         `subject`. Prefer `RecipientCache` for a publisher that looks this
-        up repeatedly."""
+        up repeatedly.
+
+        Retries a genuinely-empty result up to `_LOOKUP_RETRY_ATTEMPTS`
+        times (Defects.md Defect 6) — a real, confirmed race in nats-py's
+        `KeyValue.keys()`/`watch()`: the ephemeral ordered consumer it
+        creates per call decides "nothing here" from a `consumer_info()`
+        snapshot taken right at consumer-creation time, with no re-check.
+        Under server-side load, that snapshot can be taken before the
+        server's own per-subject index has caught up to a write that
+        already-completed moments earlier (confirmed by reproducing it
+        directly: 0/300 misses against an unthrottled server, 1/300
+        against the same server CPU-throttled) — a since-committed write
+        this method should genuinely see. Unlike `RecipientCache` (a
+        long-lived watch that self-heals on the next real KV update — the
+        next 20s heartbeat, worst case), this one-shot call has no such
+        follow-up: whatever it returns here is final, so retrying the
+        empty case is the only way to close the gap for this method."""
         prefix = f"{subject}."
-        try:
-            keys = await self._kv.keys(filters=[prefix])
-        except NoKeysError:
-            return []
+        for attempt in range(_LOOKUP_RETRY_ATTEMPTS):
+            try:
+                keys = await self._kv.keys(filters=[prefix])
+                break
+            except NoKeysError:
+                if attempt == _LOOKUP_RETRY_ATTEMPTS - 1:
+                    return []
+                await asyncio.sleep(_LOOKUP_RETRY_DELAY_SECONDS)
 
         recipients = []
         for key in keys:
