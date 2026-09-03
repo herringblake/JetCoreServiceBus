@@ -36724,3 +36724,7 @@ A compounding wrinkle found mid-investigation: my own local ./test.sh run stalle
 Design.md §14's own "unverified until pushed" caveat on L2 is now updated with the real result — a real CI run, on real infrastructure, catching two real bugs neither of which had shown up in this sandbox's local testing. Everything's committed to your working tree (not git — that's still yours), stack is healthy, ready for you to push whenever you'd like.
 
 ================= Defect 6 Fixed =====================
+
+v0.1.1 - Stability Fixes
+
+~~~~~~~~~~~~~~~~~ Version Bump ~~~~~~~~~~~~~~~~~
