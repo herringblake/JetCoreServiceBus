@@ -75,11 +75,42 @@ logger = logging.getLogger(__name__)
 BUCKET_NAME = "service-directory"
 IDENTITY_BUCKET_NAME = "service-identity"
 
+# Design.md §16 Step N3 (§9 item #11) — how long a fresh identity
+# registration stays valid before it's eligible to age out on its own, if
+# the adapter never reconnects again. Refreshed automatically on every
+# real `register_identity()` call (every BusClient.connect()), so a
+# live, periodically-restarting adapter never actually reaches this;
+# it only matters for a genuinely decommissioned one.
+IDENTITY_TTL_SECONDS = 90 * 24 * 60 * 60  # 90 days
+
+# The standard NATS KV wire-subject convention ($KV.<bucket>.<key>) — a
+# stable, public part of the KV protocol, not a nats-py implementation
+# detail. Used directly here because `KeyValue.put()` doesn't support a
+# per-message TTL at all (its own docstring: "This method does not
+# support TTL. Use create() if you need TTL support" — confirmed by
+# reading nats-py's source, not just the docstring) and `KeyValue.create()`
+# has the wrong semantics for this call site (put-if-absent, would raise
+# on every re-registration instead of the intended "register or refresh"
+# behavior register_identity() already documents). `js.publish()` with an
+# explicit `msg_ttl` and no "expected last sequence" header is what
+# `put()` itself does internally, minus the TTL restriction.
+
 # Design.md §11 parameter table: TTL 60s, heartbeat well under that (3x
 # safety margin) so a couple of missed beats don't drop registration.
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 20.0
 
 _WATCH_POLL_TIMEOUT_SECONDS = 5.0
+
+# Defects.md Defect 6 — nats-py's KeyValue.keys() can report "nothing
+# here" from a stale consumer_info() snapshot taken right as its
+# ephemeral watch consumer is created, before the server's own
+# per-subject index has caught up to an already-committed write. 3
+# attempts / 50ms apart is deliberately generous relative to the
+# confirmed real failure rate (1/300 under artificial CPU throttling,
+# 0/300 unthrottled) — cheap insurance for a call already documented as
+# "one-shot," not a hot path.
+_LOOKUP_RETRY_ATTEMPTS = 3
+_LOOKUP_RETRY_DELAY_SECONDS = 0.05
 
 
 def _registration_value(*, service_id: str, adapter_type: str, encryption_public_key: str) -> bytes:
@@ -122,15 +153,19 @@ class RegistryClient:
     call, which is exactly what Design.md §4.5 says NOT to do per publish.
     """
 
-    def __init__(self, kv: KeyValue, identity_kv: KeyValue) -> None:
+    def __init__(self, kv: KeyValue, identity_kv: KeyValue, js: JetStreamContext) -> None:
         self._kv = kv
         self._identity_kv = identity_kv
+        # Held directly (not just via kv/identity_kv) for register_identity()'s
+        # own js.publish(..., msg_ttl=...) call — see IDENTITY_TTL_SECONDS'
+        # own comment for why that can't go through KeyValue.put()/create().
+        self._js = js
 
     @classmethod
     async def connect(cls, js: JetStreamContext) -> RegistryClient:
         kv = await js.key_value(BUCKET_NAME)
         identity_kv = await js.key_value(IDENTITY_BUCKET_NAME)
-        return cls(kv, identity_kv)
+        return cls(kv, identity_kv, js)
 
     async def register(
         self, *, subject: str, service_id: str, adapter_type: str, encryption_public_key: str
@@ -158,16 +193,23 @@ class RegistryClient:
     ) -> None:
         """Registers this adapter's own signing public key in the
         service-identity directory — call once, at connect time (not on a
-        heartbeat; see the module docstring for why no TTL is involved
-        here). Every adapter does this, publisher or subscriber, since a
-        recipient needs to be able to look up *any* claimed sender's key."""
-        await self._identity_kv.put(
-            service_id,
+        repeating heartbeat; see the module docstring for why). Every
+        adapter does this, publisher or subscriber, since a recipient
+        needs to be able to look up *any* claimed sender's key.
+
+        Carries a long, set-once per-key TTL (IDENTITY_TTL_SECONDS,
+        Design.md §16 Step N3) — refreshed every time this is called
+        (i.e. every real connect), so a live adapter's own entry never
+        actually approaches expiry; only a genuinely decommissioned one
+        (never reconnects again) eventually ages out on its own."""
+        await self._js.publish(
+            f"$KV.{IDENTITY_BUCKET_NAME}.{service_id}",
             _identity_value(
                 service_id=service_id,
                 adapter_type=adapter_type,
                 signing_public_key=signing_public_key,
             ),
+            msg_ttl=IDENTITY_TTL_SECONDS,
         )
 
     async def lookup_signing_key(self, service_id: str) -> str | None:
@@ -261,12 +303,32 @@ class RegistryClient:
     async def lookup_recipients(self, subject: str) -> list[str]:
         """One-shot lookup of current recipient public keys for
         `subject`. Prefer `RecipientCache` for a publisher that looks this
-        up repeatedly."""
+        up repeatedly.
+
+        Retries a genuinely-empty result up to `_LOOKUP_RETRY_ATTEMPTS`
+        times (Defects.md Defect 6) — a real, confirmed race in nats-py's
+        `KeyValue.keys()`/`watch()`: the ephemeral ordered consumer it
+        creates per call decides "nothing here" from a `consumer_info()`
+        snapshot taken right at consumer-creation time, with no re-check.
+        Under server-side load, that snapshot can be taken before the
+        server's own per-subject index has caught up to a write that
+        already-completed moments earlier (confirmed by reproducing it
+        directly: 0/300 misses against an unthrottled server, 1/300
+        against the same server CPU-throttled) — a since-committed write
+        this method should genuinely see. Unlike `RecipientCache` (a
+        long-lived watch that self-heals on the next real KV update — the
+        next 20s heartbeat, worst case), this one-shot call has no such
+        follow-up: whatever it returns here is final, so retrying the
+        empty case is the only way to close the gap for this method."""
         prefix = f"{subject}."
-        try:
-            keys = await self._kv.keys(filters=[prefix])
-        except NoKeysError:
-            return []
+        for attempt in range(_LOOKUP_RETRY_ATTEMPTS):
+            try:
+                keys = await self._kv.keys(filters=[prefix])
+                break
+            except NoKeysError:
+                if attempt == _LOOKUP_RETRY_ATTEMPTS - 1:
+                    return []
+                await asyncio.sleep(_LOOKUP_RETRY_DELAY_SECONDS)
 
         recipients = []
         for key in keys:

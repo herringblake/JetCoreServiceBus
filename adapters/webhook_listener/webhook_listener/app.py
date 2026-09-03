@@ -82,8 +82,20 @@ def create_app(
         body = await request.body()
         payload = json.dumps({"path": path, "content": base64.b64encode(body).decode()}).encode()
 
+        # Design.md §16 Step N2 (§9 item #10) — optional, additive: absent
+        # for a caller that doesn't send it (today's plain at-least-once
+        # behavior, unchanged). Read directly off request.headers, matching
+        # this handler's own X-Webhook-Secret idiom above, rather than a
+        # FastAPI Header() parameter.
+        idempotency_key = request.headers.get("Idempotency-Key")
+
         client: BusClient = request.app.state.bus_client
-        await client.publish(WRITE_REQUESTED_SUBJECT, payload, event_type="FileWriteRequested")
+        await client.publish(
+            WRITE_REQUESTED_SUBJECT,
+            payload,
+            event_type="FileWriteRequested",
+            msg_id=idempotency_key,
+        )
 
         return Response(status_code=202)
 

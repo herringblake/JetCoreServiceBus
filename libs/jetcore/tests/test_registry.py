@@ -17,7 +17,7 @@ from collections.abc import AsyncGenerator
 
 import nats
 import pytest
-from jetcore.registry import RecipientCache, RegistryClient
+from jetcore.registry import IDENTITY_TTL_SECONDS, RecipientCache, RegistryClient
 from nats.js import JetStreamContext
 
 CREDS_PATH = "infra/nats/operator/creds/jetcore-admin.creds"
@@ -47,9 +47,10 @@ def subject() -> str:
 @pytest.fixture
 def service_id() -> str:
     """A fresh, never-used-before service id per test — for the
-    service-identity tests, which key entries by service id alone (no TTL,
-    so unlike `subject` above, isolation matters for the whole test run,
-    not just concurrent tests)."""
+    service-identity tests, which key entries by service id alone (a long,
+    90-day per-key TTL, Design.md §16 Step N3 — not the 60s bucket-wide TTL
+    `subject` above relies on, so unlike that fixture, isolation matters
+    for the whole test run, not just concurrent tests)."""
     return f"test-service-{uuid.uuid4().hex[:8]}"
 
 
@@ -246,8 +247,11 @@ async def test_register_identity_overwrites_previous_key(
     registry: RegistryClient, service_id: str
 ) -> None:
     """Re-registering (e.g. on every BusClient.connect()) replaces the
-    previous key rather than accumulating history — matches the bucket's
-    history=1 config."""
+    previous key as far as lookup_signing_key() (a plain KeyValue.get(),
+    always the latest revision) is concerned — independent of the
+    bucket's own history depth (5, Design.md §16 Step N4), which affects
+    what `nats kv history` can show after the fact, not what a normal
+    lookup returns."""
     await registry.register_identity(
         service_id=service_id, adapter_type="test-adapter", signing_public_key="old-key"
     )
@@ -256,3 +260,21 @@ async def test_register_identity_overwrites_previous_key(
     )
 
     assert await registry.lookup_signing_key(service_id) == "new-key"
+
+
+async def test_register_identity_sets_the_configured_ttl(
+    jetstream: JetStreamContext, registry: RegistryClient, service_id: str
+) -> None:
+    """Design.md §16 Step N3 (§9 item #11) — a real, direct proof the
+    write actually carries a per-key TTL, not just that register/lookup
+    round-trips (the test above already covers that). Reads the raw
+    stream message's own Nats-TTL header rather than trusting the field
+    exists in registry.py's own code."""
+    await registry.register_identity(
+        service_id=service_id, adapter_type="test-adapter", signing_public_key="pub-a"
+    )
+
+    msg = await jetstream.get_last_msg("KV_service-identity", f"$KV.service-identity.{service_id}")
+
+    assert msg.headers is not None
+    assert msg.headers["Nats-TTL"] == str(IDENTITY_TTL_SECONDS)
