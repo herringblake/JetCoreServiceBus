@@ -2,6 +2,10 @@
 
 A NATS JetStream-based service bus with public-key-encrypted payloads. See [Design.md](Design.md) for the full architecture and decision log, [Design_Notes.md](Design_Notes.md) for the original design brief, and [Dependencies.md](Dependencies.md) for the dependency ledger. This README covers day-to-day dev environment setup.
 
+## Whats all this about?
+
+[Overview of how Claude is being utilized for this project.](./WhatsThisAllAboutAnyway.md)
+
 ## Prerequisites
 
 - **Docker** (with your user in the `docker` group — see [infra/nats/README.md](infra/nats/README.md) if `docker ps` gives a permission error). Everything NATS-related (server, `nsc`, `nats` CLI, `yq`) runs containerized — no native install of any of that.
