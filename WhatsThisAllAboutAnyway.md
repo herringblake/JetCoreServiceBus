@@ -26,7 +26,7 @@ I've used Claude (and is some cases Gemini) to research several technologies to 
 
 ### Message Queing
 
-Originally this project was called "GregorsServiceBus" but after some research, it was clear that Kafka has some limitation that made it less desirable. After some back and forth, I settled upon a messaging service called NATS Jetstream. (Hence the namechange to Jetcore.) Jetstream is written in Go instead of Java, so it compiles to machine code, not bytecode. It also doesn't have the issues with message sequencing that Kafka has when running parallel streams.
+Originally this project was called "GregorsServiceBus" but after some research, it was clear that Kafka has some limitation that made it less desirable. After some back and forth, I settled upon a messaging service called NATS Jetstream. (Hence the namechange to Jetcore.) Jetstream is written in Go instead of Java, so it compiles to machine code, not bytecode. 
 
 ### Programming Languages
 
